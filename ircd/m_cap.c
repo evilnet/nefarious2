@@ -62,13 +62,14 @@
 #define CAP_BATCH_MAX 64
 
 /** Maximum length of aggregated CAP string */
-#define CAP_BATCH_BUFSIZE 1024
 
 /** Pending CAP change entry */
 struct cap_batch_entry {
   char capname[64];    /**< CAP name (e.g., "draft/multiline") */
   char value[256];     /**< Optional value (e.g., "max-bytes=4096") */
   int available;       /**< 1 for NEW, 0 for DEL */
+  int value_only;      /**< A NEW that changes only the value of a
+                        *   capability clients already have */
 };
 
 /** CAP notify batch state */
@@ -107,7 +108,8 @@ void cap_notify_begin_batch(void)
 /** Add a CAP change to the batch buffer.
  * @return 1 if buffered, 0 if buffer full (should send immediately)
  */
-static int cap_batch_add(const char *capname, int available, const char *value)
+static int cap_batch_add(const char *capname, int available, const char *value,
+                         int value_only)
 {
   struct cap_batch_entry *entry;
   int i;
@@ -115,9 +117,12 @@ static int cap_batch_add(const char *capname, int available, const char *value)
   if (!cap_batch.active || cap_batch.count >= CAP_BATCH_MAX)
     return 0;
 
-  /* Check if we already have an entry for this cap - update it */
+  /* Check if we already have an entry for this cap - update it: a value
+   * change stays one only if every change batched for it was. */
   for (i = 0; i < cap_batch.count; i++) {
     if (!strcmp(cap_batch.entries[i].capname, capname)) {
+      cap_batch.entries[i].value_only = cap_batch.entries[i].value_only
+                                        && value_only;
       cap_batch.entries[i].available = available;
       if (value && *value)
         ircd_strncpy(cap_batch.entries[i].value, value, sizeof(cap_batch.entries[i].value) - 1);
@@ -132,6 +137,7 @@ static int cap_batch_add(const char *capname, int available, const char *value)
   ircd_strncpy(entry->capname, capname, sizeof(entry->capname) - 1);
   entry->capname[sizeof(entry->capname) - 1] = '\0';
   entry->available = available;
+  entry->value_only = available && value_only;
   if (value && *value)
     ircd_strncpy(entry->value, value, sizeof(entry->value) - 1);
   else
@@ -152,36 +158,61 @@ cap_notify_v302(struct Client *cptr)
   return cli_capab_version(cptr) >= 302;
 }
 
-/** Build the space-separated list of batched changes for one CAP line.
- * @param[out] buf    Where to write it (empty if nothing applies).
- * @param[in] buflen  Size of \a buf.
+/** The longest list one CAP NEW/DEL line carries: with "CAP <nick> NEW :"
+ * and the CRLF the line stays well under 512 bytes. */
+#define CAP_LINE_LIST 400
+
+/** Send the batched changes of one kind to \a to, as many CAP lines as
+ * they need, each under 512 bytes and never splitting a name or value
+ * (to NULL: log them instead).
+ * @param[in] to        Local client, or NULL to log.
  * @param[in] available 1 for the NEW list, 0 for the DEL list.
- * @param[in] values  Add "=value" where a capability has one.
- * @param[in] sts     Include the sts capability. */
+ * @param[in] v302      A CAP 302 client: values and sts.  Others get bare
+ *                      names, no sts, and no NEW that only changes a
+ *                      value (it would tell them nothing). */
 static void
-cap_batch_line(char *buf, size_t buflen, int available, int values, int sts)
+cap_batch_send(struct Client *to, int available, int v302)
 {
+  char buf[CAP_LINE_LIST + 1], item[sizeof(cap_batch.entries[0].capname)
+                                    + sizeof(cap_batch.entries[0].value) + 1];
   int len = 0, i;
 
-  buf[0] = '\0';
-  for (i = 0; i < cap_batch.count; i++) {
-    struct cap_batch_entry *entry = &cap_batch.entries[i];
+  for (i = 0; i <= cap_batch.count; i++) {
+    int n = 0;
 
-    if (!entry->available != !available)
-      continue;
-    if (!sts && !strcmp(entry->capname, "sts"))
-      continue;
-    if (len > 0 && len < (int)buflen - 1) {
-      buf[len++] = ' ';
-      buf[len] = '\0';
+    if (i < cap_batch.count) {
+      struct cap_batch_entry *entry = &cap_batch.entries[i];
+
+      if (!entry->available != !available)
+        continue;
+      if (!v302 && (!strcmp(entry->capname, "sts") || entry->value_only))
+        continue;
+      if (v302 && entry->value[0])
+        ircd_snprintf(0, item, sizeof(item), "%s=%s", entry->capname,
+                      entry->value);
+      else
+        ircd_strncpy(item, entry->capname, sizeof(item));
+      n = strlen(item);
     }
-    if (len >= (int)buflen - 1)
+    /* Flush before an item that does not fit, and at the end. */
+    if (len && (i == cap_batch.count || len + 1 + n > CAP_LINE_LIST)) {
+      if (to)
+        sendrawto_one(to, "CAP %s %s :%s", cli_name(to),
+                      available ? "NEW" : "DEL", buf);
+      else
+        log_write(LS_SYSTEM, L_INFO, 0, "CAP notify: %s %s",
+                  available ? "NEW" : "DEL", buf);
+      len = 0;
+    }
+    if (i == cap_batch.count)
       break;
-    if (values && entry->value[0])
-      len += ircd_snprintf(0, buf + len, buflen - len, "%s=%s",
-                           entry->capname, entry->value);
-    else
-      len += ircd_snprintf(0, buf + len, buflen - len, "%s", entry->capname);
+    if (n > CAP_LINE_LIST)
+      n = CAP_LINE_LIST;      /* one item longer than a line: cut it */
+    if (len)
+      buf[len++] = ' ';
+    memcpy(buf + len, item, n);
+    len += n;
+    buf[len] = '\0';
   }
 }
 
@@ -192,8 +223,6 @@ cap_batch_line(char *buf, size_t buflen, int available, int values, int sts)
 void cap_notify_flush(void)
 {
   struct Client *cptr;
-  char new_buf[CAP_BATCH_BUFSIZE], new_old[CAP_BATCH_BUFSIZE];
-  char del_buf[CAP_BATCH_BUFSIZE], del_old[CAP_BATCH_BUFSIZE];
 
   if (!cap_batch.active) {
     cap_batch.count = 0;
@@ -205,14 +234,8 @@ void cap_notify_flush(void)
   if (cap_batch.count == 0)
     return;
 
-  /* Build aggregated NEW and DEL strings: one set for CAP 302 clients,
-   * with values and sts, and one for older ones, with neither. */
-  cap_batch_line(new_buf, sizeof(new_buf), 1, 1, 1);
-  cap_batch_line(del_buf, sizeof(del_buf), 0, 1, 1);
-  cap_batch_line(new_old, sizeof(new_old), 1, 0, 0);
-  cap_batch_line(del_old, sizeof(del_old), 0, 0, 0);
-
-  /* Send to all clients with cap-notify */
+  /* Send to all clients with cap-notify: CAP 302 clients with values and
+   * sts, older ones with neither (cap_batch_send()). */
   for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
     int v302;
 
@@ -222,19 +245,13 @@ void cap_notify_flush(void)
       continue;
 
     v302 = cap_notify_v302(cptr);
-    if ((v302 ? new_buf : new_old)[0])
-      sendrawto_one(cptr, "CAP %s NEW :%s", cli_name(cptr),
-                    v302 ? new_buf : new_old);
-    if ((v302 ? del_buf : del_old)[0])
-      sendrawto_one(cptr, "CAP %s DEL :%s", cli_name(cptr),
-                    v302 ? del_buf : del_old);
+    cap_batch_send(cptr, 1, v302);
+    cap_batch_send(cptr, 0, v302);
   }
 
   /* Log the aggregated changes */
-  if (new_buf[0])
-    log_write(LS_SYSTEM, L_INFO, 0, "CAP notify: NEW %s", new_buf);
-  if (del_buf[0])
-    log_write(LS_SYSTEM, L_INFO, 0, "CAP notify: DEL %s", del_buf);
+  cap_batch_send(NULL, 1, 1);
+  cap_batch_send(NULL, 0, 1);
 
   cap_batch.count = 0;
 }
@@ -317,13 +334,14 @@ sasl_server_available(void)
  * @param[in] available 1 if capability is now available, 0 if removed.
  * @param[in] value Optional value for CAP NEW (e.g., mechanism list). NULL for no value.
  */
-void send_cap_notify(const char *capname, int available, const char *value)
+static void cap_notify_send(const char *capname, int available,
+                            const char *value, int value_only)
 {
   struct Client *cptr;
 
   /* If batching is active, buffer instead of sending immediately */
   if (cap_batch.active) {
-    if (cap_batch_add(capname, available, value))
+    if (cap_batch_add(capname, available, value, value_only))
       return;
     /* Buffer full - fall through to send immediately */
   }
@@ -336,6 +354,9 @@ void send_cap_notify(const char *capname, int available, const char *value)
       continue;
     /* sts and values are CAP 302's (see cap_notify_v302()). */
     if (!cap_notify_v302(cptr) && !strcmp(capname, "sts"))
+      continue;
+    /* A new value of a capability it has tells a pre-302 client nothing. */
+    if (!cap_notify_v302(cptr) && value_only)
       continue;
 
     if (available) {
@@ -350,6 +371,17 @@ void send_cap_notify(const char *capname, int available, const char *value)
       sendrawto_one(cptr, "CAP %s DEL :%s", cli_name(cptr), capname);
     }
   }
+}
+
+void send_cap_notify(const char *capname, int available, const char *value)
+{
+  cap_notify_send(capname, available, value, 0);
+}
+
+/** See include/capab.h. */
+void send_cap_value_notify(const char *capname, const char *value)
+{
+  cap_notify_send(capname, 1, value, 1);
 }
 
 

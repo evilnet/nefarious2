@@ -178,6 +178,10 @@ extern const char *cap_sasl_mechanisms(void);
 
 /* IRCv3 cap-notify: send CAP NEW/DEL notifications to clients */
 extern void send_cap_notify(const char *capname, int available, const char *value);
+/* A CAP NEW for a capability whose value changed while it stayed on
+ * (MULTILINE_MAX_LINES, CHATHISTORY_MAX, ...): CAP 302 clients get the new
+ * value; older ones, which see no values, get nothing. */
+extern void send_cap_value_notify(const char *capname, const char *value);
 
 /* Overwrite a capability's advertised CAP 302 value at runtime (the value is
  * copied).  NULL/"" advertises the capability with no value. */
