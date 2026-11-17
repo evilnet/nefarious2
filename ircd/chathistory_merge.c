@@ -1473,3 +1473,69 @@ int hm_targets_cut_partial(const struct hm_targets_resp *resp, int n,
   }
   return 0;
 }
+
+static int hm_row_qcmp(const void *a, const void *b)
+{
+  return hm_row_cmp(*(struct HistoryMessage *const *)a,
+                    *(struct HistoryMessage *const *)b);
+}
+
+struct HistoryMessage *hm_keep_newest(struct HistoryMessage *list, int limit)
+{
+  struct HistoryMessage *m, **all, *out = NULL;
+  int total = 0, k, keep;
+
+  for (m = list; m; m = m->next)
+    total++;
+  if (total == 0)
+    return NULL;
+  all = (struct HistoryMessage **)MyMalloc(total * sizeof(*all));
+  for (k = 0, m = list; m; m = m->next)
+    all[k++] = m;
+  if (total > 1)
+    qsort(all, total, sizeof(*all), hm_row_qcmp);
+  keep = limit < 0 ? 0 : (total < limit ? total : limit);
+  for (k = total - 1; k >= 0; k--) {
+    all[k]->next = NULL;
+    if (k < total - keep) {
+      history_free_messages(all[k]);
+      continue;
+    }
+    all[k]->next = out;
+    out = all[k];
+  }
+  MyFree(all);
+  return out;
+}
+
+void hm_search_agg_init(struct hm_search_agg *a, int limit)
+{
+  a->limit = limit;
+  a->pending = 1;
+  a->rows = NULL;
+}
+
+void hm_search_agg_start(struct hm_search_agg *a)
+{
+  a->pending++;
+}
+
+int hm_search_agg_finish(struct hm_search_agg *a, struct HistoryMessage *rows,
+                         struct HistoryMessage **out)
+{
+  struct HistoryMessage *tail;
+
+  *out = NULL;
+  /* Trimmed as they come, so what is held stays bounded by the limit. */
+  if (rows) {
+    for (tail = rows; tail->next; tail = tail->next)
+      ;
+    tail->next = a->rows;
+    a->rows = hm_keep_newest(rows, a->limit);
+  }
+  if (--a->pending > 0)
+    return 0;
+  *out = a->rows;
+  a->rows = NULL;
+  return 1;
+}
