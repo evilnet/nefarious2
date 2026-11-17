@@ -7791,6 +7791,7 @@ struct SearchMatch {
   const char *text;         /**< substring to match, or NULL */
   int64_t after_ms;         /**< stop below this (0 = no floor) */
   const char *target;       /**< the walk's store key (search_walk sets it) */
+  struct HistoryView *view; /**< the walk's view, or NULL (search_walk sets it) */
   int redact_unread;        /**< matches dropped: their redaction lookup failed */
 };
 
@@ -7801,10 +7802,19 @@ struct SearchMatch {
  * noted at search_row_hook).  A lookup error (-1) answers yes -- fail
  * closed: a message this server cannot prove unredacted is not shown --
  * and counts in @a *unread so the caller can say so once rather than per
- * row. */
-static int search_hides(const char *target, const char *msgid, int *unread)
+ * row.
+ *
+ * A walk through a view (the responder's scan, struct SearchJob) passes
+ * it: the row came from the store as it was, and the redaction is looked
+ * up there as well as in the store as it is now
+ * (history_message_is_redacted_view).  The store as it is now alone is
+ * not enough: a trim between the view and the walk deletes a redacted
+ * message with its REDACT row and their link, the view still returns the
+ * message, and nothing left says it was redacted. */
+static int search_hides(struct HistoryView *view, const char *target,
+                        const char *msgid, int *unread)
 {
-  int r = history_message_is_redacted(target, msgid);
+  int r = history_message_is_redacted_view(view, target, msgid);
 
   if (r == 0)
     return 0;
@@ -7859,7 +7869,7 @@ static int search_row_hook(const struct HistoryMessage *msg, int reverse,
    * page shares one across its rows.  Every row checked is a scanned row,
    * so the scan budget (SEARCH_SCAN_MAX) bounds how many checks a walk
    * makes -- not what one check costs. */
-  if (search_hides(sm->target, msg->msgid, &sm->redact_unread))
+  if (search_hides(sm->view, sm->target, msg->msgid, &sm->redact_unread))
     return 0;
 
   return 1;
@@ -7934,6 +7944,7 @@ static int search_walk(const char *lookup_target, const char *before_unix,
   sm->presence_fn = base && base->fn ? base->fn : NULL;
   sm->presence_ctx = base && base->fn ? base->ctx : NULL;
   sm->target = lookup_target;
+  sm->view = base ? base->view : NULL;
   sm->redact_unread = 0;
   filter.fn = search_row_hook;
   filter.ctx = sm;
@@ -8019,8 +8030,10 @@ static int search_one_target(struct Client *sptr, const char *lookup_target,
  * it would have returned had it run right there -- a row stored, or a
  * PART that closes the requester's presence, while the job waited its
  * turn changes nothing -- with one exception on the safe side: a match's
- * redaction is looked up when the scan reaches it, so a REDACT that came
- * in the meantime still hides its message.  The worker reads the job and
+ * redaction is looked up in the view and again in the store as it is when
+ * the scan reaches it (search_hides), so a REDACT that came in the
+ * meantime still hides its message, and so does a redaction a trim has
+ * deleted, with the message, in the meantime.  The worker reads the job and
  * the store and nothing else (search_walk).  search_job_done() sends the
  * answer from the main thread: the rows, then E with T when the budget
  * cut the scan short, or E 0 U when the store could not be read -- the
@@ -8063,6 +8076,7 @@ static void search_job_run(struct StoreJob *job)
   history_view_close(sj->view);
   sj->view = NULL;
   sj->base.view = NULL;
+  sj->sm.view = NULL;
 }
 
 /** A job that will not run gives its view back (main thread). */
@@ -8090,6 +8104,14 @@ static void search_job_done(struct StoreJob *job, int ran)
 
   if (ran)
     search_log_unread(sj->target, &sj->sm);
+  /* The worker's log lines and the backend's error text are dropped
+   * (log_thread_mute), so this is the one line a failed read leaves. */
+  if (ran && sj->count < 0)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "SEARCH %s: the scan %s asked for (request %s) could not "
+              "read the store",
+              sj->target, origin ? cli_name(origin) : "a server that has left",
+              sj->reqid);
   Debug((DEBUG_DEBUG, "CH Q S: %s %s -> %d row(s), truncated %d, budget left %d%s%s",
          sj->target, sj->reqid, sj->count, sj->truncated, sj->budget_left,
          ran ? "" : ", never ran", origin ? "" : ", no one to answer"));
@@ -8192,7 +8214,7 @@ static struct HistoryMessage *search_fed_rows(struct FedRequest *req)
     int unread = 0;
     while (*pp) {
       struct HistoryMessage *cur = *pp;
-      if (search_hides(req->target, cur->msgid, &unread)) {
+      if (search_hides(NULL, req->target, cur->msgid, &unread)) {
         *pp = cur->next;
         cur->next = NULL;
         history_free_messages(cur);

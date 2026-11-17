@@ -8,6 +8,9 @@
  *
  *  - a walk through a view (history_view_open) returns the store as it
  *    was when the view was opened, whatever was stored since;
+ *  - a match stays hidden when it was redacted in the view or is redacted
+ *    now: a REDACT stored after the view hides it, and so does a
+ *    redaction a trim has since deleted with its message;
  *  - a walk on a worker returns exactly the rows the same walk returned on
  *    the main thread at that moment, while the main thread keeps storing
  *    rows, redacting and moving its clock;
@@ -83,12 +86,10 @@ void log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
   main_only();
 }
 
-/* The pool's own workers say "started" and "exiting" through Debug(),
- * unmuted, as they did before any store job: not this suite's subject. */
 void debug(int level, const char *form, ...)
 {
-  (void)level;
-  if (log_thread_muted() || 0 == strncmp(form, "thread_pool:", 12))
+  (void)level; (void)form;
+  if (log_thread_muted())
     return;
   main_only();
 }
@@ -99,11 +100,16 @@ time_t CurrentTime;
 time_t TSoffset;
 struct Channel *GlobalChannelList;
 
+/** CHATHISTORY_RETENTION, in days; 0 keeps everything (the rows here are
+ * stamped 2023, so 1 puts all of them past retention). */
+static int retention_days;
+
 int feature_int(enum Feature feat)
 {
   main_only();
   switch (feat) {
   case FEAT_HISTORY_MAP_SIZE_MB: return 64;
+  case FEAT_CHATHISTORY_RETENTION: return retention_days;
   default: return 0;
   }
 }
@@ -255,6 +261,7 @@ static void redact_row(int i)
 
 struct Match {
   const char *text;
+  struct HistoryView *view; /**< the walk's view, or NULL */
   int slow_us;              /**< sleep per row examined (the shutdown case) */
   int rows_seen;
 };
@@ -275,7 +282,7 @@ static int match_hook(const struct HistoryMessage *msg, int reverse, void *ctx,
     return 0;
   if (!strstr(msg->content, m->text))
     return 0;
-  if (history_message_is_redacted(TARGET, msg->msgid) != 0)
+  if (history_message_is_redacted_view(m->view, TARGET, msg->msgid) != 0)
     return 0;
   return 1;
 }
@@ -291,6 +298,7 @@ static void walk_init(struct Walk *w, struct HistoryView *view, int scan_max)
 {
   memset(w, 0, sizeof(*w));
   w->match.text = "needle";
+  w->match.view = view;
   w->filter.fn = match_hook;
   w->filter.ctx = &w->match;
   w->filter.scan_max = scan_max;
@@ -416,6 +424,7 @@ static int case_setup(void **state)
   started_walks = 0;
   open_views = 0;
   next_row = 0;
+  retention_days = 0;
   snprintf(store_dir, sizeof store_dir, "%s/histviewXXXXXX",
            tmp && *tmp ? tmp : "/tmp");
   assert_non_null(mkdtemp(store_dir));
@@ -482,6 +491,50 @@ static void a_view_walk_reads_the_store_as_it_was(void **state)
   history_free_messages(at_view.rows);
   history_free_messages(later.rows);
   history_free_messages(now.rows);
+}
+
+/** A trim that runs after the view was opened deletes a redacted message
+ * together with its REDACT row and the reply-index entry that links them
+ * (history_trim.c, delete_redacted_parent).  The view still holds the
+ * message; the store as it is now no longer says it was redacted.  A walk
+ * that asked only the store as it is now returned the message.  The
+ * lookup a view walk uses (history_message_is_redacted_view) asks the
+ * view too, and the message stays hidden. */
+static void a_trimmed_redaction_still_hides_in_the_view(void **state)
+{
+  struct HistoryView *view;
+  struct Walk before, after;
+  const struct HistoryMessage *m;
+  int i;
+
+  (void)state;
+  store_rows(30);                          /* needles 0,3,..,27 */
+  redact_row(27);
+  view = view_open();
+  walk_init(&before, view, 0);
+  walk_run(&before, 50);
+  assert_int_equal(before.count, 9);
+  for (m = before.rows; m; m = m->next)
+    assert_string_not_equal(m->msgid, "row0000027");
+
+  retention_days = 1;
+  history_trim_start();
+  for (i = 0; i < 10; i++)
+    history_trim_tick(i == 0);
+  retention_days = 0;
+  /* The trim took the redaction with the row: the store as it is now
+   * does not know row 27, redacted or not. */
+  assert_int_equal(history_message_is_redacted(TARGET, "row0000027"), 0);
+  assert_int_equal(history_message_is_redacted_view(view, TARGET, "row0000027"), 1);
+  assert_int_equal(history_message_is_redacted_view(view, TARGET, "row0000024"), 0);
+
+  walk_init(&after, view, 0);
+  walk_run(&after, 50);
+  assert_same_rows(&after, &before);       /* row 27 still hidden */
+
+  view_close(view);
+  history_free_messages(before.rows);
+  history_free_messages(after.rows);
 }
 
 /** The walk a worker runs returns what the main thread's walk returned
@@ -587,6 +640,8 @@ int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test_setup_teardown(a_view_walk_reads_the_store_as_it_was,
+                                    case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(a_trimmed_redaction_still_hides_in_the_view,
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(a_worker_walk_returns_what_the_main_thread_walk_did,
                                     case_setup, case_teardown),

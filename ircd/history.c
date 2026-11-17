@@ -5072,6 +5072,24 @@ void history_view_close(struct HistoryView *view)
   MyFree(view);
 }
 
+int history_message_is_redacted_view(struct HistoryView *view,
+                                     const char *target, const char *msgid)
+{
+  int then, now;
+
+  if (!view)
+    return history_message_is_redacted(target, msgid);
+  if (!history_available || !target || !msgid || !*msgid)
+    return -1;
+  then = message_is_redacted_in(view->snap, target, msgid, 0);
+  if (then == 1)
+    return 1;
+  now = history_message_is_redacted(target, msgid);
+  if (now == 1)
+    return 1;
+  return (then < 0 || now < 0) ? -1 : 0;
+}
+
 /** One page's redaction lookups (W5 Task 15 fix round 1): one snapshot. */
 struct HistoryRedactLookup {
   struct db_snapshot *snap;
