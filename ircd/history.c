@@ -62,6 +62,7 @@
 #include "numeric.h"
 #include "s_debug.h"
 #include "s_stats.h"
+#include "store_job.h"
 #include "send.h"
 #include "struct.h"
 
@@ -132,6 +133,11 @@ static const char *const history_deletion_heavy_cfs[] = {
 };
 #define HISTORY_DELETION_WINDOW  4096
 #define HISTORY_DELETION_TRIGGER 2048
+
+/** The store at one moment, for a walk that runs later (history.h). */
+struct HistoryView {
+  struct db_snapshot *snap;
+};
 
 /** Flag indicating if history is available */
 static int history_available = 0;
@@ -681,6 +687,15 @@ void history_shutdown(void)
 {
   if (!history_available)
     return;
+
+  /* A thread pool worker may be walking the store (the federated SEARCH
+   * responder, store_job.h), and jobs not yet started hold snapshots of
+   * it: wait for the walks under way and cancel the rest -- each gives
+   * its snapshot back -- before anything below closes a handle.  A walk
+   * is bounded by its scan budget, so this waits a fraction of a second
+   * per running walk.  The pool itself is stopped later
+   * (shutdown_writers): its other tasks do not touch the store. */
+  store_jobs_quiesce();
 
   /* NOSYNC writes reach the WAL unsynced, and closing the env does not
    * fsync it: sync the WAL once (db_env_sync), so what was written before
@@ -2128,7 +2143,10 @@ static int history_query_internal(const char *target,
   char target_prefix[CHANNELLEN + 2];
   int target_prefix_len;
   int count = 0;
-  time_t live_inc = history_live_incarnation(target);
+  /* Off the main thread the caller read it there (HistoryRowFilter). */
+  time_t live_inc = (filter && filter->live_inc_set)
+                    ? filter->live_inc : history_live_incarnation(target);
+  int own_snap = !(filter && filter->view);
   int rc;
   int reverse;
 
@@ -2147,7 +2165,7 @@ static int history_query_internal(const char *target,
    * point-in-time view, so we pin a snapshot for the iter and (under
    * libmdbx) reuse its read txn for ml_content_resolve so multiline
    * content sees the same state as the message rows. */
-  snap = db_snapshot_new(history_db_env);
+  snap = own_snap ? db_snapshot_new(history_db_env) : filter->view->snap;
   if (!snap)
     return -1;
 
@@ -2160,7 +2178,8 @@ static int history_query_internal(const char *target,
   it = history_prefix_iter(history_cf_messages, snap, target_prefix,
                            (size_t)target_prefix_len);
   if (!it) {
-    db_snapshot_destroy(snap);
+    if (own_snap)
+      db_snapshot_destroy(snap);
     return -1;
   }
 
@@ -2329,7 +2348,8 @@ static int history_query_internal(const char *target,
   }
 
   db_iter_close(it);
-  db_snapshot_destroy(snap);
+  if (own_snap)
+    db_snapshot_destroy(snap);
 
   log_write(LS_SYSTEM, L_INFO, 0, "history_query_internal: returning count=%d for target='%s'",
             count, target);
@@ -5028,6 +5048,29 @@ int history_message_is_redacted(const char *target, const char *msgid)
   r = message_is_redacted_in(snap, target, msgid, 0);
   db_snapshot_destroy(snap);
   return r;
+}
+
+struct HistoryView *history_view_open(void)
+{
+  struct HistoryView *view;
+  struct db_snapshot *snap;
+
+  if (!history_available)
+    return NULL;
+  snap = db_snapshot_new(history_db_env);
+  if (!snap)
+    return NULL;
+  view = (struct HistoryView *)MyMalloc(sizeof(*view));
+  view->snap = snap;
+  return view;
+}
+
+void history_view_close(struct HistoryView *view)
+{
+  if (!view)
+    return;
+  db_snapshot_destroy(view->snap);
+  MyFree(view);
 }
 
 /** One page's redaction lookups (W5 Task 15 fix round 1): one snapshot. */
