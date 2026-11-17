@@ -2000,13 +2000,16 @@ int set_nick_name_device(struct Client* cptr, struct Client* sptr,
     /* A session's primary or held ghost renamed (its own NICK, an
      * SVSNICK, a device's request): its stored record carries the nick
      * it had when last written, and a crash-restore would bring the
-     * session back under that.  The next persist tick writes the new
-     * one; a session with no holder here clears the mark unwritten. */
+     * session back under that -- while the old nick, free now, may be
+     * taken and kept by someone else, and two ghosts then come back.
+     * Write the new one now, not at the next persist tick: a crash
+     * inside the tick's window was that case.  A failed write leaves it
+     * to the tick; a session with no holder here writes nothing. */
     {
       struct BouncerSession *nick_sess = bounce_session_of_primary(sptr);
 
       if (nick_sess && nick_sess->hs_client == sptr)
-        bounce_session_mark_dirty(nick_sess);
+        bounce_session_persist_now(nick_sess, 0);
     }
 
     /* Notify change nick local/remote user — skip for case-only changes
