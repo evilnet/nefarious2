@@ -153,6 +153,7 @@ struct probe {
   int last_data;
   struct probe *other;          /* for the cascade case */
   int free_on_destroy;
+  int stop_on_read;             /* a read ends the loop, as DIE does */
 };
 
 static void probe_cb(struct Event *ev)
@@ -170,6 +171,8 @@ static void probe_cb(struct Event *ev)
     p->inline_calls++;
   p->last = ev_type(ev);
   p->last_data = ev_data(ev);
+  if (p->stop_on_read && ev_type(ev) == ET_READ)
+    running = 0;
 
   /* An error callback that touches another socket, as exit_client()
    * sends to everyone it shares a channel with. */
@@ -640,6 +643,30 @@ static void error_raised_while_deleting_is_dropped(void **state)
   assert_int_equal(p.calls, 0);
 }
 
+/* DIE in the middle of a batch: the loop stops at once and forgets the
+ * rest of the batch.  The engine frees its event array on the way out, so
+ * a socket deleted afterwards (the exit path closes what is left) must not
+ * walk entries that are no longer there. */
+static void socket_deleted_after_die_mid_batch(void **state)
+{
+  struct probe a, b;
+
+  (void)state;
+  probe_open(&a);
+  probe_open(&b);
+  a.stop_on_read = b.stop_on_read = 1;
+  assert_int_equal(write(a.peer, "x", 1), 1);
+  assert_int_equal(write(b.peer, "x", 1), 1);
+
+  running = 1;
+  event_loop();                 /* one read, then DIE: the other is left */
+  running = 1;
+
+  assert_int_equal(a.calls + b.calls, 1);
+  probe_close(&a);              /* walks the engine's batch */
+  probe_close(&b);
+}
+
 int main(void)
 {
   const struct CMUnitTest startup[] = {
@@ -657,6 +684,7 @@ int main(void)
     cmocka_unit_test(reattach_starts_clean),
     cmocka_unit_test(errors_raised_while_delivering_are_delivered_too),
     cmocka_unit_test(error_raised_while_deleting_is_dropped),
+    cmocka_unit_test(socket_deleted_after_die_mid_batch),
   };
 
   int failed = cmocka_run_group_tests_name("startup", startup, NULL, NULL);
