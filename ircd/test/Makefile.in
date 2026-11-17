@@ -117,7 +117,8 @@ CMOCKA_TESTPROGS = \
 	gitsync_content_cmocka \
 	send_label_cmocka \
 	ml_discard_cmocka \
-	store_job_cmocka
+	store_job_cmocka \
+	history_view_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -230,6 +231,7 @@ DEP_SRC = \
 	send_label_cmocka.c \
 	ml_discard_cmocka.c \
 	store_job_cmocka.c \
+	history_view_cmocka.c \
 	crdt_hlc_cmocka.c \
 	db_api_cmocka.c \
 	fake_db.c \
@@ -805,6 +807,23 @@ paste_listener_cmocka: $(PASTE_LISTENER_CMOCKA_OBJS)
 STORE_JOB_CMOCKA_OBJS = store_job_cmocka.o ../store_job.o ../thread_pool.o
 store_job_cmocka: $(STORE_JOB_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(STORE_JOB_CMOCKA_OBJS) $(CMOCKA_LIBS) -lpthread
+
+# history_view tests - a history walk on a thread pool worker (the
+# federated SEARCH responder's scan): through a view it returns the store
+# as it was, on a worker it returns what the main thread's walk did while
+# the main thread keeps writing, it calls into no main-thread state, and
+# history_shutdown() waits for it.  Links the REAL ../history.o and
+# ../db_rocksdb.o on a mkdtemp()'d store ($TMPDIR, else /tmp), with the
+# real ../store_job.o and ../thread_pool.o; the test stands in for the
+# rest of the ircd.
+HISTORY_VIEW_CMOCKA_OBJS = history_view_cmocka.o ../history.o ../db_rocksdb.o \
+	../db_casefold.o ../ml_content.o ../history_record.o \
+	../history_trim_codec.o ../history_trim.o ../redact_index.o \
+	../pm_pair_index.o ../chathistory_recv.o ../recv_classify.o \
+	../ircd_compress.o ../ircd_string.o ../ircd_snprintf.o ../ircd_alloc.o \
+	../store_job.o ../thread_pool.o
+history_view_cmocka: $(HISTORY_VIEW_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(HISTORY_VIEW_CMOCKA_OBJS) $(CMOCKA_LIBS) $(ROCKSDB_LIBS) $(ZSTD_LIBS)
 
 # log_async tests - the async log writer never writes to a descriptor the
 # log has closed: log_close() and log_file_destroy() drain the queue first,

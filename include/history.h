@@ -66,6 +66,19 @@ struct HistoryRowFilter {
   int scan_max;    /**< raw rows examined before giving up; 0 = default */
   int scanned;     /**< out: raw rows examined (kept + skipped) */
   int truncated;   /**< out: scan_max hit -- page may be incomplete */
+  /** A walk that runs later than it was asked for (a store job on a
+   * thread pool worker, store_job.h) reads the store as it was when it
+   * was asked: its caller opens a view (history_view_open) on the main
+   * thread and sets it here, and the walk reads the message rows and
+   * their multiline content through it.  NULL: the walk takes its own
+   * snapshot, as every walk on the main thread does. */
+  struct HistoryView *view;
+  /** Such a walk cannot read the channel table either: its caller reads
+   * the target's live incarnation (history_live_incarnation) on the main
+   * thread and sets it here with @a live_inc_set.  Unset (0), the walk
+   * reads it itself. */
+  int live_inc_set;
+  time_t live_inc;  /**< the live incarnation, when @a live_inc_set */
 };
 
 /** Default raw-row scan cap for a filtered walk.  Boundary seeks keep
@@ -726,6 +739,27 @@ extern int history_attach_context(const char *target,
  * @return 1 if available, 0 if not.
  */
 extern int history_is_available(void);
+
+/** The store as it is now, for a walk that runs later, off the main
+ * thread (HistoryRowFilter.view).  Main thread.
+ *
+ * What a thread pool worker may do with the store is this and no more:
+ * history_query_before() with a filter that carries a view and the live
+ * incarnation, history_message_is_redacted(), and history_view_close().
+ * Those read the store's handles and nothing else of history.c's state,
+ * RocksDB serves reads from any thread, and the thread's logging is muted
+ * (log_thread_mute) so the walk's log lines and the backend's last-error
+ * text are dropped, not raced for.  The handles stay valid because
+ * history_shutdown() first waits for every store job (store_jobs_quiesce).
+ * Every other entry point reads or writes main-thread state (the channel
+ * table, features, the trim and receive-window bookkeeping) and stays on
+ * the main thread.
+ * @return the view, or NULL when the store is not open or the snapshot
+ * failed. */
+extern struct HistoryView *history_view_open(void);
+/** Give a view back (NULL-safe).  The main thread, or the worker that
+ * walked through it; the store must still be open. */
+extern void history_view_close(struct HistoryView *view);
 
 /*
  * Timestamp Conversion API
