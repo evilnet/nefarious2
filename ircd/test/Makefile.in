@@ -119,7 +119,8 @@ CMOCKA_TESTPROGS = \
 	ml_discard_cmocka \
 	store_job_cmocka \
 	history_view_cmocka \
-	alloc_nomem_cmocka
+	alloc_nomem_cmocka \
+	chathistory_search_job_cmocka
 
 CMOCKA_LIBS = -lcmocka
 ZSTD_LIBS = -lzstd
@@ -234,6 +235,7 @@ DEP_SRC = \
 	store_job_cmocka.c \
 	history_view_cmocka.c \
 	alloc_nomem_cmocka.c \
+	chathistory_search_job_cmocka.c \
 	crdt_hlc_cmocka.c \
 	db_api_cmocka.c \
 	fake_db.c \
@@ -826,6 +828,23 @@ HISTORY_VIEW_CMOCKA_OBJS = history_view_cmocka.o ../history.o ../db_rocksdb.o \
 	../store_job.o ../thread_pool.o
 history_view_cmocka: $(HISTORY_VIEW_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(HISTORY_VIEW_CMOCKA_OBJS) $(CMOCKA_LIBS) $(ROCKSDB_LIBS) $(ZSTD_LIBS)
+
+# chathistory_search_job tests - the federated SEARCH responder's job
+# (CH Q <target> S): what ms_chathistory() copies into it, and what
+# search_job_done() sends -- the rows and E, T, E 0 U, or nothing once
+# the asking server has left.  Built as auth_recheck is: the real
+# m_chathistory.c, included and garbage-collected, here with the real
+# ../store_job.o; the thread pool, the store and the rest of the ircd are
+# the test's.  -Wno-comment and -Wno-unused: m_chathistory.c under -Wall
+# (the ircd's own build has none).
+CHATHISTORY_SEARCH_JOB_CMOCKA_OBJS = chathistory_search_job_cmocka.o \
+	../store_job.o ../chathistory_merge.o ../ircd_string.o \
+	../ircd_snprintf.o ../ircd_alloc.o
+chathistory_search_job_cmocka.o: ${srcdir}/chathistory_search_job_cmocka.c ../m_chathistory.c
+	${CC} ${CFLAGS} -Wno-address -Wno-comment -Wno-unused -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/chathistory_search_job_cmocka.c
+
+chathistory_search_job_cmocka: $(CHATHISTORY_SEARCH_JOB_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(CHATHISTORY_SEARCH_JOB_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS) -lpthread
 
 # alloc_nomem tests - an allocation that fails off the main thread never
 # runs the out-of-memory handler (the restart): the other handler says
