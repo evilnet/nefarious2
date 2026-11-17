@@ -179,9 +179,12 @@ static void sethost_password_verified(int result, void *arg)
     return;
   }
 
-  /* Clear pending flag */
+  /* Clear pending flag; the lines the client sent after its SETHOST
+   * waited for this answer (s_bsd.c input_awaits_answer()), and are
+   * parsed at the next timer pass, after it. */
   ClearSetHostPending(sptr);
   cli_checkcookie(sptr) = 0;
+  client_input_resume(sptr);
 
   /* Judged by the configuration in force now (a rehash during the check
    * may have removed or re-passworded the Spoofhost block): the block that

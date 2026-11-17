@@ -251,9 +251,12 @@ static void oper_password_verified(int result, void *arg)
     return;
   }
 
-  /* Clear pending flag */
+  /* Clear pending flag; the lines the client sent after its OPER waited
+   * for this answer (s_bsd.c input_awaits_answer()), and are parsed at the
+   * next timer pass, after it. */
   ClearOperPending(sptr);
   cli_opercookie(sptr) = 0;
+  client_input_resume(sptr);
 
   oper_answer_begin(sptr, ctx->label, &st);
   if (result == CRYPT_VERIFY_MATCH

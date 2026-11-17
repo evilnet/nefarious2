@@ -1449,6 +1449,41 @@ static int input_held(struct Client *cptr)
   return 1;
 }
 
+/** Must @a cptr's queued lines wait for the answer to an earlier command
+ * of its that is being computed off the main thread (an OPER or SETHOST
+ * password check, ircd_crypt_verify_async())?  Lines parsed meanwhile
+ * would be answered first, and a client (or a test) that reads replies in
+ * order would take them for the earlier command's.  Bounded:
+ * input_await_held().
+ * @param[in] cptr A local client whose queue holds a line.
+ * @return Non-zero when its lines must wait. */
+static int input_awaits_answer(struct Client *cptr)
+{
+  return input_await_held(&con_input_hold(cli_connect(cptr)),
+                          IsOperPending(cptr) || IsSetHostPending(cptr),
+                          CurrentTime);
+}
+
+/** The off-thread answer @a cptr's input waited for has been sent
+ * (input_awaits_answer()): its queued lines are parsed at the event
+ * loop's next timer pass -- never here, inside the answer's callback.
+ * @param[in] cptr A local client. */
+void client_input_resume(struct Client *cptr)
+{
+  if (!cptr || !MyConnect(cptr) || !cli_connect(cptr))
+    return;
+  input_await_end(&con_input_hold(cli_connect(cptr)));
+  if (!DBufLength(&(cli_recvQ(cptr))))
+    return;
+  if (t_onqueue(&(cli_proc(cptr))))
+    timer_chg(&(cli_proc(cptr)), TT_ABSOLUTE, CurrentTime);
+  else {
+    cli_freeflag(cptr) |= FREEFLAG_TIMER;
+    timer_add(&(cli_proc(cptr)), client_timer_callback, cli_connect(cptr),
+              TT_RELATIVE, 0);
+  }
+}
+
 /** A connection whose input was held may have its lines parsed again (a
  * device of ours has a primary again, or became one): the hold ends now
  * (its allowance starts), and its queue is processed at the event loop's
@@ -1887,9 +1922,11 @@ ssl_read_again:
 
     /* A held connection's lines wait (input_held()): the process timer
      * below comes back for them, and client_input_wake() at once when the
-     * hold ends. */
+     * hold ends.  So do the lines after a command whose answer is computed
+     * off the main thread (input_awaits_answer()), until
+     * client_input_resume(). */
     while (DBufLength(&(cli_recvQ(cptr))) && !NoNewLine(cptr) &&
-           !input_held(cptr) &&
+           !input_awaits_answer(cptr) && !input_held(cptr) &&
            (IsTrusted(cptr) || cli_since(cptr) - CurrentTime < 10))
     {
       dolen = dbuf_getmsg(&(cli_recvQ(cptr)), cli_buffer(cptr), FULL_MSG_SIZE);

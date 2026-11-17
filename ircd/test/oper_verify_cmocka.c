@@ -93,6 +93,11 @@ static char last_sno[512];
 static struct ConfItem *attached;
 
 void debug(int level, const char *form, ...) {}
+
+/* s_bsd.c: the client's later lines, held while the check was out, are
+ * parsed again once it answers. */
+static struct Client *resumed;
+void client_input_resume(struct Client *cptr) { resumed = cptr; }
 void log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
                const char *fmt, ...) {}
 int send_reply(struct Client *to, int reply, ...)
@@ -187,6 +192,7 @@ static int setup(void **state)
   memset(&client, 0, sizeof(client));
   memset(LocalClientArray, 0, sizeof(LocalClientArray));
   last_reply = attaches = 0;
+  resumed = NULL;
   last_sno[0] = '\0';
   attached = NULL;
   nblocks = 0;
@@ -282,6 +288,7 @@ static void completion_grants_the_live_block(void **state)
   assert_string_equal(user.opername, "op");
   assert_false(IsOperPending(&client));
   assert_int_equal(cli_opercookie(&client), 0);
+  assert_ptr_equal(resumed, &client);       /* answered: input resumes */
   free(user.opername);
 }
 
@@ -306,6 +313,7 @@ static void completion_without_block_answers_nooperhost(void **state)
   oper_password_verified(CRYPT_VERIFY_MATCH, pending_oper(5));
   assert_int_equal(attaches, 0);
   assert_int_equal(last_reply, ERR_NOOPERHOST);
+  assert_ptr_equal(resumed, &client);       /* answered: input resumes */
   assert_non_null(strstr(last_sno, "(no operator block when the password check finished)"));
 }
 
@@ -316,6 +324,7 @@ static void completion_changed_password_answers_passwdmismatch(void **state)
   oper_password_verified(CRYPT_VERIFY_MATCH, pending_oper(5));
   assert_int_equal(attaches, 0);
   assert_int_equal(last_reply, ERR_PASSWDMISMATCH);
+  assert_ptr_equal(resumed, &client);
 }
 
 /** The descriptor is another connection's now (its own cookie, or none):
@@ -331,6 +340,7 @@ static void completion_for_another_connection_does_nothing(void **state)
   assert_int_equal(attaches, 0);
   assert_int_equal(last_reply, 0);
   assert_true(IsOperPending(&client));
+  assert_null(resumed);                     /* still waiting on its own */
 }
 
 int main(void)

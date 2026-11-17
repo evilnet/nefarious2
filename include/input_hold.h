@@ -43,6 +43,13 @@
  * joined the hold no earlier than the hold's start. */
 #define INPUT_HOLD_PING     4
 
+/** How long at most a client's input waits for the answer to a command
+ * computed off the main thread (an OPER or SETHOST password check,
+ * input_await_held()) before its later lines are parsed anyway (seconds).
+ * A check takes well under a second; this only bounds one that never
+ * answers. */
+#define INPUT_AWAIT_MAX     10
+
 /** A connection's hold, kept on its Connection (zero: none). */
 struct InputHold {
   time_t       since;     /**< when the hold began; 0: not held */
@@ -54,6 +61,7 @@ struct InputHold {
   unsigned int pings;     /**< server PINGs this hold sent (kept after its release) */
   unsigned int pongs;     /**< PONGs to them parsed free of fake lag */
   time_t       free_until; /**< those PONGs are free until then (the release + INPUT_HOLD_GRACE) */
+  time_t       await_since; /**< input waits for an off-thread answer since then; 0: not waiting */
 };
 
 /** What the read path does with a connection's queued lines. */
@@ -77,6 +85,8 @@ extern enum input_hold_action input_hold_step(struct InputHold *h, int orphan,
                                               time_t now, unsigned int sweeps,
                                               enum input_hold_event *ev);
 extern int input_hold_ping_due(struct InputHold *h, time_t now);
+extern int input_await_held(struct InputHold *h, int pending, time_t now);
+extern void input_await_end(struct InputHold *h);
 extern int input_hold_pong_free(struct InputHold *h, time_t now,
                                 const char *args, const char *server);
 extern void input_hold_clear(struct InputHold *h);
