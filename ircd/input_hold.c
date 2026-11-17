@@ -209,33 +209,3 @@ int input_hold_is_quit(const char *line)
   }
   return p[4] == '\0' || p[4] == ' ';
 }
-
-/** Must a client's queued lines wait for the answer to a command of its
- * that is computed off the main thread (an OPER or SETHOST password
- * check)?  Replies then come back in the order the commands were sent,
- * as they do when the check runs inline.  The wait starts at the first
- * look while an answer is pending and lasts until it comes, or at most
- * INPUT_AWAIT_MAX seconds: an answer that never comes cannot hold the
- * client's input for good.  Not the orphan hold: no allowance, no event.
- * @param[in,out] h The connection's hold.
- * @param[in] pending Non-zero while an answer is pending.
- * @param[in] now The time.
- * @return Non-zero when the lines must wait. */
-int input_await_held(struct InputHold *h, int pending, time_t now)
-{
-  if (!pending) {
-    h->await_since = 0;
-    return 0;
-  }
-  if (!h->await_since)
-    h->await_since = now;
-  return now - h->await_since < INPUT_AWAIT_MAX;
-}
-
-/** The answer came: forget the wait, so the next command's is waited for
- * in full.
- * @param[in,out] h The connection's hold. */
-void input_await_end(struct InputHold *h)
-{
-  h->await_since = 0;
-}
