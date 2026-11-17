@@ -8159,9 +8159,10 @@ static void search_fed_selectors(const struct SearchMatch *sm, char *sel,
  * responder a shorter selector than the user asked for, so it would
  * answer rows that do not match.  Measured as sent (every destination
  * numeric is two characters, the next request id), against the same
- * "<YY> CH " prefix and safety margin as the other CH lines.  A query
- * that does not fit is not federated (start_fed_search()): that channel
- * is searched on this server only. */
+ * "<YY> CH " prefix and safety margin as the other CH lines.  m_search
+ * refuses a query that does not fit for a channel it searches, with any
+ * number of servers linked: answering that channel from this store
+ * alone would drop the other stores' rows without a word. */
 static int search_fed_line_fits(struct Client *sptr, const char *target,
                                 const char *before_unix,
                                 const char *after_unix, int limit,
@@ -8211,7 +8212,7 @@ static struct FedRequest *start_fed_search(struct Client *sptr, const char *targ
   if (i >= MAX_FED_REQUESTS)
     return NULL;
 
-  /* Never sent cut: a line that cannot fit is not federated. */
+  /* m_search refused a query whose line cannot fit; never sent cut. */
   if (!search_fed_line_fits(sptr, target, before_unix, after_unix, limit, sm))
     return NULL;
   search_fed_selectors(sm, sel, sizeof(sel));
@@ -9904,6 +9905,12 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
     if (!IsChannelName(in))
       pm_other = in;
+    else if (!search_fed_line_fits(sptr, lookup_target, before_unix,
+                                   after_unix, limit, &sm)) {
+      send_fail(sptr, "SEARCH", "INVALID_PARAMS", "text",
+                "Selectors too long for this channel");
+      return 0;
+    }
 
     count = search_one_target(sptr, lookup_target, before_unix, limit, &sm,
                               &budget, &rows);
@@ -9942,6 +9949,18 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     struct Membership *member;
     struct SearchAgg *agg;
     int free_slots = 0, parts_left = SEARCH_FED_PARTS_MAX;
+
+    /* A channel whose line cannot fit refuses the search, as with `in`
+     * (search_fed_line_fits()). */
+    for (member = cli_user(sptr)->channel; member; member = member->next_channel)
+      if (check_history_access(sptr, member->channel->chname, lookup_target,
+                               sizeof(lookup_target)) == 0
+          && !search_fed_line_fits(sptr, lookup_target, before_unix,
+                                   after_unix, limit, &sm)) {
+        send_fail(sptr, "SEARCH", "INVALID_PARAMS", "text",
+                  "Selectors too long for one of your channels");
+        return 0;
+      }
 
     agg = (struct SearchAgg *)MyCalloc(1, sizeof(*agg));
     ircd_snprintf(0, agg->client_yxx, sizeof(agg->client_yxx), "%s%s",
