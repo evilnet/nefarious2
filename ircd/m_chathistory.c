@@ -4568,7 +4568,7 @@ int chathistory_retention_advertised(void)
   return widest < 0 ? -1 : widest * 86400;
 }
 
-/** Keep ISUPPORT evilnet/CHATHISTORYRETENTION at the value above and,
+/** Keep ISUPPORT evilnet.github.io/CHATHISTORYRETENTION at the value above and,
  * when it changed and @a announce is set, push a fresh 005 to the
  * clients that negotiated draft/extended-isupport.  Called from the
  * 005 build, the feature notifiers, and every store advertisement
@@ -4583,9 +4583,9 @@ void chathistory_update_retention_isupport(int announce)
     return;
   last = now;
   if (now < 0)
-    del_isupport("evilnet/CHATHISTORYRETENTION");
+    del_isupport("evilnet.github.io/CHATHISTORYRETENTION");
   else
-    add_isupport_i("evilnet/CHATHISTORYRETENTION", now);
+    add_isupport_i("evilnet.github.io/CHATHISTORYRETENTION", now);
   if (announce)
     send_isupport_update();
 }
