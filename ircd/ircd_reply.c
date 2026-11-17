@@ -201,6 +201,38 @@ int send_reply(struct Client *to, int reply, ...)
   return 0; /* convenience return */
 }
 
+/** Send a line that is not a numeric (@a pattern carries its own prefix
+ * and command) as one of the replies to the line \a to is handling, with
+ * the tags a numeric there would carry (reply_tags()): the open batch or
+ * the label, and server-time.  A command reply that sits among numerics
+ * -- the MARKREAD between a JOIN's TOPIC and NAMES -- then carries what
+ * they carry, @time included.
+ * @param[in] to Local client the line is for.
+ * @param[in] pattern Format string for the line.
+ */
+void send_reply_line(struct Client *to, const char *pattern, ...)
+{
+  struct VarData vd;
+  struct MsgBuf *mb;
+  char tagbuf[256];
+  char *tags;
+
+  assert(0 != to);
+  assert(0 != pattern);
+
+  vd.vd_format = pattern;
+  va_start(vd.vd_args, pattern);
+  tags = reply_tags(to, tagbuf, sizeof(tagbuf));
+  if (tags)
+    mb = msgq_make(cli_from(to), "%s%v", tags, &vd);
+  else
+    mb = msgq_make(cli_from(to), "%v", &vd);
+  va_end(vd.vd_args);
+
+  send_buffer(to, mb, 0);
+  msgq_clean(mb);
+}
+
 /** Send a numeric reply assembled by hand (msgq_make() of rpl_str(),
  * then msgq_append()) with the tags send_reply() would give it.
  * Sent bare, a labeled command's reply carries no label, and the

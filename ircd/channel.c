@@ -59,6 +59,7 @@
 #include "chathistory_recv.h"
 #include "history_trim_codec.h"
 #include "metadata.h"
+#include "session_markread.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdio.h>
@@ -2380,6 +2381,9 @@ struct Channel *get_channel(struct Client *cptr, char *chname, ChannelGetType fl
 /** Rename a channel.
  * Updates the channel name in the hash table and channel structure.
  * Reallocates the channel structure if the new name is longer.
+ * Every server runs it for a rename, so what follows the name in local
+ * state follows it here: the receive window (history_recv_rename()) and
+ * the read markers (markread_channel_renamed()).
  *
  * @param[in,out] chptr_p Pointer to channel pointer. Updated if reallocation occurs.
  * @param[in] newname New name for the channel.
@@ -2417,6 +2421,7 @@ int rename_channel(struct Channel **chptr_p, const char *newname)
     hChangeChannel(chptr, newname);
     strcpy(chptr->chname, newname);
     history_recv_rename(chptr, oldname);
+    markread_channel_renamed(chptr, oldname);
     return 0;
   }
 
@@ -2469,6 +2474,7 @@ int rename_channel(struct Channel **chptr_p, const char *newname)
   *chptr_p = newchptr;
 
   history_recv_rename(newchptr, oldname);
+  markread_channel_renamed(newchptr, oldname);
   return 0;
 }
 

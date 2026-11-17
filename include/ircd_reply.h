@@ -31,6 +31,7 @@ extern int protocol_violation(struct Client* cptr, const char* pattern, ...);
 extern int need_more_params(struct Client* cptr, const char* cmd);
 extern int send_reply(struct Client* to, int reply, ...);
 extern void send_reply_buffer(struct Client* to, struct MsgBuf* mb);
+extern void send_reply_line(struct Client* to, const char* pattern, ...);
 
 #define SND_EXPLICIT	0x40000000	/**< first arg is a pattern to use */
 
