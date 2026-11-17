@@ -1421,6 +1421,49 @@ int unregister_mapping(struct s_map *map)
 
 static int parse_client_line(struct Client *cptr, char *buffer, char *bufend);
 
+/** Take @a len bytes at @a val, a client line's label= value, as the
+ * line's label -- only while labeled-response is in use (labeled-response
+ * and batch both active).  Without batch the tag is ignored and the
+ * command runs: the client is answered as a tag-capable client without
+ * labeled-response that sent a label -- no label, no ACK, no labeled
+ * batch.  Every later reader of cli_label() sees only a label taken here. */
+static void client_take_label(struct Client *cptr, const char *val, size_t len)
+{
+  if (!LabeledResponseInUse(cptr) || !feature_bool(FEAT_CAP_labeled_response))
+    return;
+  if (len >= sizeof(cli_label(cptr)))
+    len = sizeof(cli_label(cptr)) - 1;
+  memcpy(cli_label(cptr), val, len);
+  cli_label(cptr)[len] = '\0';
+}
+
+/** The label of a line recv_clip() cut, read for its ERR_INPUTTOOLONG:
+ * only when its tag region (the @ to the space) is whole, at most 4095
+ * bytes -- the body was the part over its cap.  A cut tag region is not
+ * read: its label may be the part cut.  Nothing but label= is read. */
+static void overlong_line_label(struct Client *cptr, const char *line,
+                                const char *end)
+{
+  const char *tag_end, *scan;
+
+  if (line >= end || *line != '@')
+    return;
+  tag_end = memchr(line, ' ', end - line);
+  if (!tag_end || tag_end - line > 4095)
+    return;
+  for (scan = line + 1; scan < tag_end; ) {
+    const char *next_semi = memchr(scan, ';', tag_end - scan);
+
+    if (!next_semi)
+      next_semi = tag_end;
+    if (next_semi - scan >= 6 && strncmp(scan, "label=", 6) == 0) {
+      client_take_label(cptr, scan + 6, next_semi - (scan + 6));
+      return;
+    }
+    scan = next_semi + 1;
+  }
+}
+
 /** Parse a line of data from a user.
  * NOTE: parse_*() should not be called recursively by any other
  * functions!
@@ -1501,13 +1544,15 @@ parse_client_line(struct Client *cptr, char *buffer, char *bufend)
 
   /* A line recv_clip() cut down: too long to run, and the client stays
    * (message-tags: tags over the limit get ERR_INPUTTOOLONG; the body cap
-   * is answered the same way).  Its tags are not read, so the 417 carries
-   * no label.  It is charged as a line with a full body, or a client
+   * is answered the same way).  Of its tags only a label is read, and only
+   * when the tag region is whole (overlong_line_label()): a line cut in
+   * its tags gets an unlabeled 417.  It is charged as a line with a full body, or a client
    * could have 417s answered at wire speed.  An open multiline batch
    * fails: the cut line may have been one of its lines, and delivering
    * the rest would change the message. */
   if (!IsServer(cptr) && !IsHandshake(cptr)
       && recv_line_overlong(cptr, buffer, bufend - buffer)) {
+    overlong_line_label(cptr, buffer, bufend);
     send_reply(cptr, ERR_INPUTTOOLONG);
     if (cli_ml_batch_id(cptr)[0])
       multiline_fail_batch(cptr);
@@ -1610,21 +1655,8 @@ parse_client_line(struct Client *cptr, char *buffer, char *bufend)
 
         /* Check for label= tag */
         if (strncmp(tag_name, "label=", 6) == 0) {
-          /* Accept the label only while labeled-response is in use
-           * (labeled-response and batch both active).  Without batch the
-           * tag is ignored and the command runs: the client is answered
-           * as a tag-capable client without labeled-response that sent a
-           * label -- no label, no ACK, no labeled batch.  Every later
-           * reader of cli_label() sees only a label accepted here. */
-          if (LabeledResponseInUse(cptr) &&
-              feature_bool(FEAT_CAP_labeled_response)) {
-            char *label_val = tag_name + 6;
-            size_t label_len = next_semi - label_val;
-            if (label_len >= sizeof(cli_label(cptr)))
-              label_len = sizeof(cli_label(cptr)) - 1;
-            memcpy(cli_label(cptr), label_val, label_len);
-            cli_label(cptr)[label_len] = '\0';
-          }
+          /* Only while labeled-response is in use (client_take_label). */
+          client_take_label(cptr, tag_name + 6, next_semi - (tag_name + 6));
         }
         /* Check for batch= tag (draft/multiline) */
         else if (strncmp(tag_name, "batch=", 6) == 0) {

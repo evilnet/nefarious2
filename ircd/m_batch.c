@@ -823,20 +823,32 @@ void multiline_discard_batch(struct Client *cptr)
 
 /** Fail @a cptr's open client multiline batch: one of its lines could not
  * be read (parse_client(): a line too long, answered with
- * ERR_INPUTTOOLONG).  The client hears FAIL BATCH MULTILINE_INVALID, and
- * the batch's reference stays dead, so its later lines are ignored as for
- * any failed batch.  No-op without an open batch. */
+ * ERR_INPUTTOOLONG).  The client hears FAIL BATCH MULTILINE_INVALID <ref>,
+ * as for the batch's other refusals, and the batch's reference stays dead,
+ * so its later lines are ignored as for any failed batch.  The FAIL is the
+ * batch's answer: it goes out under the batch's label (con_ml_label, from
+ * its BATCH + line), or none -- never under the cut line's own label,
+ * which its ERR_INPUTTOOLONG answered; that label is put back after.
+ * No-op without an open batch. */
 void multiline_fail_batch(struct Client *cptr)
 {
   struct Connection *con;
+  char saved[sizeof(((struct Connection *)0)->con_label)];
+  unsigned char responded;
 
   if (!cptr || !MyConnect(cptr))
     return;
   con = cli_connect(cptr);
   if (!con_ml_batch_id(con)[0])
     return;
-  send_fail(cptr, "BATCH", "MULTILINE_INVALID", NULL,
+  memcpy(saved, cli_label(cptr), sizeof(saved));
+  responded = cli_label_responded(cptr);
+  ircd_strncpy(cli_label(cptr), con_ml_label(con), sizeof(saved));
+  cli_label_responded(cptr) = 0;
+  send_fail(cptr, "BATCH", "MULTILINE_INVALID", con_ml_batch_id(con),
             "A line of the multiline batch was too long");
+  memcpy(cli_label(cptr), saved, sizeof(saved));
+  cli_label_responded(cptr) = responded;
   clear_multiline_batch(con);
 }
 
