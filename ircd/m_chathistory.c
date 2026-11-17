@@ -4568,8 +4568,14 @@ int chathistory_retention_advertised(void)
   return widest < 0 ? -1 : widest * 86400;
 }
 
-/** Keep ISUPPORT evilnet.github.io/CHATHISTORYRETENTION at the value above and,
- * when it changed and @a announce is set, push a fresh 005 to the
+/** The retention token's name: a vendor name prefixed by a DNS domain,
+ * as a vendor capability's must be.  The older "evilnet/" spelling is
+ * advertised beside it, with the same value, for a transition release. */
+#define RETENTION_TOKEN "evilnet.github.io/CHATHISTORYRETENTION"
+#define RETENTION_TOKEN_OLD "evilnet/CHATHISTORYRETENTION"
+
+/** Keep ISUPPORT RETENTION_TOKEN (and RETENTION_TOKEN_OLD) at the value
+ * above and, when it changed and @a announce is set, push a fresh 005 to the
  * clients that negotiated draft/extended-isupport.  Called from the
  * 005 build, the feature notifiers, and every store advertisement
  * change: a CH A S (a store linked), a CH A R (one changed its
@@ -4582,10 +4588,13 @@ void chathistory_update_retention_isupport(int announce)
   if (now == last)
     return;
   last = now;
-  if (now < 0)
-    del_isupport("evilnet.github.io/CHATHISTORYRETENTION");
-  else
-    add_isupport_i("evilnet.github.io/CHATHISTORYRETENTION", now);
+  if (now < 0) {
+    del_isupport(RETENTION_TOKEN);
+    del_isupport(RETENTION_TOKEN_OLD);
+  } else {
+    add_isupport_i(RETENTION_TOKEN, now);
+    add_isupport_i(RETENTION_TOKEN_OLD, now);
+  }
   if (announce)
     send_isupport_update();
 }
