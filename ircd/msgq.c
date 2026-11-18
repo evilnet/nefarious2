@@ -30,6 +30,7 @@
 #include "ircd_defs.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
+#include "main_thread.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
@@ -432,6 +433,8 @@ msgq_make(struct Client *dest, const char *format, ...)
 {
   va_list vl;
   struct MsgBuf *mb;
+
+  assert_main_thread();
 
   va_start(vl, format);
   mb = msgq_vmake(dest, format, vl);

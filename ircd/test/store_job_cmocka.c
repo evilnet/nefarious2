@@ -427,6 +427,32 @@ static void waiting_jobs_run_in_order(void **state)
   pthread_mutex_unlock(&rec_mutex);
 }
 
+/** A job still waiting when nobody wants its answer any more is
+ * abandoned, not run; the ones behind it run. */
+static void a_job_that_waited_too_long_is_abandoned(void **state)
+{
+  struct TJob t[3];
+  int i, link;
+
+  (void)state;
+  assert_int_equal(thread_pool_init(2), 0);
+  assert_int_equal(store_jobs_cap(), 1);
+  set_gate(0);
+  for (i = 0; i < 3; i++)
+    tjob_init(&t[i], &link);
+  t[1].job.expire = time(NULL) - 1;       /* given up on already */
+  t[2].job.expire = time(NULL) + 3600;
+  for (i = 0; i < 3; i++)
+    store_job_start(&t[i].job);
+  wait_inside(1);
+  set_gate(1);
+  for (i = 0; i < 3; i++)
+    poll_until_done(&t[i]);
+  assert_finished(&t[0], 1);
+  assert_finished(&t[1], 0);
+  assert_finished(&t[2], 1);
+}
+
 /** Past STORE_JOBS_WAIT_MAX waiting jobs the next one runs on the caller,
  * as every job did before: the main loop slows, which is what holds the
  * requests back. */
@@ -806,6 +832,8 @@ int main(void)
     cmocka_unit_test_setup_teardown(with_a_pool_the_job_runs_on_a_muted_worker,
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(the_cap_bounds_the_jobs_in_the_pool,
+                                    case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(a_job_that_waited_too_long_is_abandoned,
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(waiting_jobs_run_in_order,
                                     case_setup, case_teardown),

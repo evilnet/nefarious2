@@ -9112,6 +9112,9 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
         search_job_done(&sj->job, 1);
         return 0;
       }
+      /* The requester gives up after its CHATHISTORY_TIMEOUT; ours is the
+       * best guess at it. */
+      sj->job.expire = CurrentTime + feature_int(FEAT_CHATHISTORY_TIMEOUT);
       store_job_start(&sj->job);  /* may have answered and freed it already */
       return 0;
     } else if (query_subcmd_char == 'X') {
