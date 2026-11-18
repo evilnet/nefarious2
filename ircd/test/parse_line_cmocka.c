@@ -79,6 +79,7 @@ static struct {
   char batch_tag[128];     /* the batch= tag the PING handler saw */
   int concat;              /* and draft/multiline-concat */
   int ml_fails;            /* multiline_fail_batch() */
+  int auth_too_long;       /* authenticate_too_long() */
   char reply_label[64];    /* the label the last send_reply() went under */
 } seen;
 
@@ -349,6 +350,13 @@ int fakelag_charge_client(struct Client *cptr, const char *cmd, int lag)
 {
   (void)cmd;
   return fakelag_charge(&cli_lagcredit(cptr), lag);
+}
+
+int authenticate_too_long(struct Client *cptr)
+{
+  (void)cptr;
+  seen.auth_too_long++;
+  return 0;
 }
 
 void multiline_fail_batch(struct Client *cptr)
@@ -984,6 +992,39 @@ static void client_overlong_line_gets_417(void **state)
 
 /* A cut line is charged fake lag like any line of its length, and fails
  * an open multiline batch. */
+/* An overlong AUTHENTICATE is SASL's to answer (905, and the exchange
+ * ends): no 417, whatever its case or tags.  A command that only starts
+ * the same way is not one. */
+static void client_overlong_authenticate_goes_to_sasl(void **state)
+{
+  static const char *const lead[] = {
+    "AUTHENTICATE ", "authenticate ", "@label=a  AUTHENTICATE ",
+  };
+  static char buf[5000];
+  size_t i, n;
+
+  (void)state;
+  for (i = 0; i < sizeof(lead) / sizeof(lead[0]); i++) {
+    n = strlen(lead[i]);
+    memcpy(buf, lead[i], n);
+    memset(buf + n, 'x', 600);
+    buf[n + 600] = '\0';
+    memset(&seen, 0, sizeof(seen));
+    assert_int_equal(parse_client(&user, buf, buf + n + 600), -1);
+    assert_int_equal(seen.handler_calls, 0);
+    assert_int_equal(seen.auth_too_long, 1);
+    assert_int_equal(seen.numerics, 0);
+  }
+
+  memcpy(buf, "AUTHENTICATEX ", 14);
+  memset(buf + 14, 'x', 600);
+  buf[614] = '\0';
+  memset(&seen, 0, sizeof(seen));
+  assert_int_equal(parse_client(&user, buf, buf + 614), -1);
+  assert_int_equal(seen.auth_too_long, 0);
+  assert_int_equal(seen.last_numeric, ERR_INPUTTOOLONG);
+}
+
 static void client_overlong_line_is_charged_and_fails_batch(void **state)
 {
   static char buf[600];
@@ -1307,6 +1348,7 @@ int main(void)
     cmocka_unit_test(client_tags_without_space_is_an_unknown_command),
     cmocka_unit_test(client_ordinary_lines),
     cmocka_unit_test(client_overlong_line_gets_417),
+    cmocka_unit_test(client_overlong_authenticate_goes_to_sasl),
     cmocka_unit_test(client_overlong_line_is_charged_and_fails_batch),
     cmocka_unit_test(client_overlong_line_417_label),
     cmocka_unit_test(client_cannot_set_fallback_mark),
