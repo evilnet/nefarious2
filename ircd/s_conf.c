@@ -44,6 +44,7 @@
 #include "ircd_string.h"
 #include "list.h"
 #include "listener.h"
+#include "conf_precheck.h"
 #include "match.h"
 #include "motd.h"
 #include "numeric.h"
@@ -62,6 +63,7 @@
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <errno.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <stdio.h>
@@ -1429,6 +1431,10 @@ static void close_mappings(void)
 extern FBFILE *lexer_open_config(void);
 extern void lexer_close_config(void);
 
+/** The file rehash_open_conf() opened, and what it was then. */
+static FBFILE *rehash_conf_file;
+static struct stat rehash_conf_sb;
+
 /** Open the configuration file for a rehash, before anything of the
  * running configuration is discarded.  A file that cannot be read at all
  * -- it cannot be opened, is a directory, or is empty, as it is for a
@@ -1454,8 +1460,11 @@ static int rehash_open_conf(void)
     why = strerror(EISDIR);
   else if (S_ISREG(sb.st_mode) && 0 == sb.st_size)
     why = "the file is empty";
-  else
+  else {
+    rehash_conf_file = file;
+    rehash_conf_sb = sb;
     return 1;
+  }
 
   lexer_close_config();
   /* The notice goes to the operators who saw the rehash announced, however
@@ -1466,6 +1475,129 @@ static int rehash_open_conf(void)
                        "cannot read configuration file %s: %s",
                        configfile, why);
   return 0;
+}
+
+/** Whether the configuration file is still the one rehash_open_conf()
+ * opened, as it was then: the check read it by name, and the parse
+ * reads what was opened.  A deploy that rewrites it in place, or
+ * renames another over it, during the check would have the server parse
+ * a file the check never saw. */
+static int rehash_conf_unchanged(void)
+{
+  struct stat now, path;
+
+  return rehash_conf_file && !fbstat(&now, rehash_conf_file)
+      && !stat(configfile, &path)
+      && now.st_dev == rehash_conf_sb.st_dev
+      && now.st_ino == rehash_conf_sb.st_ino
+      && now.st_size == rehash_conf_sb.st_size
+      && now.st_mtime == rehash_conf_sb.st_mtime
+#ifdef __linux__
+      && now.st_mtim.tv_nsec == rehash_conf_sb.st_mtim.tv_nsec
+#endif
+      && path.st_dev == now.st_dev && path.st_ino == now.st_ino;
+}
+
+/** The binary a configuration check runs: /proc/self/exe, the image this
+ * server runs even when an upgrade replaced the file; elsewhere SPATH. */
+static const char *precheck_binary(void)
+{
+  static const char self[] = "/proc/self/exe";
+
+  return access(self, X_OK) == 0 ? self : SPATH;
+}
+
+/** Read the new configuration in a fresh "ircd -k" before anything of
+ * the running one is discarded (conf_precheck_run()).  A parse here
+ * discards as it goes -- a syntax error loses its block, an error inside
+ * the Features block every feature after it, a missing include its
+ * contents -- so only a clean pass lets the rehash go ahead.  Anything
+ * else abandons it with nothing changed and one notice saying why: the
+ * check found errors (CONF_PRECHECK_ERRORS), or it did not finish
+ * cleanly, or the file changed while it was checked (CONF_PRECHECK_FAILED:
+ * nothing is known of the file).  Rehash again to try again.
+ * @return What the check found; the rehash goes ahead only on
+ *   CONF_PRECHECK_OK. */
+static enum conf_precheck_result rehash_precheck(void)
+{
+  static char out[4096];
+  char *line, *next, *why;
+  int shown = 0, more = 0;
+  enum conf_precheck_result res;
+
+  /* "." for -d: the server is in its working directory (main() went
+   * there), and the -d it was given may be relative to where it started. */
+  res = conf_precheck_run(precheck_binary(), ".", configfile,
+                          CONF_PRECHECK_TIMEOUT_MS, out, sizeof(out));
+  /* The check read the file by name, the parse reads what was opened: a
+   * deploy that rewrote it in place, or renamed another over it, would
+   * have the server parse a file the check never saw. */
+  if (!rehash_conf_unchanged()) {
+    conf_error = 1;     /* conf_get_error_flag(): nothing was applied */
+    log_write(LS_CONFIG, L_WARNING, LOG_NOSNOTICE, "Rehash abandoned, "
+              "nothing changed: configuration file %s changed while it was "
+              "checked", configfile);
+    sendto_opmask_butone(0, SNO_OLDSNO, "Rehash abandoned, nothing changed: "
+                         "configuration file %s changed while it was checked",
+                         configfile);
+    return CONF_PRECHECK_FAILED;
+  }
+  if (res == CONF_PRECHECK_OK)
+    return res;
+  conf_error = 1;       /* conf_get_error_flag(): nothing was applied */
+
+  if (res == CONF_PRECHECK_FAILED) {
+    /* conf_precheck_run() ended the output with how the check ended. */
+    why = out + strlen(out);
+    while (why > out && why[-1] == '\n')
+      *--why = '\0';
+    while (why > out && why[-1] != '\n')
+      why--;
+    log_write(LS_CONFIG, L_ERROR, LOG_NOSNOTICE, "Rehash abandoned, nothing "
+              "changed: the configuration check (ircd -k) did not finish "
+              "cleanly: %s", why);
+    sendto_opmask_butone(0, SNO_OLDSNO, "Rehash abandoned, nothing changed: "
+                         "the configuration check (ircd -k) did not finish "
+                         "cleanly: %s", why);
+    if (why > out) {
+      why[-1] = '\0';
+      for (line = out; line && *line; line = next) {    /* what it said */
+        if ((next = strchr(line, '\n')))
+          *next++ = '\0';
+        if (*line)
+          log_write(LS_CONFIG, L_ERROR, LOG_NOSNOTICE, "Rehash check: %s",
+                    line);
+      }
+    }
+    return res;
+  }
+
+  log_write(LS_CONFIG, L_ERROR, LOG_NOSNOTICE, "Rehash abandoned, nothing "
+            "changed: configuration file %s has errors", configfile);
+  sendto_opmask_butone(0, SNO_OLDSNO, "Rehash abandoned, nothing changed: "
+                       "configuration file %s has errors", configfile);
+  /* What "ircd -k" printed: its errors, and whatever else it had to say
+   * about the file.  The first few go to the operators, all to the log. */
+  for (line = out; line && *line; line = next) {
+    if ((next = strchr(line, '\n')))
+      *next++ = '\0';
+    if (!*line || strstr(line, "checked okay"))
+      continue;
+    log_write(LS_CONFIG, L_ERROR, LOG_NOSNOTICE, "Rehash check: %s", line);
+    if (shown < 5) {
+      sendto_opmask_butone(0, SNO_OLDSNO, "Rehash check: %s", line);
+      shown++;
+    } else
+      more++;
+  }
+  if (more)
+    sendto_opmask_butone(0, SNO_OLDSNO, "Rehash check: %d more (see the "
+                         "CONFIG log)", more);
+  else if (!shown)              /* "ircd -k" printed no reason */
+    sendto_opmask_butone(0, SNO_OLDSNO, "Rehash check: no reason given "
+                         "(no General block with a name and numeric, or the "
+                         "file could not be opened)");
+  return res;
 }
 
 /** Reload the configuration file.  A file that cannot be read at all
@@ -1484,6 +1616,7 @@ int rehash(struct Client *cptr, int sig)
   int               i;
   int               ret = 0;
   int               found_g = 0;
+  enum conf_precheck_result res;
 
   if (1 == sig)
     sendto_opmask_butone(0, SNO_OLDSNO,
@@ -1491,6 +1624,12 @@ int rehash(struct Client *cptr, int sig)
 
   if (!rehash_open_conf())
     return 0;
+  res = rehash_precheck();
+  rehash_conf_file = NULL;      /* init_lexer() takes it over */
+  if (res != CONF_PRECHECK_OK) {
+    lexer_close_config();
+    return 0;
+  }
 
   while ((tmp2 = *tmp)) {
     if (tmp2->clients) {

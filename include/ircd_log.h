@@ -70,6 +70,7 @@ enum LogSys {
 
 extern void log_debug_init(int usetty);
 extern void log_init(const char *process_name);
+extern void log_quiet(void);
 extern void log_reopen(void);
 extern void log_close(void);
 
