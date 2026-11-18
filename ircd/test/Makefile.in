@@ -3,8 +3,11 @@ srcdir = @srcdir@
 VPATH = @srcdir@
 CPPFLAGS = -I${top_srcdir}/include -I../..
 # -MMD -MP: each object records the headers (and included .c files) it
-# was compiled with, read back at the end of this file.
-CFLAGS   = -g -Wall -MMD -MP
+# was compiled with, read back at the end of this file.  "make depend"
+# takes DEP_CFLAGS, without them: with both -MM and -MMD clang writes the
+# dependencies to .d files and the preprocessed source to the list.
+DEP_CFLAGS = -g -Wall
+CFLAGS   = ${DEP_CFLAGS} -MMD -MP
 LDFLAGS  =
 CC = @CC@
 
@@ -259,7 +262,7 @@ depend: ${DEP_SRC}
 	else \
 	  mv Makefile.in Makefile.in.bak && \
 	  grep -A1 -B10000 '^# DO NOT DELETE THIS LINE' Makefile.in.bak > Makefile.in && \
-	  ${CC} ${CFLAGS} -MM ${CPPFLAGS} ${DEP_SRC} >> Makefile.in; \
+	  ${CC} ${DEP_CFLAGS} -MM ${CPPFLAGS} ${DEP_SRC} >> Makefile.in; \
 	fi
 
 install:
