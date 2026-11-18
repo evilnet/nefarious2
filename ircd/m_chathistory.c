@@ -8161,7 +8161,7 @@ static void search_fed_selectors(const struct SearchMatch *sm, char *sel,
  * cuts anything longer, and a cut inside "text=" would leave the
  * responder a shorter selector than the user asked for, so it would
  * answer rows that do not match.  Measured as sent (every destination
- * numeric is two characters, the next request id), against the same
+ * numeric is two characters, the widest request id it may get), against the same
  * "<YY> CH " prefix and safety margin as the other CH lines.  m_search
  * refuses a query that does not fit for a channel it searches, with any
  * number of servers linked: answering that channel from this store
@@ -8175,8 +8175,10 @@ static int search_fed_line_fits(struct Client *sptr, const char *target,
   int len;
 
   search_fed_selectors(sm, sel, sizeof(sel));
+  /* The widest id this search's parts can take: the counter may gain a
+   * digit between the first part and the last. */
   ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu", cli_yxx(&me),
-                fed_reqid_counter + 1);
+                fed_reqid_counter + SEARCH_FED_PARTS_MAX);
   len = ircd_snprintf(0, probe, sizeof(probe),
                       "Q %s S %s %d %s %s %s P%s%s %x :%s",
                       target, before_unix, limit, reqid, "AB",
@@ -8184,6 +8186,23 @@ static int search_fed_line_fits(struct Client *sptr, const char *target,
                       cli_yxx(cli_user(sptr)->server), cli_yxx(sptr),
                       requester_type_mask(sptr), sel);
   return len >= 0 && 6 /* "<YY> CH " */ + (size_t)len + 4 < 510;
+}
+
+/** The parts of SEARCHes without `in` that @a sptr has in flight (N013):
+ * each is a scan on every storage server. */
+static int search_agg_parts_of(struct Client *sptr)
+{
+  char yxx[8];
+  int i, n = 0;
+
+  ircd_snprintf(0, yxx, sizeof(yxx), "%s%s", cli_yxx(cli_user(sptr)->server),
+                cli_yxx(sptr));
+  for (i = 0; i < MAX_FED_REQUESTS; i++)
+    if (fed_requests[i]
+        && fed_requests[i]->completion_cb == complete_search_agg_part
+        && 0 == strcmp(fed_requests[i]->client_yxx, yxx))
+      n++;
+  return n;
 }
 
 /** Fan a SEARCH out to every storage server for @a target.  Wire:
@@ -9947,11 +9966,16 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    * slots every other page and search federates through, nor make every
    * peer scan once per channel: at most SEARCH_FED_PARTS_MAX of them, and
    * never below SEARCH_FED_RESERVE free slots.  Past those, a channel is
-   * searched here only. */
+   * searched here only.  The parts are also counted per client, across
+   * its searches: one that cannot have the parts it would get on an idle
+   * server is refused, not answered from this store alone as if that
+   * were all there is. */
   {
     struct Membership *member;
     struct SearchAgg *agg;
     int free_slots = 0, parts_left = SEARCH_FED_PARTS_MAX;
+    int parts_wanted = 0;
+    time_t query_time = after_unix[0] ? (time_t)strtoul(after_unix, NULL, 10) : 0;
 
     /* A channel whose line cannot fit refuses the search, as with `in`
      * (search_fed_line_fits()). */
@@ -9965,13 +9989,29 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         return 0;
       }
 
-    agg = (struct SearchAgg *)MyCalloc(1, sizeof(*agg));
-    ircd_snprintf(0, agg->client_yxx, sizeof(agg->client_yxx), "%s%s",
-                  cli_yxx(cli_user(sptr)->server), cli_yxx(sptr));
     for (i = 0; i < MAX_FED_REQUESTS; i++) {
       if (!fed_requests[i])
         free_slots++;
     }
+    if (feature_bool(FEAT_CHATHISTORY_FEDERATION))
+      for (member = cli_user(sptr)->channel;
+           member && parts_wanted < SEARCH_FED_PARTS_MAX;
+           member = member->next_channel)
+        if (check_history_access(sptr, member->channel->chname, lookup_target,
+                                 sizeof(lookup_target)) == 0
+            && count_storage_servers(lookup_target, query_time) > 0)
+          parts_wanted++;
+    parts_left -= search_agg_parts_of(sptr);
+    if (parts_wanted > parts_left
+        || free_slots - parts_wanted < SEARCH_FED_RESERVE) {
+      send_fail(sptr, "SEARCH", "TEMPORARILY_UNAVAILABLE", "*",
+                "Too many searches in progress, try again shortly");
+      return 0;
+    }
+
+    agg = (struct SearchAgg *)MyCalloc(1, sizeof(*agg));
+    ircd_snprintf(0, agg->client_yxx, sizeof(agg->client_yxx), "%s%s",
+                  cli_yxx(cli_user(sptr)->server), cli_yxx(sptr));
     if (cli_label(sptr)[0])
       ircd_strncpy(agg->label, cli_label(sptr), sizeof(agg->label));
     hm_search_agg_init(&agg->core, limit);   /* held until every channel is started */
