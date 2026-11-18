@@ -86,6 +86,8 @@ CMOCKA_TESTPROGS = \
 	account_id_cmocka \
 	cap_version_cmocka \
 	cap_notify_cmocka \
+	cap_offer_cmocka \
+	cap_handlers_cmocka \
 	rename_proto_cmocka \
 	rename_handlers_cmocka \
 	sasl_handler_cmocka \
@@ -199,6 +201,8 @@ DEP_SRC = \
 	account_id_cmocka.c \
 	cap_version_cmocka.c \
 	cap_notify_cmocka.c \
+	cap_offer_cmocka.c \
+	cap_handlers_cmocka.c \
 	rename_proto_cmocka.c \
 	rename_handlers_cmocka.c \
 	sasl_handler_cmocka.c \
@@ -623,6 +627,21 @@ CAP_NOTIFY_CMOCKA_OBJS = cap_notify_cmocka.o ../m_cap.o \
 	../ircd_snprintf.o ../ircd_string.o
 cap_notify_cmocka: $(CAP_NOTIFY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(CAP_NOTIFY_CMOCKA_OBJS) $(CMOCKA_LIBS)
+# cap_offer tests - which capabilities CAP LS offers and which CAP REQ
+# entries are refused (cap_offered(), cap_req_refused(), capab.h; pure)
+CAP_OFFER_CMOCKA_OBJS = cap_offer_cmocka.o
+cap_offer_cmocka: $(CAP_OFFER_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(CAP_OFFER_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# cap_handlers tests - CAP LS / REQ and CAP NEW / DEL against fake
+# clients: the REAL m_cap.o and the ircd's printf (so the lines asserted
+# are the lines that go on the wire), with the send layer, the features
+# and the SASL / services facts stubbed in the test.  Defines its own
+# log_write()/me, so test_stub.o is not linked.
+CAP_HANDLERS_CMOCKA_OBJS = cap_handlers_cmocka.o ../m_cap.o \
+	../ircd_snprintf.o ../ircd_string.o
+cap_handlers_cmocka: $(CAP_HANDLERS_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(CAP_HANDLERS_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # rename_proto tests - the argument-only parts of channel RENAME: the
 # services query cookie codec ("<numeric>.<n>") and the rules a rename's

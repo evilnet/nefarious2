@@ -141,6 +141,7 @@ int send_reply(struct Client *to, int reply, ...)
 { (void)to; (void)reply; return 0; }
 /* m_cap.o calls Debug() once #288 is in; unused until then. */
 void debug(int level, const char *form, ...) { (void)level; (void)form; }
+int kc_transport_ready;          /* draft/webpush is offered with it up */
 void log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
                const char *fmt, ...)
 { (void)subsys; (void)severity; (void)flags; (void)fmt; }

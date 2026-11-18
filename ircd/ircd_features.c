@@ -590,6 +590,14 @@ static void feature_notify_cap_##featname(void) { \
 }
 
 /* Generate notify functions for simple caps (no parameters) */
+/** sasl: CAP NEW carries the mechanism list; send_cap_notify() sends it
+ * only while a SASL server is up (cap_offered_to()). */
+static void feature_notify_cap_sasl(void)
+{
+  send_cap_notify("sasl", feature_bool(FEAT_CAP_sasl),
+                  feature_bool(FEAT_CAP_sasl) ? cap_sasl_mechanisms() : NULL);
+}
+
 /** draft/authtoken: CAP NEW only makes sense with a configured service. */
 static void feature_notify_cap_draft_authtoken(void)
 {
@@ -601,6 +609,7 @@ static void feature_notify_cap_draft_authtoken(void)
 }
 
 DEFINE_CAP_NOTIFY("multi-prefix", multi_prefix)
+DEFINE_CAP_NOTIFY("draft/webpush", draft_webpush)
 DEFINE_CAP_NOTIFY("soju.im/search", soju_search)
 DEFINE_CAP_NOTIFY("userhost-in-names", userhost_in_names)
 DEFINE_CAP_NOTIFY("extended-join", extended_join)
@@ -1341,7 +1350,7 @@ static struct FeatureDesc {
   F_B(CAP_extended_join, 0, 1, feature_notify_cap_extended_join),
   F_B(CAP_away_notify, 0, 1, feature_notify_cap_away_notify),
   F_B(CAP_account_notify, 0, 1, feature_notify_cap_account_notify),
-  F_B(CAP_sasl, 0, 1, 0),  /* SASL has special handling via services link */
+  F_B(CAP_sasl, 0, 1, feature_notify_cap_sasl),  /* NEW also follows the SASL server */
   F_B(CAP_cap_notify, 0, 1, feature_notify_cap_cap_notify),
   F_B(CAP_server_time, 0, 1, feature_notify_cap_server_time),
   F_B(CAP_echo_message, 0, 1, feature_notify_cap_echo_message),
@@ -1404,12 +1413,12 @@ static struct FeatureDesc {
   F_I(RELOCATE_GRACE, 0, 900, 0),
   F_B(CAP_draft_read_marker, 0, 0, feature_notify_cap_draft_read_marker),
   F_B(CAP_draft_channel_rename, 0, 0, feature_notify_cap_draft_channel_rename),
-  /* Advertised whenever the build supports it; the RENAME_CONSENT feature
-   * gates the relocation BEHAVIOR, not the cap -- negotiating this cap
-   * alone is harmless. */
+  /* Off by default: a CAP REQ for it is NAKed until this is TRUE.  The
+   * RENAME_CONSENT feature gates the relocation BEHAVIOR, not the cap --
+   * negotiating this cap alone is harmless. */
   F_B(CAP_evilnet_channel_relocate, 0, 0, feature_notify_cap_evilnet_channel_relocate),
   F_B(CAP_draft_metadata_2, 0, 0, feature_notify_cap_draft_metadata_2),
-  F_B(CAP_draft_webpush, 0, 0, 0),  /* webpush has special handling via VAPID key */
+  F_B(CAP_draft_webpush, 0, 0, feature_notify_cap_draft_webpush),  /* NEW also follows the VAPID key */
   /* draft/authtoken: advertised only while an Authtoken{} service exists */
   F_B(CAP_draft_authtoken, 0, 1, feature_notify_cap_draft_authtoken),
   F_I(AUTHTOKEN_EXPIRE, 0, 600, 0),   /* seconds a generated token stays valid */
