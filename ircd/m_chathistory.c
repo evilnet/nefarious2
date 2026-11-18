@@ -8875,8 +8875,10 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       enum HistoryRefType ref_type2;
       const char *ref_value2;
       if (!ref2 || chathistory_parse_s2s_ref(ref2, &ref_type2, &ref_value2) != 0) {
+        /* As for the first reference: nothing could be looked up, so the
+         * page is partial (U), not "nothing here". */
         presence_query_filter_close(fed_pf);
-        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
         return 0;
       }
       count = history_query_between(target, ref_type, ref_value,
