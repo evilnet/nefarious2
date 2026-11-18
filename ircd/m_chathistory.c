@@ -8161,7 +8161,7 @@ static void search_fed_selectors(const struct SearchMatch *sm, char *sel,
  * cuts anything longer, and a cut inside "text=" would leave the
  * responder a shorter selector than the user asked for, so it would
  * answer rows that do not match.  Measured as sent (every destination
- * numeric is two characters, the widest request id it may get), against the same
+ * numeric is two characters, request number @a reqno), against the same
  * "<YY> CH " prefix and safety margin as the other CH lines.  m_search
  * refuses a query that does not fit for a channel it searches, with any
  * number of servers linked: answering that channel from this store
@@ -8169,16 +8169,14 @@ static void search_fed_selectors(const struct SearchMatch *sm, char *sel,
 static int search_fed_line_fits(struct Client *sptr, const char *target,
                                 const char *before_unix,
                                 const char *after_unix, int limit,
-                                const struct SearchMatch *sm)
+                                const struct SearchMatch *sm,
+                                unsigned long reqno)
 {
   char probe[BUFSIZE * 2], sel[BUFSIZE], reqid[32];
   int len;
 
   search_fed_selectors(sm, sel, sizeof(sel));
-  /* The widest id this search's parts can take: the counter may gain a
-   * digit between the first part and the last. */
-  ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu", cli_yxx(&me),
-                fed_reqid_counter + SEARCH_FED_PARTS_MAX);
+  ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu", cli_yxx(&me), reqno);
   len = ircd_snprintf(0, probe, sizeof(probe),
                       "Q %s S %s %d %s %s %s P%s%s %x :%s",
                       target, before_unix, limit, reqid, "AB",
@@ -8192,11 +8190,10 @@ static int search_fed_line_fits(struct Client *sptr, const char *target,
  * each is a scan on every storage server. */
 static int search_agg_parts_of(struct Client *sptr)
 {
-  char yxx[8];
+  char yxx[6];
   int i, n = 0;
 
-  ircd_snprintf(0, yxx, sizeof(yxx), "%s%s", cli_yxx(cli_user(sptr)->server),
-                cli_yxx(sptr));
+  ircd_snprintf(0, yxx, sizeof(yxx), "%s%s", NumNick(sptr));
   for (i = 0; i < MAX_FED_REQUESTS; i++)
     if (fed_requests[i]
         && fed_requests[i]->completion_cb == complete_search_agg_part
@@ -8235,7 +8232,8 @@ static struct FedRequest *start_fed_search(struct Client *sptr, const char *targ
     return NULL;
 
   /* m_search refused a query whose line cannot fit; never sent cut. */
-  if (!search_fed_line_fits(sptr, target, before_unix, after_unix, limit, sm))
+  if (!search_fed_line_fits(sptr, target, before_unix, after_unix, limit, sm,
+                            fed_reqid_counter + 1))
     return NULL;
   search_fed_selectors(sm, sel, sizeof(sel));
   ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu", cli_yxx(&me),
@@ -9928,7 +9926,8 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     if (!IsChannelName(in))
       pm_other = in;
     else if (!search_fed_line_fits(sptr, lookup_target, before_unix,
-                                   after_unix, limit, &sm)) {
+                                   after_unix, limit, &sm,
+                                   fed_reqid_counter + 1)) {
       send_fail(sptr, "SEARCH", "INVALID_PARAMS", "text",
                 "Selectors too long for this channel");
       return 0;
@@ -9982,8 +9981,11 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     for (member = cli_user(sptr)->channel; member; member = member->next_channel)
       if (check_history_access(sptr, member->channel->chname, lookup_target,
                                sizeof(lookup_target)) == 0
+          /* The last id its parts can take is the widest: the counter
+           * may gain a digit between the first part and the last. */
           && !search_fed_line_fits(sptr, lookup_target, before_unix,
-                                   after_unix, limit, &sm)) {
+                                   after_unix, limit, &sm,
+                                   fed_reqid_counter + SEARCH_FED_PARTS_MAX)) {
         send_fail(sptr, "SEARCH", "INVALID_PARAMS", "text",
                   "Selectors too long for one of your channels");
         return 0;
@@ -10002,8 +10004,9 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
             && count_storage_servers(lookup_target, query_time) > 0)
           parts_wanted++;
     parts_left -= search_agg_parts_of(sptr);
-    if (parts_wanted > parts_left
-        || free_slots - parts_wanted < SEARCH_FED_RESERVE) {
+    if (parts_wanted > 0
+        && (parts_wanted > parts_left
+            || free_slots - parts_wanted < SEARCH_FED_RESERVE)) {
       send_fail(sptr, "SEARCH", "TEMPORARILY_UNAVAILABLE", "*",
                 "Too many searches in progress, try again shortly");
       return 0;
