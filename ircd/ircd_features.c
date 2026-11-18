@@ -1451,7 +1451,7 @@ static struct FeatureDesc {
   F_B(CHATHISTORY_FEDERATION, 0, 1, 0),
   F_B(CHATHISTORY_FED_CHILDREN, 0, 1, 0),   /* A federated channel page asks K-capable stores for its rows' children (CH Q K) and advertises K on CH A S at the next link; answers K regardless (W5 Task 14) */
   F_I(CHATHISTORY_TIMEOUT, 0, 5, 0),
-  F_B(CHATHISTORY_STRICT_TIMESTAMPS, 0, 0, 0),
+  F_B(CHATHISTORY_STRICT_TIMESTAMPS, 0, 1, 0),
   F_B(CHATHISTORY_STORE, 0, 1, feature_notify_chathistory_caps),   /* CHATHISTORYRETENTION token follows the store */
   F_B(CHATHISTORY_WRITE_FORWARD, 0, 1, 0),
   F_B(CHATHISTORY_STORE_REGISTERED, 0, 1, 0),
