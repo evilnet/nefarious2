@@ -8028,6 +8028,8 @@ static void search_send(struct Client *sptr, struct HistoryMessage *head,
 static struct HistoryMessage *search_fed_rows(struct FedRequest *req)
 {
   struct HistoryMessage *merged;
+  struct Client *client = findNUser(req->client_yxx);
+  int kept = 0;
   /* A responder filters its own redacted matches (search_row_hook); an
    * older one does not, so the responders' rows pass the same check
    * against this store before the merge.  It finds what this store knows:
@@ -8044,13 +8046,26 @@ static struct HistoryMessage *search_fed_rows(struct FedRequest *req)
         cur->next = NULL;
         history_free_messages(cur);
         req->leg.rows--;
-      } else
+      } else {
         pp = &cur->next;
+        kept++;
+      }
     }
     if (unread)
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "SEARCH %s: %d peer row(s) not shown, their redaction could not be read",
                 req->target, unread);
+  }
+  /* Strict presence: a responder filters by ACCOUNT presence only (a
+   * session anchor lives here alone) and an older one not at all, so the
+   * responders' rows pass the requester's presence here, as a page's do
+   * (autoreplay_page).  The local rows were filtered in
+   * search_one_target.  A requester that has gone gets none. */
+  if (client)
+    presence_filter_messages(client, req->target, &req->leg.msgs, kept, 0);
+  else {
+    history_free_messages(req->leg.msgs);
+    req->leg.msgs = NULL;
   }
   /* No trim in the merge (its limit is a hard cap, 0 keeps nothing):
    * the union is sorted and trimmed below.  hm_merge assumes sorted
