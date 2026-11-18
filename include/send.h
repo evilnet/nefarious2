@@ -114,11 +114,13 @@ extern void sendcmdto_set_s2s_ml(char flag, const char *batch_ref);
  * sendcmdto_one_tags_with_client() toward a tag-carrying link: the line
  * renders multiline message <msgid>.  Consumed or cleared by that call. */
 extern void sendcmdto_set_s2s_fallback(const char *msgid);
-/* Arm a status-message PRIVMSG (#226) for the next
+/* Arm a status message (#226) for the next
  * sendcmdto_channel_butone_with_client_tags() of a wall command: local
- * members get it as "PRIVMSG <status><chan> :<text>", IRCv3-aware links
- * get the wall line marked ,P.  NULL or "" disarms. */
-extern void sendcmdto_set_statusmsg_privmsg(const char *text);
+ * members get it as "PRIVMSG|NOTICE <status><chan> :<text>", 'S' links
+ * as a P/O line marked ,P<status>, other IRCv3-aware links as the wall
+ * line (marked ,P for a PRIVMSG), legacy links as the bare wall line.
+ * NULL or "" disarms. */
+extern void sendcmdto_set_statusmsg(const char *text, int notice);
 /* Whether a send toward this link carries the S2S compact tag region
  * (server link or &me, IRCv3-aware, P10_MESSAGE_TAGS on). */
 extern int send_s2s_tags_on(struct Client *to);

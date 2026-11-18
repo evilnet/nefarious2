@@ -502,6 +502,7 @@ void set_server_flags(struct Client *cptr, const char *flags)
     case 'F': SetBxfAware(cptr); break;
     case 'H': SetHoldMark(cptr); break;
     case 'N': SetNickWriter(cptr); break;
+    case 'S': SetStatusMsgAware(cptr); break;
     }
 }
 
@@ -809,7 +810,7 @@ int ms_server(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       continue;
     if (0 == match(cli_name(&me), cli_name(acptr)))
       continue;
-    sendcmdto_one(sptr, CMD_SERVER, bcptr, "%s %d 0 %s %s %s%s +%s%s%s%s%s%s%s%s%s :%s",
+    sendcmdto_one(sptr, CMD_SERVER, bcptr, "%s %d 0 %s %s %s%s +%s%s%s%s%s%s%s%s%s%s :%s",
                   cli_name(acptr), hop + 1, parv[4], parv[5],
                   NumServCap(acptr), IsHub(acptr) ? "h" : "",
                   IsService(acptr) ? "s" : "", IsIPv6(acptr) ? "6" : "",
@@ -818,7 +819,8 @@ int ms_server(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
                   IsRenameCapable(acptr) ? "r" : "",
                   IsBxfAware(acptr) ? "F" : "",
                   IsHoldMark(acptr) ? "H" : "",
-                  IsNickWriter(acptr) ? "N" : "", cli_info(acptr));
+                  IsNickWriter(acptr) ? "N" : "",
+                  IsStatusMsgAware(acptr) ? "S" : "", cli_info(acptr));
   }
   return 0;
 }

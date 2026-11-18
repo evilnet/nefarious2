@@ -26,7 +26,7 @@ P10 is the server-to-server protocol used by Undernet-derived IRC servers (inclu
 Toward an IRCv3-aware link (SERVER flag `v`) with `P10_MESSAGE_TAGS` on, a line may start with one compact tag region (`format_s2s_tags_with_client`, send.c; parsed in `parse_server`, parse.c):
 
 ```
-@A<time_7><msgid_14>[,S<sessid>[,H<mark>]][,M<flag><batchref>][,F<msgid>][,P][,C<client-tags>] <line>
+@A<time_7><msgid_14>[,S<sessid>[,H<mark>]][,M<flag><batchref>][,F<msgid>][,P[<status>]][,C<client-tags>] <line>
 ```
 
 | Segment | Meaning |
@@ -35,7 +35,8 @@ Toward an IRCv3-aware link (SERVER flag `v`) with `P10_MESSAGE_TAGS` on, a line 
 | `,S` / `,H` | bouncer session id of the line's client / its hold mark (beside `,S` only) |
 | `,M` | multiline framing on `ML` lines: flag (`+` `c` `-` `.`) + batch reference |
 | `,F` | multiline fallback mark on a `P`/`O` line: one of the single-line fallback lines (preview lines and the `[N more lines]` NOTICE) an originating server sent for multiline message `<msgid>`, which it stored whole. A server the line passes through does not store it (`store_relayed_pm`, ircd_relay.c) and re-arms `,F` toward its next fork hop; the target's own server stores it as usual. Server-to-server only. |
-| `,P` | status-message PRIVMSG mark on a `WC`/`WH`/`WV` line (#226), no data: the line is a `PRIVMSG @#chan` (`%#chan`, `+#chan`). The line is the one a `NOTICE @#chan` sends, lead `@ `/`% `/`+ ` included, so legacy servers (no tag region) and fork servers that do not know `,P` show today's `NOTICE @#chan :@ <text>`. A server that reads it (`server_relay_channel_statusmsg`, ircd_relay.c) gives its own members `PRIVMSG @#chan :<text>` -- exactly the token's two-byte lead stripped (`ircd_statusmsg_unlead`); a missing lead means the NOTICE form -- relays the line unchanged and re-arms `,P` (`sendcmdto_set_statusmsg_privmsg`, send.c). Never stored. Server-to-server only. |
+| `,P` | status-message PRIVMSG mark on a `WC`/`WH`/`WV` line (#226), no data: the line is a `PRIVMSG @#chan` (`%#chan`, `+#chan`). The line is the one a `NOTICE @#chan` sends, lead `@ `/`% `/`+ ` included, so legacy servers (no tag region) and fork servers that do not know `,P` show today's `NOTICE @#chan :@ <text>`. A server that reads it (`server_relay_channel_statusmsg`, ircd_relay.c) gives its own members `PRIVMSG @#chan :<text>` -- exactly the token's two-byte lead stripped (`ircd_statusmsg_unlead`); a missing lead means the NOTICE form -- relays the line unchanged and re-arms `,P` (`sendcmdto_set_statusmsg_privmsg`, send.c). Never stored. Sent only toward a link without `S`; an `S` link gets the `,P<status>` form. Server-to-server only. |
+| `,P<status>` | status message (#226), one byte `@`/`%`/`+`: the line, a `P` or `O` to `#chan` (no status in the target), is a `PRIVMSG`/`NOTICE` to `<status>#chan`. Sent only to a link that announced `S` in its SERVER flags (`FLAG_STATUSMSG_AWARE`); every other link gets the wall line (`WC`/`WH`/`WV`, lead included, bare `,P` for a PRIVMSG toward a `v` link), so a server that would deliver a `P #chan` to the whole channel never sees one. The receiver (`server_relay_tagged_statusmsg` → `server_relay_statusmsg_core`, ircd_relay.c) delivers `PRIVMSG|NOTICE <status>#chan :<text>` to members with that status or higher and relays it per link the same way; it is never stored. Any other data is ignored. Server-to-server only. |
 | `,C` | client-only tags, **always last** (its value may contain commas, it runs to the end of the region) |
 
 A receiver skips a segment letter it does not know (parse.c `default:`), and does not relay it: a new segment rolls out without breaking older fork servers, which simply do not act on it. Legacy links never get the region.
@@ -469,6 +470,8 @@ B #chan 1234567890 +nt ABAAB,ABAAC:o999,ABAAD:v
 ```
 
 **Server flag**: Servers with oplevels support include `o` in their SERVER flags.
+
+**Server flag `S`** (`FLAG_STATUSMSG_AWARE`, #226): the server relays a status message (`PRIVMSG`/`NOTICE` to `@#chan`, `%#chan`, `+#chan`) as the `P`/`O` it is, marked `,P<status>`. Always announced. A status message is never stored in history.
 
 ### FEAT_HALFOPS
 
