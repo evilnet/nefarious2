@@ -44,7 +44,7 @@
  * jobs are waiting than STORE_JOBS_WAIT_MAX: the read as it was before,
  * done() called before store_job_start() returns.
  *
- * The pool is shared with the password checks (OPER, SASL, WEBIRC): at
+ * The pool is shared with the password checks (OPER, SETHOST, WEBIRC): at
  * most store_jobs_cap() jobs are in the pool at once, one worker fewer
  * than it has.  That bounds a password check's wait; it does not keep a
  * worker free for it.  The pool's queue is first in, first out, so a
@@ -55,6 +55,8 @@
  */
 #ifndef INCLUDED_store_job_h
 #define INCLUDED_store_job_h
+
+#include <time.h>
 
 struct StoreJob;
 
@@ -76,6 +78,9 @@ struct StoreJob {
   /** The server the answer is for; NULL once it has left.  The main
    * thread's: run() must not read it. */
   const void *link;
+  /** When nobody waits for the answer any more (0: never).  A job still
+   * on the waiting list then is abandoned, not run: done(job, 0). */
+  time_t expire;
   struct StoreJob *sj_next;   /**< private: the pool or waiting list */
   struct StoreJob *sj_prev;   /**< private */
   int sj_state;               /**< private; the job mutex guards it */

@@ -42,6 +42,7 @@
 #include "thread_pool.h"
 
 #include <stddef.h>
+#include <time.h>
 
 enum {
   SJ_NEW = 0,     /**< not started */
@@ -230,6 +231,13 @@ static void pump(void)
       break;
     wait_del(job);
     job->sj_state = SJ_NEW;
+    /* It waited past the time its answer was wanted: a scan for nobody
+     * would only hold the jobs behind it up further. */
+    if (job->expire && time(NULL) >= job->expire) {
+      abandon(job);
+      job->ops->done(job, 0);
+      continue;
+    }
     if (!cap || job_submit(job) < 0)
       run_here(job);
   }

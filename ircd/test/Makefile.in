@@ -855,7 +855,7 @@ chathistory_search_job_cmocka: $(CHATHISTORY_SEARCH_JOB_CMOCKA_OBJS)
 # the status.
 ALLOC_NOMEM_CMOCKA_OBJS = alloc_nomem_cmocka.o ../ircd_alloc.o
 alloc_nomem_cmocka: $(ALLOC_NOMEM_CMOCKA_OBJS)
-	${CC} -o $@ $(LDFLAGS) -Wl,--wrap=malloc -Wl,--wrap=realloc -Wl,--wrap=_exit $(ALLOC_NOMEM_CMOCKA_OBJS) $(CMOCKA_LIBS) -lpthread
+	${CC} -o $@ $(LDFLAGS) -Wl,--wrap=malloc -Wl,--wrap=calloc -Wl,--wrap=realloc -Wl,--wrap=_exit $(ALLOC_NOMEM_CMOCKA_OBJS) $(CMOCKA_LIBS) -lpthread
 
 # log_async tests - the async log writer never writes to a descriptor the
 # log has closed: log_close() and log_file_destroy() drain the queue first,

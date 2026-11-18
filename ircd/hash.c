@@ -28,6 +28,7 @@
 #include "ircd_chattr.h"
 #include "ircd_features.h"
 #include "ircd_log.h"
+#include "main_thread.h"
 #include "ircd_reply.h"
 #include "ircd_string.h"
 #include "ircd.h"
@@ -242,6 +243,8 @@ struct Client* hSeekClient(const char *name, int TMask)
   HASHREGS hashv      = strhash(name);
   struct Client *cptr = clientTable[hashv];
 
+  assert_main_thread();
+
   if (cptr) {
     if (0 == (cli_status(cptr) & TMask) || 0 != ircd_strcmp(name, cli_name(cptr))) {
       struct Client* prev;
@@ -267,6 +270,8 @@ struct Channel* hSeekChannel(const char *name)
 {
   HASHREGS hashv = strhash(name);
   struct Channel *chptr = channelTable[hashv];
+
+  assert_main_thread();
 
   if (chptr) {
     if (0 != ircd_strcmp(name, chptr->chname)) {

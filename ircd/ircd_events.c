@@ -27,6 +27,7 @@
 #include "ircd.h"
 #include "ircd_alloc.h"
 #include "ircd_log.h"
+#include "main_thread.h"
 #include "ircd_snprintf.h"
 #include "s_debug.h"
 
@@ -497,6 +498,7 @@ void
 timer_add(struct Timer* timer, EventCallBack call, void* data,
 	  enum TimerType type, time_t value)
 {
+  assert_main_thread();
   assert(0 != timer);
   assert(0 != call);
 

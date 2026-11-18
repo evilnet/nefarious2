@@ -39,6 +39,7 @@
 #include "ircd_geoip.h"
 #include "ircd_log.h"
 #include "ircd_log_async.h"
+#include "main_thread.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
@@ -2106,6 +2107,7 @@ feature_report(struct Client* to, const struct StatDesc* sd, char* param)
 int
 feature_int(enum Feature feat)
 {
+  assert_main_thread();
   assert(features[feat].feat == feat);
   assert((features[feat].flags & FEAT_MASK) == FEAT_INT);
 
@@ -2119,6 +2121,7 @@ feature_int(enum Feature feat)
 int
 feature_bool(enum Feature feat)
 {
+  assert_main_thread();
   assert(feat <= FEAT_LAST_F);
   if (FEAT_LAST_F < feat)
     return 0;
@@ -2135,6 +2138,7 @@ feature_bool(enum Feature feat)
 const char *
 feature_str(enum Feature feat)
 {
+  assert_main_thread();
   assert(features[feat].feat == feat);
   assert((features[feat].flags & FEAT_MASK) == FEAT_STR);
 
