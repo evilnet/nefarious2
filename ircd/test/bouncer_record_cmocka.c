@@ -1000,91 +1000,6 @@ static void test_restore_marker_against_an_older_builds_heartbeat(void **state)
   free(r);
 }
 
-/* ---- bounce_restore_select(): what a restore may bring back together -- */
-
-#include <strings.h>
-
-#define CAND(i, a, n, t) { (i), (a), (n), (t), 0xff }
-
-/* The review's run: a v13 build held carol's session X; rolled back, this
- * build kept X unread, and carol reconnected as Y under the same nick;
- * rolled forward, both are readable.  Y, the one in use, is kept, X's
- * record goes. */
-static void test_select_same_account_same_nick(void **state)
-{
-  struct bounce_restore_cand c[] = {
-    CAND("X", "carol", "carol", 1000),   /* held from before the rollback */
-    CAND("Y", "carol", "Carol", 5000),   /* made on the older build */
-  };
-  (void)state;
-  assert_int_equal(bounce_restore_select(c, 2, 1, strcasecmp, strcasecmp), 1);
-  assert_int_equal(c[0].drop, BOUNCE_DROP_SAME_NICK);
-  assert_int_equal(c[1].drop, BOUNCE_DROP_NONE);
-  /* The other order on disk chooses alike. */
-  {
-    struct bounce_restore_cand d[] = {
-      CAND("Y", "carol", "Carol", 5000),
-      CAND("X", "carol", "carol", 1000),
-    };
-    assert_int_equal(bounce_restore_select(d, 2, 1, strcasecmp, strcasecmp), 1);
-    assert_int_equal(d[0].drop, BOUNCE_DROP_NONE);
-    assert_int_equal(d[1].drop, BOUNCE_DROP_SAME_NICK);
-  }
-}
-
-/* Another account under the nick: not restored now, its record kept. */
-static void test_select_other_account_same_nick(void **state)
-{
-  struct bounce_restore_cand c[] = {
-    CAND("A", "alice", "nick", 3000),
-    CAND("B", "bob",   "NICK", 2000),
-  };
-  (void)state;
-  assert_int_equal(bounce_restore_select(c, 2, 1, strcasecmp, strcasecmp), 1);
-  assert_int_equal(c[0].drop, BOUNCE_DROP_NONE);
-  assert_int_equal(c[1].drop, BOUNCE_DROP_NICK_TAKEN);
-}
-
-/* Two nicks for one account, BOUNCER_MAX_SESSIONS 1: the later one. */
-static void test_select_over_max_sessions(void **state)
-{
-  struct bounce_restore_cand c[] = {
-    CAND("A", "carol", "carol",  1000),
-    CAND("B", "carol", "carol_", 4000),
-    CAND("C", "dave",  "dave",   2000),
-  };
-  (void)state;
-  assert_int_equal(bounce_restore_select(c, 3, 1, strcasecmp, strcasecmp), 1);
-  assert_int_equal(c[0].drop, BOUNCE_DROP_OVER_MAX);
-  assert_int_equal(c[1].drop, BOUNCE_DROP_NONE);
-  assert_int_equal(c[2].drop, BOUNCE_DROP_NONE);
-  /* With a limit of 2 both stay; with none, both. */
-  assert_int_equal(bounce_restore_select(c, 3, 2, strcasecmp, strcasecmp), 0);
-  assert_int_equal(bounce_restore_select(c, 3, 0, strcasecmp, strcasecmp), 0);
-  assert_int_equal(c[0].drop, BOUNCE_DROP_NONE);
-}
-
-/* A nick loser does not use up its account's limit, and equal activity
- * goes to the smaller id. */
-static void test_select_nick_first_then_limit(void **state)
-{
-  struct bounce_restore_cand c[] = {
-    CAND("B", "carol", "carol",  5000),
-    CAND("A", "carol", "carol",  5000),  /* tie: A kept */
-    CAND("C", "carol", "carol2", 4000),
-  };
-  (void)state;
-  assert_int_equal(bounce_restore_select(c, 3, 2, strcasecmp, strcasecmp), 1);
-  assert_int_equal(c[0].drop, BOUNCE_DROP_SAME_NICK);
-  assert_int_equal(c[1].drop, BOUNCE_DROP_NONE);
-  assert_int_equal(c[2].drop, BOUNCE_DROP_NONE);
-  /* One candidate, or none: nothing to choose. */
-  assert_int_equal(bounce_restore_select(c, 1, 1, strcasecmp, strcasecmp), 0);
-  assert_int_equal(c[0].drop, BOUNCE_DROP_NONE);
-  assert_int_equal(bounce_restore_select(c, 0, 1, strcasecmp, strcasecmp), 0);
-}
-
-
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1123,10 +1038,6 @@ int main(void)
     cmocka_unit_test(test_boot_record_codec),
     cmocka_unit_test(test_alive_record_codec),
     cmocka_unit_test(test_restore_marker_against_an_older_builds_heartbeat),
-    cmocka_unit_test(test_select_same_account_same_nick),
-    cmocka_unit_test(test_select_other_account_same_nick),
-    cmocka_unit_test(test_select_over_max_sessions),
-    cmocka_unit_test(test_select_nick_first_then_limit),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

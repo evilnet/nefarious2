@@ -5589,17 +5589,6 @@ static void restore_marks_free(struct restore_marks *m)
   m->n = m->cap = 0;
 }
 
-/* A session the first pass would restore, kept until every record is
- * read: which of them restore together is decided over all of them
- * (bounce_restore_select()). */
-struct restore_cand {
-  struct bounce_restore_cand c;
-  char id[BOUNCER_SESSID_LEN];
-  char account[ACCOUNTLEN + 1];
-  char nick[NICKLEN + 1];
-  unsigned char flags;
-};
-
 /** The first pass, before anything else, run by every start with the
  * store open (bounce_boot_steps()), the bouncer and persistence on or not.
  *  - Every restart marker on disk -- the last run's: its heartbeat is the
@@ -5614,12 +5603,6 @@ struct restore_cand {
  *    its boot record names are not restored again, and their records go
  *    (logged at L_CRIT).  A session held before that crash restores as it
  *    always did.
- *  - Sessions it may not restore together: two under one nick, or more
- *    for an account than BOUNCER_MAX_SESSIONS -- what a roll-forward
- *    finds when the build rolled back to kept a newer build's records
- *    unread and the user reconnected (bounce_restore_select()).  The
- *    session active latest is kept; the other's record goes, logged,
- *    unless it is another account's, which is only not restored now.
  *  - This start's boot record, RUNNING, names every session it restores
  *    because it was live at the crash (bounce_boot_lists()); with none,
  *    the key is deleted: nothing to break (review m1).
@@ -5642,9 +5625,6 @@ static int bounce_restore_prepare(struct db_env *env, struct db_cf *cf,
   struct db_iter *it;
   int window = feature_int(FEAT_BOUNCER_RESTORE_CRASH_WINDOW);
   int breaker = 0, rc, skipped = 0, rewritten = 0, outlived = 0;
-  struct restore_cand *cand = NULL;
-  size_t ncand = 0, capcand = 0, k;
-  int same_nick = 0, nick_taken = 0, over_max = 0;
 
   if (mcf
       && db_get(env, mcf, BOUNCE_BOOT_KEY, sizeof(BOUNCE_BOOT_KEY) - 1,
@@ -5762,83 +5742,13 @@ static int bounce_restore_prepare(struct db_env *env, struct db_cf *cf,
     }
     if (!plan)
       continue;
-    if (bounce_boot_lists(v))
+    if (bounce_boot_lists(v)) {
       flags |= RM_LISTED;
-    if (ncand == capcand) {
-      capcand = capcand ? capcand * 2 : 64;
-      cand = (struct restore_cand *)MyRealloc(cand, capcand * sizeof(*cand));
+      nlisted++;
     }
-    memset(&cand[ncand], 0, sizeof(*cand));
-    ircd_strncpy(cand[ncand].id, id, sizeof(cand[ncand].id));
-    ircd_strncpy(cand[ncand].account, rec.bsr_account,
-                 sizeof(cand[ncand].account));
-    ircd_strncpy(cand[ncand].nick, rec.bsr_nick, sizeof(cand[ncand].nick));
-    cand[ncand].c.active = rec.bsr_last_active > since ? rec.bsr_last_active
-                                                       : since;
-    cand[ncand].flags = flags;
-    ncand++;
+    restore_marks_add(plan, id, flags);
   }
   db_iter_close(it);
-
-  /* Which of them restore together (bounce_restore_select()). */
-  for (k = 0; k < ncand; k++) {
-    cand[k].c.id = cand[k].id;
-    cand[k].c.account = cand[k].account;
-    cand[k].c.nick = cand[k].nick;
-  }
-  if (ncand) {
-    struct bounce_restore_cand *cv;
-
-    cv = (struct bounce_restore_cand *)MyMalloc(ncand * sizeof(*cv));
-    for (k = 0; k < ncand; k++)
-      cv[k] = cand[k].c;
-    (void)bounce_restore_select(cv, ncand,
-                                feature_int(FEAT_BOUNCER_MAX_SESSIONS),
-                                ircd_strcmp, ircd_strcmp);
-    for (k = 0; k < ncand; k++)
-      cand[k].c.drop = cv[k].drop;
-    MyFree(cv);
-  }
-  for (k = 0; k < ncand; k++) {
-    struct restore_cand *e = &cand[k];
-
-    switch (e->c.drop) {
-    case BOUNCE_DROP_NONE:
-      if (e->flags & RM_LISTED)
-        nlisted++;
-      restore_marks_add(plan, e->id, e->flags);
-      continue;
-    case BOUNCE_DROP_SAME_NICK:
-      log_write(LS_SYSTEM, L_WARNING, 0, "bouncer_persist: deleting session "
-                "%s (%s, %s): the account restores a session active later "
-                "under the same nick", e->id, e->account, e->nick);
-      db_writebatch_del(wb, cf, e->id, strlen(e->id));
-      same_nick++;
-      break;
-    case BOUNCE_DROP_OVER_MAX:
-      log_write(LS_SYSTEM, L_WARNING, 0, "bouncer_persist: deleting session "
-                "%s (%s, %s): the account restores BOUNCER_MAX_SESSIONS (%d) "
-                "sessions active later", e->id, e->account, e->nick,
-                feature_int(FEAT_BOUNCER_MAX_SESSIONS));
-      db_writebatch_del(wb, cf, e->id, strlen(e->id));
-      over_max++;
-      break;
-    default:   /* BOUNCE_DROP_NICK_TAKEN */
-      log_write(LS_SYSTEM, L_WARNING, 0, "bouncer_persist: not restoring "
-                "session %s (%s, %s) this start: another account restores a "
-                "session active later under that nick; the record stays "
-                "until its hold ends", e->id, e->account, e->nick);
-      nick_taken++;
-      break;
-    }
-    restore_marks_add(plan, e->id, RM_SKIP);
-  }
-  MyFree(cand);
-  if (same_nick || over_max || nick_taken)
-    log_write(LS_SYSTEM, L_WARNING, 0, "bouncer_persist: %d sessions deleted "
-              "as a later session of their account holds the nick, %d past "
-              "BOUNCER_MAX_SESSIONS, %d not restored as another account's "
-              "holds the nick", same_nick, over_max, nick_taken);
 
   /* This start's boot record: RUNNING, the sessions it restores because
    * they were live at the crash; none, no record.  A start that does not
@@ -6050,10 +5960,10 @@ int bounce_db_restore(void)
       continue;
     }
 
-    /* The first pass left out every session that would share a nick
-     * (bounce_restore_select()); a v7 record it does not read, or a
-     * client made before the restore, can still hold one.  Not built:
-     * two clients under one nick.  The record stays until its hold
+    /* While this build kept a newer build's records unread, their users
+     * reconnected, often under the same nick, and a roll-forward reads
+     * both sessions.  Not built: two clients under one nick.  The first
+     * record read holds the nick; the other stays on disk until its hold
      * ends. */
     if (FindClient(rec->bsr_nick)) {
       log_write(LS_SYSTEM, L_WARNING, 0, "bouncer_persist: not restoring "
@@ -6287,21 +6197,20 @@ int bounce_db_restore(void)
              * keeping. */
             (void)v7;
             should_delete = 1;
-          } else {
+          } else if (version == BOUNCER_DB_VERSION
+                     && vlen == sizeof(struct BounceSessionRecord)) {
             struct BounceSessionRecord erec;
             uint32_t ever;
-            enum BounceRecordStatus est;
-            /* The restore's own rule, on an aligned copy, for every
-             * version it reads: a migrated record restored here is re-put
-             * below under the same key, and one another account's
-             * session kept from restoring (bounce_restore_select()) stays
-             * until its hold ends.  Unknown versions and wrong sizes go;
-             * the restore loop counted each one. */
-            est = bounce_record_decode(vbuf, vlen, &erec, &ever);
-            if ((est != BOUNCE_REC_CURRENT && est != BOUNCE_REC_MIGRATED)
+            /* The restore's own rule, on an aligned copy. */
+            if (bounce_record_decode(vbuf, vlen, &erec, &ever) != BOUNCE_REC_CURRENT
                 || bounce_record_restore(&erec, ever, &clock, NULL)
                    == BOUNCE_RESTORE_EXPIRED)
               should_delete = 1;
+          } else {
+            /* Unknown version or wrong size — evict.  v8..v11 records
+             * also land here; they were migrated and are re-put below.
+             * The restore loop logged each one it skipped. */
+            should_delete = 1;
           }
         }
         if (should_delete
@@ -6323,9 +6232,9 @@ int bounce_db_restore(void)
   /* If we migrated any records, persist them in the current form now (v7
    * under the new UUID keys, later versions over their old ones).
    * Otherwise the migrated state is in-memory only: a held session is
-   * never marked dirty, and a later build's eviction pass deletes every
-   * record it cannot read -- one more restart before a revive would then
-   * lose the session.  A
+   * never marked dirty, and the eviction pass above deletes every record
+   * that is not the current version whenever anything expired -- one
+   * more restart before a revive would then lose the session.  A
    * session the restart marker brought back (marked dirty above) is
    * written now too, as the held session it is, with its real time. */
   if (migrated_v7 > 0 || migrated > 0 || restarted > 0) {

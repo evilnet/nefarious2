@@ -14,7 +14,6 @@
 
 #include "bouncer_record.h"
 
-#include <stdlib.h>
 #include <string.h>
 
 /* Compile-time checks at file scope (the pre-C11 negative-array form). */
@@ -487,84 +486,4 @@ int bounce_restore_breaker(enum bounce_boot_state prev, uint32_t listed,
   if (last_alive > 0 && last_alive - prev_start >= window)
     return 0;
   return 1;
-}
-
-/* qsort has no context argument: the comparisons for the one running
- * bounce_restore_select() (the ircd is single-threaded at startup). */
-static int (*sel_nickcmp)(const char *, const char *);
-static int (*sel_acctcmp)(const char *, const char *);
-
-/* Later activity first; ties by id, so the order is total. */
-static int sel_by_activity(const struct bounce_restore_cand *a,
-                           const struct bounce_restore_cand *b)
-{
-  if (a->active != b->active)
-    return a->active > b->active ? -1 : 1;
-  return strcmp(a->id, b->id);
-}
-
-static int sel_by_nick(const void *pa, const void *pb)
-{
-  const struct bounce_restore_cand *a = *(const struct bounce_restore_cand *const *)pa;
-  const struct bounce_restore_cand *b = *(const struct bounce_restore_cand *const *)pb;
-  int c = sel_nickcmp(a->nick, b->nick);
-
-  return c ? c : sel_by_activity(a, b);
-}
-
-static int sel_by_account(const void *pa, const void *pb)
-{
-  const struct bounce_restore_cand *a = *(const struct bounce_restore_cand *const *)pa;
-  const struct bounce_restore_cand *b = *(const struct bounce_restore_cand *const *)pb;
-  int c = sel_acctcmp(a->account, b->account);
-
-  return c ? c : sel_by_activity(a, b);
-}
-
-size_t bounce_restore_select(struct bounce_restore_cand *c, size_t n,
-                             int max_sessions,
-                             int (*nickcmp)(const char *, const char *),
-                             int (*acctcmp)(const char *, const char *))
-{
-  struct bounce_restore_cand **v;
-  size_t i, j, k, dropped = 0;
-
-  for (i = 0; i < n; i++)
-    c[i].drop = BOUNCE_DROP_NONE;
-  if (n < 2)
-    return 0;
-  v = (struct bounce_restore_cand **)malloc(n * sizeof(*v));
-  if (!v)
-    return 0;   /* restores as before this check */
-  sel_nickcmp = nickcmp;
-  sel_acctcmp = acctcmp;
-
-  /* One per nick: the first of each run, by nick then activity. */
-  for (i = 0; i < n; i++)
-    v[i] = &c[i];
-  qsort(v, n, sizeof(*v), sel_by_nick);
-  for (i = 0; i < n; i = j) {
-    for (j = i + 1; j < n && !nickcmp(v[i]->nick, v[j]->nick); j++) {
-      v[j]->drop = acctcmp(v[i]->account, v[j]->account)
-                   ? BOUNCE_DROP_NICK_TAKEN : BOUNCE_DROP_SAME_NICK;
-      dropped++;
-    }
-  }
-
-  /* Then, of what is left, max_sessions per account. */
-  if (max_sessions > 0) {
-    for (i = k = 0; i < n; i++)
-      if (c[i].drop == BOUNCE_DROP_NONE)
-        v[k++] = &c[i];
-    qsort(v, k, sizeof(*v), sel_by_account);
-    for (i = 0; i < k; i = j) {
-      for (j = i + 1; j < k && !acctcmp(v[i]->account, v[j]->account); j++)
-        if (j - i >= (size_t)max_sessions) {
-          v[j]->drop = BOUNCE_DROP_OVER_MAX;
-          dropped++;
-        }
-    }
-  }
-  free(v);
-  return dropped;
 }
