@@ -437,6 +437,14 @@ int thread_pool_is_running(void)
 }
 
 /**
+ * How many workers run (0 with no pool).
+ */
+int thread_pool_workers(void)
+{
+  return pool.num_workers;
+}
+
+/**
  * Get thread pool statistics.
  */
 void thread_pool_stats(unsigned int *pending, unsigned long *completed,
