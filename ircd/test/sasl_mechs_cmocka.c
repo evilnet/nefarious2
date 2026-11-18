@@ -132,6 +132,7 @@ const char *auth_iauth_sasl_mechs(void)
 }
 int authtoken_service_count(void) { return 0; }
 const char *get_vapid_pubkey(void) { return NULL; }
+int kc_transport_ready;          /* draft/webpush is offered with it up */
 
 /* The servers linked now.  A server that left is out of this table
  * before sasl_mechanisms_server_gone() runs, as it is out of the hash

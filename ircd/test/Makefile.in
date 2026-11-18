@@ -95,6 +95,8 @@ CMOCKA_TESTPROGS = \
 	markread_wire_cmocka \
 	markread_join_cmocka \
 	sasl_turn_cmocka \
+	cap_offer_cmocka \
+	cap_handlers_cmocka \
 	rename_proto_cmocka \
 	chathistory_ref_cmocka \
 	conf_precheck_cmocka \
@@ -223,6 +225,8 @@ DEP_SRC = \
 	markread_wire_cmocka.c \
 	markread_join_cmocka.c \
 	sasl_turn_cmocka.c \
+	cap_offer_cmocka.c \
+	cap_handlers_cmocka.c \
 	rename_proto_cmocka.c \
 	chathistory_ref_cmocka.c \
 	conf_precheck_cmocka.c \
@@ -718,6 +722,21 @@ sasl_turn_cmocka: $(SASL_TURN_CMOCKA_OBJS)
 CONF_PRECHECK_CMOCKA_OBJS = conf_precheck_cmocka.o ../conf_precheck.o
 conf_precheck_cmocka: $(CONF_PRECHECK_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(CONF_PRECHECK_CMOCKA_OBJS) $(CMOCKA_LIBS)
+# cap_offer tests - which capabilities CAP LS offers and which CAP REQ
+# entries are refused (cap_offered(), cap_req_refused(), capab.h; pure)
+CAP_OFFER_CMOCKA_OBJS = cap_offer_cmocka.o
+cap_offer_cmocka: $(CAP_OFFER_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(CAP_OFFER_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# cap_handlers tests - CAP LS / REQ and CAP NEW / DEL against fake
+# clients: the REAL m_cap.o and the ircd's printf (so the lines asserted
+# are the lines that go on the wire), with the send layer, the features
+# and the SASL / services facts stubbed in the test.  Defines its own
+# log_write()/me, so test_stub.o is not linked.
+CAP_HANDLERS_CMOCKA_OBJS = cap_handlers_cmocka.o ../m_cap.o \
+	../ircd_snprintf.o ../ircd_string.o
+cap_handlers_cmocka: $(CAP_HANDLERS_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(CAP_HANDLERS_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # rename_proto tests - the argument-only parts of channel RENAME: the
 # services query cookie codec ("<numeric>.<n>") and the rules a rename's

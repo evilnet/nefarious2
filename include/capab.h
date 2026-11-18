@@ -135,6 +135,32 @@ DECLARE_FLAGSET(CapSet, _CAP_LAST_CAP);
  * values, cap-notify implied, SASL 3.2 (AUTHENTICATE after registration). */
 #define CAP_VERSION_302 302
 
+/** Whether CAP LS offers a capability to a client now.  \a flags are its
+ * CAPFL_* flags, \a feature_on whether its feature switch is on (or it has
+ * none), \a available whether what it needs is up (sasl: a SASL server;
+ * draft/authtoken: a service; 1 for the others), \a min_version the CAP
+ * version it needs (sts: 302; 0 for the others) and \a version the
+ * client's.  A hidden capability is never offered. */
+static inline int cap_offered(unsigned long flags, int feature_on,
+                              int available, unsigned short min_version,
+                              unsigned short version)
+{
+  return !(flags & CAPFL_HIDDEN) && feature_on && available
+         && version >= min_version;
+}
+
+/** Whether CAP REQ refuses one entry of its list (and so NAKs the whole
+ * request): adding a capability that is prohibited or not offered now
+ * (cap_offered()), or removing one that is sticky.  \a neg is set for a
+ * removal ("-cap"), which is never refused for not being offered, so a
+ * client can always drop a capability the server stopped offering. */
+static inline int cap_req_refused(unsigned long flags, int neg, int offered)
+{
+  if (neg)
+    return (flags & CAPFL_STICKY) != 0;
+  return (flags & CAPFL_PROHIBIT) || !offered;
+}
+
 /** A connection's CAP version once it has sent "CAP LS [<version>]" with
  * \a arg as its version (NULL or "": none), when it was \a current: the
  * highest version it ever sent.  The capability-negotiation spec presumes a
