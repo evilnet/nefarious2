@@ -6101,7 +6101,7 @@ static void max_failures_aborted_guesses_count(void **state)
 
 /** A refused token is counted when the refusal is known (the error
  * challenge), whatever the client does next -- data, *, nothing (the
- * timeout) -- and only once.  A timeout while the request is still with
+ * timeout), or registering (CAP END) -- and only once.  A timeout while the request is still with
  * the backend is the backend's, not the client's: not counted. */
 static void max_failures_refusal_known_and_timeouts(void **state)
 {
@@ -6112,7 +6112,7 @@ static void max_failures_refusal_known_and_timeouts(void **state)
   sasl_init_once();
   max_failures = 0;
   b64((const unsigned char *)msg, sizeof(msg) - 1, data);
-  for (how = 0; how < 3; how++) {             /* then data, *, the timeout */
+  for (how = 0; how < 4; how++) {  /* then data, *, the timeout, CAP END */
     struct Client *c = new_client(189 + how, "tk", 0, REG_KEEPS);
 
     jwt_local_undecided = 1;
@@ -6124,8 +6124,10 @@ static void max_failures_refusal_known_and_timeouts(void **state)
       assert_int_equal(authenticate(c, "AQ=="), 0);
     else if (how == 1)
       assert_int_equal(authenticate(c, "*"), 0);
-    else
+    else if (how == 2)
       fire_timer(&cli_sasltimeout(c));
+    else
+      assert_int_equal(sasl_abort_for_registration(c), 0);
     assert_int_equal(cli_sasl_failures(c), 1);  /* once */
     jwt_local_undecided = 0;
   }

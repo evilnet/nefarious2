@@ -224,8 +224,10 @@ static int authenticate_end(struct Client *cptr, int client_abort,
        * to acknowledge failure — reply with SASLFAIL, not SASLABORTED. */
       if (cli_saslsession(cptr)->state == SASL_STATE_FAILED) {
         /* The end of a refused token: counted, unless Keycloak could not
-         * be asked (SASL_MAX_FAILURES). */
-        if (!cli_saslsession(cptr)->fail_unavailable && !for_registration)
+         * be asked (SASL_MAX_FAILURES).  Also when registration ends it
+         * in place of the client's "*": the token was judged and refused,
+         * only an abort of data not yet judged is free. */
+        if (!cli_saslsession(cptr)->fail_unavailable)
           sasl_failure_count(cptr);
         send_reply(cptr, ERR_SASLFAIL, "");
       }
