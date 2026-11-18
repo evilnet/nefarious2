@@ -176,6 +176,7 @@ int m_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   char*           name;
   char*           server;
   int             i;
+  char            status;
   int             count;
   int             found_g = 0;
   char*           vector[MAXTARGETS];
@@ -218,16 +219,6 @@ int m_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc < 3 || EmptyString(parv[parc - 1]))
     return send_reply(sptr, ERR_NOTEXTTOSEND);
 
-  if (parv[1][0] == '@' && IsChannelPrefix(parv[1][1])) {
-    parv[1]++;                        /* Get rid of '@' */
-    return m_wallchops(cptr, sptr, parc, parv);
-  } else if (parv[1][0] == '%' && IsChannelPrefix(parv[1][1])) {
-    parv[1]++;                        /* Get rid of '%' */
-    return m_wallhops(cptr, sptr, parc, parv);
-  } else if (parv[1][0] == '+' && IsChannelPrefix(parv[1][1])) {
-    parv[1]++;                        /* Get rid of '+' */
-    return m_wallvoices(cptr, sptr, parc, parv);
-  }
 
   if (feature_bool(FEAT_CTCP_VERSIONING) && MyConnect(sptr) &&
       (!ircd_strcmp(parv[1], cli_name(&me)) || (!EmptyString(feature_str(FEAT_CTCP_VERSIONING_NICK)) &&
@@ -303,6 +294,13 @@ int m_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       relay_channel_notice(sptr, name, parv[parc - 1], count);
     }
     /*
+     * a status target, "@#chan", "%#chan" or "+#chan" (STATUSMSG): to
+     * the members with that status, as a NOTICE (#226; it used to go
+     * through WALLCHOPS & co, whole target list and all)
+     */
+    else if ((status = ircd_statusmsg_prefix(name)))
+      relay_channel_statusmsg(sptr, status, name + 1, parv[parc - 1], count, 1);
+    /*
      * we have to check for the '@' at least once no matter what we do
      * handle it first so we don't have to do it twice
      */
@@ -364,6 +362,7 @@ int mo_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   char*           name;
   char*           server;
   int             i;
+  char            status;
   int             count;
   char*           vector[MAXTARGETS];
   assert(0 != cptr);
@@ -397,16 +396,6 @@ int mo_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (parc < 3 || EmptyString(parv[parc - 1]))
     return send_reply(sptr, ERR_NOTEXTTOSEND);
 
-  if (parv[1][0] == '@' && IsChannelPrefix(parv[1][1])) {
-    parv[1]++;                        /* Get rid of '@' */
-    return m_wallchops(cptr, sptr, parc, parv);
-  } else if (parv[1][0] == '%' && IsChannelPrefix(parv[1][1])) {
-    parv[1]++;                        /* Get rid of '%' */
-    return m_wallhops(cptr, sptr, parc, parv);
-  } else if (parv[1][0] == '+' && IsChannelPrefix(parv[1][1])) {
-    parv[1]++;                        /* Get rid of '+' */
-    return m_wallvoices(cptr, sptr, parc, parv);
-  }
 
   count = unique_name_vector(parv[1], ',', vector, MAXTARGETS);
 
@@ -424,6 +413,9 @@ int mo_notice(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      */
     if (IsChannelPrefix(*name))
       relay_channel_notice(sptr, name, parv[parc - 1], count);
+
+    else if ((status = ircd_statusmsg_prefix(name)))
+      relay_channel_statusmsg(sptr, status, name + 1, parv[parc - 1], count, 1);
 
     else if (*name == '$')
       relay_masked_notice(sptr, name, parv[parc - 1]);

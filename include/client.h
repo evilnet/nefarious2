@@ -242,6 +242,16 @@ enum Flag
                                          route is trusted only when every
                                          server on it announced it
                                          (nick_writer_route()). */
+    FLAG_STATUSMSG_AWARE,           /**< server relays a status message
+                                         (PRIVMSG/NOTICE to "@#chan",
+                                         "%#chan", "+#chan") as the
+                                         PRIVMSG/NOTICE it is, marked with
+                                         the compact-tag ,P<status>
+                                         segment, and stores it as one.
+                                         Advertised via 'S' in SERVER
+                                         flags.  A link without it gets the
+                                         WALLCHOPS / WALLHOPS / WALLVOICES
+                                         line it always did. */
     FLAG_GOTID,                     /**< successful ident lookup achieved */
     FLAG_DOID,                      /**< I-lines say must use ident return */
     FLAG_NONL,                      /**< No \n in buffer */
@@ -591,7 +601,7 @@ struct Connection
   char                con_s2s_ml[S2S_ML_BUFSIZE]; /**< S2S compact-tag ,M<flag><batchref> segment (multiline framing, audit 0.1); empty when absent */
   char                con_s2s_fallback[S2S_MSGID_BUFSIZE]; /**< S2S compact-tag ,F<msgid> segment: the line is a multiline fallback line rendering message <msgid> (only its target's server stores it); empty when absent */
   char                con_s2s_held;  /**< S2S compact-tag ,H<x> segment: the bouncer hold mark of the N's client (BOUNCE_HOLD_MARK_*), 0 when absent or invalid */
-  char                con_s2s_statusmsg; /**< S2S compact-tag ,P segment (#226): 1 when the line (a WALLCHOPS/WALLHOPS/WALLVOICES) is a PRIVMSG to a status target, delivered here in the PRIVMSG form; 0 when absent */
+  char                con_s2s_statusmsg; /**< S2S compact-tag ,P segment (#226): 1 for the bare ,P (the line, a WALLCHOPS/WALLHOPS/WALLVOICES, is a PRIVMSG to a status target, delivered here in the PRIVMSG form); '@', '%' or '+' for ,P<status> (the line, a PRIVMSG/NOTICE to a channel, is addressed to that status); 0 when absent */
   struct Client*      con_burst_stamp_link; /**< Local client: the server link our last burst N for it went to with a hold mark (compared only, never dereferenced) */
   char                con_burst_stamp; /**< Local client: the hold mark (BOUNCE_HOLD_MARK_*) that N carried, 0 when none */
   unsigned long       con_burst_stamp_serial; /**< Local client: that link's link_serial when the N went (struct Server) */
@@ -1532,6 +1542,9 @@ struct Client {
 /** Return non-zero if our SERVER line to this link announced 'H'. */
 #define IsHoldMarkSent(x)       HasFlag(x, FLAG_HOLDMARK_SENT)
 #define IsNickWriter(x)         HasFlag(x, FLAG_NICKWRITER)
+/** Return non-zero if the server relays status messages as tagged
+ * PRIVMSG/NOTICE ('S'). */
+#define IsStatusMsgAware(x)     HasFlag(x, FLAG_STATUSMSG_AWARE)
 /** Return non-zero if the client has an account stamp. */
 #define IsAccount(x)            HasFlag(x, FLAG_ACCOUNT)
 /** Return non-zero if the client has set mode +x (hidden host). */
@@ -1717,6 +1730,8 @@ struct Client {
 /** Record that our SERVER line to this link announced 'H'. */
 #define SetHoldMarkSent(x)      SetFlag(x, FLAG_HOLDMARK_SENT)
 #define SetNickWriter(x)        SetFlag(x, FLAG_NICKWRITER)
+/** Mark a server as relaying status messages as tagged PRIVMSG/NOTICE. */
+#define SetStatusMsgAware(x)    SetFlag(x, FLAG_STATUSMSG_AWARE)
 /** Mark a client as having an account stamp. */
 #define SetAccount(x)           SetFlag(x, FLAG_ACCOUNT)
 /** Mark a client as having mode +x (hidden host). */

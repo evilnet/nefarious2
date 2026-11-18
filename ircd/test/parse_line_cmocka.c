@@ -788,6 +788,37 @@ static void server_statusmsg_segment(void **state)
   assert_string_equal(cli_s2s_client_tags(&leaf), "+x=a,P");
 }
 
+/* ,P<status>: one of @ % + names the status a PRIVMSG/NOTICE to a channel
+ * is addressed to (a server that announced 'S'); kept for its line, gone
+ * with the next; any other data, or more than one byte, is ignored. */
+static void server_statusmsg_target_segment(void **state)
+{
+  struct outcome o;
+
+  (void)state;
+  o = parse_every_way(parse_server, &leaf, COMPACT ",P@ AC G :hello");
+  expect_handler("@", &o, "PING", "hello");
+  assert_int_equal(cli_s2s_statusmsg(&leaf), '@');
+  o = parse_every_way(parse_server, &leaf, COMPACT ",P%,C+x=a AC G :hello");
+  assert_int_equal(cli_s2s_statusmsg(&leaf), '%');
+  assert_string_equal(cli_s2s_client_tags(&leaf), "+x=a");
+  o = parse_every_way(parse_server, &leaf,
+      COMPACT ",Sabc,FAAAAAAAAAAAAAB,P+,Cfoo=bar AC G :hello");
+  assert_int_equal(cli_s2s_statusmsg(&leaf), '+');
+  assert_string_equal(cli_s2s_sessid(&leaf), "abc");
+  assert_string_equal(cli_s2s_client_tags(&leaf), "foo=bar");
+  o = parse_every_way(parse_server, &leaf, COMPACT " AC G :hello");
+  assert_int_equal(cli_s2s_statusmsg(&leaf), 0);
+
+  /* not a status: ignored, never the bare mark */
+  o = parse_every_way(parse_server, &leaf, COMPACT ",P# AC G :hello");
+  assert_int_equal(cli_s2s_statusmsg(&leaf), 0);
+  o = parse_every_way(parse_server, &leaf, COMPACT ",P@@ AC G :hello");
+  assert_int_equal(cli_s2s_statusmsg(&leaf), 0);
+  o = parse_every_way(parse_server, &leaf, COMPACT ",P@+ AC G :hello");
+  assert_int_equal(cli_s2s_statusmsg(&leaf), 0);
+}
+
 
 /* A session echo line (BX E, #229) with a tag region: the region fills
  * the link's stash -- msgid and client tags (the time decode is stubbed
@@ -1124,6 +1155,7 @@ int main(void)
     cmocka_unit_test(server_unknown_segment_is_skipped),
     cmocka_unit_test(server_fallback_segment),
     cmocka_unit_test(server_statusmsg_segment),
+    cmocka_unit_test(server_statusmsg_target_segment),
     cmocka_unit_test(client_cannot_set_statusmsg_mark),
     cmocka_unit_test(client_tags_or_prefix_then_nothing_is_an_empty_line),
     cmocka_unit_test(client_label_ends_with_its_line),

@@ -2054,15 +2054,20 @@ int parse_server(struct Client *cptr, char *buffer, char *bufend)
               break;
             }
             case 'P': {
-              /* Status-message PRIVMSG mark (#226): the line, a
-               * WALLCHOPS / WALLHOPS / WALLVOICES whose text starts with
-               * the "<status> " lead, is a PRIVMSG to "<status><chan>",
-               * which a server that reads the mark delivers to its own
-               * users as one (ms_wallchops & co).  It carries no data; a
-               * ,P with data is a later version's segment, not this one,
-               * and is skipped like any unknown segment. */
+              /* Status message (#226).  Bare ,P: the line, a WALLCHOPS /
+               * WALLHOPS / WALLVOICES whose text starts with the
+               * "<status> " lead, is a PRIVMSG to "<status><chan>"
+               * (server_relay_channel_statusmsg).  ,P<status> (one of
+               * @ % +): the line, a PRIVMSG or NOTICE to a channel, is
+               * addressed to the members with that status
+               * (server_relay_tagged_statusmsg).  Any other data is a
+               * later version's and is skipped. */
               if (seg_end == seg_data)
                 cli_s2s_statusmsg(cptr) = 1;
+              else if (seg_end - seg_data == 1
+                       && (seg_data[0] == '@' || seg_data[0] == '%'
+                           || seg_data[0] == '+'))
+                cli_s2s_statusmsg(cptr) = seg_data[0];
               break;
             }
             default:

@@ -67,25 +67,41 @@ char *ircd_strncpy(char *dest, const char *src, size_t len)
   }
   return dest;
 }
+/* Each line msgq_make() builds: its tag region and, for a server line
+ * ("%s%C %s ..." or "%C %s ..."), its token.  The MsgBuf handed back is
+ * the record itself, so msgq_add() can tell which line a link was sent. */
+struct made_line {
+  char tags[512];
+  char tok[8];
+};
+static struct made_line made[64];
+static int made_next;
 struct MsgBuf *msgq_make(struct Client *dest, const char *format, ...)
 {
-  static struct MsgBuf *dummy;
+  struct made_line *ml = &made[made_next++ % 64];
   va_list ap;
   (void)dest;
   lines_made++;
   last_tags[0] = '\0';
+  memset(ml, 0, sizeof(*ml));
+  va_start(ap, format);
   if (format[0] == '%' && format[1] == 's') {   /* "%s%:#C ..." = tag region first */
-    va_start(ap, format);
     ircd_strncpy(last_tags, va_arg(ap, const char *), sizeof(last_tags));
-    va_end(ap);
+    ircd_strncpy(ml->tags, last_tags, sizeof(ml->tags));
+    if (strncmp(format + 2, "%C %s ", 6) == 0) {
+      (void)va_arg(ap, struct Client *);
+      ircd_strncpy(ml->tok, va_arg(ap, const char *), sizeof(ml->tok));
+    }
+  } else if (strncmp(format, "%C %s ", 6) == 0) {
+    (void)va_arg(ap, struct Client *);
+    ircd_strncpy(ml->tok, va_arg(ap, const char *), sizeof(ml->tok));
   }
+  va_end(ap);
   if (last_tags[0] && strlen(all_tags) + strlen(last_tags) + 4 < sizeof(all_tags)) {
     strcat(all_tags, last_tags);
     strcat(all_tags, " | ");
   }
-  if (!dummy)
-    dummy = calloc(1, 256);
-  return dummy;
+  return (struct MsgBuf *)ml;
 }
 void msgq_clean(struct MsgBuf *mb) { (void)mb; }
 /* send_buffer()'s deferred labeled batch (send.c, labeled_batch_defer())
@@ -105,7 +121,19 @@ void *DoMalloc(size_t len, const char *type, const char *file, int line)
 }
 /* ...and its BATCH + line (send_batch_marker()), the same: ircd_snprintf()
  * below fails every format but the channel send's user prefix. */
-void msgq_add(struct MsgQ *mq, struct MsgBuf *mb, int prio) { (void)mq; (void)mb; (void)prio; }
+/* The line each fake link was last queued (the dispatch cases). */
+static struct MsgQ *sent_q[4];
+static const struct made_line *sent_line[4];
+void msgq_add(struct MsgQ *mq, struct MsgBuf *mb, int prio)
+{
+  int i;
+  (void)prio;
+  for (i = 0; i < 4; i++)
+    if (sent_q[i] == mq) {
+      sent_line[i] = (const struct made_line *)mb;
+      return;
+    }
+}
 void msgq_delete(struct MsgQ *mq, unsigned int length) { (void)mq; (void)length; }
 void dbuf_delete(struct DBuf *dyn, unsigned int length) { (void)dyn; (void)length; }
 void client_drop_sendq(struct Connection *con) { (void)con; }
@@ -284,90 +312,44 @@ static void test_reset_clears_mark(void **state)
   assert_null(strstr(buf, ",F"));
 }
 
-/* --- The status-message PRIVMSG mark ,P (#226) --------------------- */
+/* --- The status-message marks ,P / ,P<status> (#226) --------------- */
 
-/* ,P carries no data, comes after ,F and before the terminal ,C, and is
- * consumed by the format that places it. */
-static void test_statusmsg_mark_placed_and_consumed(void **state)
+/* The formatter never places ,P: the channel send places each form's own
+ * (s2s_tags_insert_seg), so an arm reaches no other line. */
+static void test_format_never_places_statusmsg_mark(void **state)
 {
   char buf[512];
   (void)state;
-  sendcmdto_set_statusmsg_privmsg("hello");
-  assert_non_null(format_s2s_tags_with_client(buf, sizeof(buf), NULL, "+x=a,b",
-                                              NULL, 0));
-  assert_non_null(strstr(buf, ",P,C+x=a,b "));
-  assert_non_null(format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL,
-                                              NULL, 0));
-  assert_null(strstr(buf, ",P"));
-}
-
-/* Without client tags it ends the region. */
-static void test_statusmsg_mark_alone(void **state)
-{
-  char buf[512];
-  (void)state;
-  sendcmdto_set_statusmsg_privmsg("hello");
-  assert_non_null(format_s2s_tags(buf, sizeof(buf), NULL, NULL, 0));
-  assert_int_equal(0, strcmp(buf + strlen(buf) - 3, ",P "));
-}
-
-/* Every segment at once, in the documented order:
- * ,S<sessid>,H<mark>,M<flag><ref>,F<msgid>,P,C<client tags>. */
-static void test_statusmsg_mark_order_with_every_segment(void **state)
-{
-  char buf[512];
-  (void)state;
-  sendcmdto_set_s2s_sessid("sess1");
-  sendcmdto_set_s2s_held('p');
-  sendcmdto_set_s2s_ml('+', "ref1");
-  sendcmdto_set_s2s_fallback("ABAAAaHRNCiimg");
-  sendcmdto_set_statusmsg_privmsg("hello");
-  assert_non_null(format_s2s_tags_with_client(buf, sizeof(buf), NULL, "+x=a",
-                                              NULL, 0));
-  assert_non_null(strstr(buf, ",Ssess1,Hp,M+ref1,FABAAAaHRNCiimg,P,C+x=a "));
-}
-
-static void test_no_statusmsg_mark_unless_armed(void **state)
-{
-  char buf[512];
-  (void)state;
+  sendcmdto_set_statusmsg("hello", 0);
   assert_non_null(format_s2s_tags_with_client(buf, sizeof(buf), NULL, "+x=a",
                                               NULL, 0));
   assert_null(strstr(buf, ",P"));
-  sendcmdto_set_statusmsg_privmsg(NULL);               /* NULL disarms */
-  format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL, NULL, 0);
-  assert_null(strstr(buf, ",P"));
-  sendcmdto_set_statusmsg_privmsg("");                 /* so does "" */
-  format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL, NULL, 0);
-  assert_null(strstr(buf, ",P"));
 }
 
-/* A line toward one link (the DM path) never carries it: armed for a
- * channel send only, and cleared by a send that does not use it. */
-static void test_one_send_clears_statusmsg_mark(void **state)
+/* An arm that a line toward one link (the DM path), or the end-of-line
+ * reset, passes is gone: a later wall send carries no status form. */
+static void test_statusmsg_arm_cleared(void **state)
 {
-  char buf[512];
+  static struct Channel chan;
   (void)state;
-  sendcmdto_set_statusmsg_privmsg("hello");
+  memset(&chan, 0, sizeof(chan));
+  strcpy(chan.chname, "#c");
+
+  sendcmdto_set_statusmsg("hello", 0);
   sendcmdto_one_tags_with_client(&user, "PRIVMSG", "P", &link_legacy, NULL, NULL,
                                  "%s :%s", "x", "hello");
-  format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL, NULL, 0);
-  assert_null(strstr(buf, ",P"));
-}
+  sendcmdto_channel_butone_with_client_tags(&user, "WALLCHOPS", "WC", &chan, NULL,
+                                            SKIP_DEAF | SKIP_BURST | SKIP_NONOPS,
+                                            '\0', NULL, "%s :%s", "#c", "@ hello");
+  assert_non_null(strstr(all_tags, "@A"));
+  assert_null(strstr(all_tags, ",P"));
 
-/* The end-of-line reset clears it, with P10_MESSAGE_TAGS off too (the
- * format returns before consuming anything then). */
-static void test_reset_clears_statusmsg_mark(void **state)
-{
-  char buf[512];
-  (void)state;
-  tags_on = 0;
-  sendcmdto_set_statusmsg_privmsg("hello");
-  assert_null(format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL, NULL, 0));
-  tags_on = 1;
+  sendcmdto_set_statusmsg("hello", 0);
   sendcmdto_reset_s2s_overrides();
-  format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL, NULL, 0);
-  assert_null(strstr(buf, ",P"));
+  sendcmdto_channel_butone_with_client_tags(&user, "WALLCHOPS", "WC", &chan, NULL,
+                                            SKIP_DEAF | SKIP_BURST | SKIP_NONOPS,
+                                            '\0', NULL, "%s :%s", "#c", "@ hello");
+  assert_null(strstr(all_tags, ",P"));
 }
 
 /* A channel send with no wall status filter never carries ,P, even with
@@ -382,7 +364,7 @@ static void test_ordinary_channel_send_drops_statusmsg_mark(void **state)
   memset(&chan, 0, sizeof(chan));
   strcpy(chan.chname, "#c");
 
-  sendcmdto_set_statusmsg_privmsg("hello");
+  sendcmdto_set_statusmsg("hello", 0);
   sendcmdto_channel_butone_with_client_tags(&user, "PRIVMSG", "P", &chan, NULL,
                                             SKIP_DEAF | SKIP_BURST, '\0', NULL,
                                             "%s :%s", "#c", "hello");
@@ -392,7 +374,7 @@ static void test_ordinary_channel_send_drops_statusmsg_mark(void **state)
   assert_null(strstr(buf, ",P"));                   /* and nothing left armed */
 
   all_tags[0] = '\0';
-  sendcmdto_set_statusmsg_privmsg("hello");
+  sendcmdto_set_statusmsg("hello", 0);
   sendcmdto_channel_butone_with_client_tags(&user, "WALLCHOPS", "WC", &chan, NULL,
                                             SKIP_DEAF | SKIP_BURST | SKIP_NONOPS,
                                             '\0', NULL, "%s :%s", "#c", "@ hello");
@@ -407,12 +389,207 @@ static void test_ordinary_channel_send_with_ctags_drops_statusmsg_mark(void **st
   memset(&chan, 0, sizeof(chan));
   strcpy(chan.chname, "#c");
 
-  sendcmdto_set_statusmsg_privmsg("hello");
+  sendcmdto_set_statusmsg("hello", 0);
   sendcmdto_channel_butone_with_client_tags(&user, "PRIVMSG", "P", &chan, NULL,
                                             SKIP_DEAF | SKIP_BURST, '\0', "+x=a",
                                             "%s :%s", "#c", "hello");
   assert_non_null(strstr(all_tags, ",C+x=a"));
   assert_null(strstr(all_tags, ",P"));
+}
+
+/* --- A status message as the PRIVMSG/NOTICE it is ('S' links) ------ */
+
+/* A PRIVMSG armed for a wall send: the 'S' form marked ,P@ and the wall
+ * line marked ,P, each before the terminal ,C, with one msgid. */
+static void test_statusmsg_privmsg_both_forms(void **state)
+{
+  static struct Channel chan;
+  const char *a, *b;
+  (void)state;
+  memset(&chan, 0, sizeof(chan));
+  strcpy(chan.chname, "#c");
+
+  sendcmdto_set_statusmsg("hello", 0);
+  sendcmdto_channel_butone_with_client_tags(&user, "WALLCHOPS", "WC", &chan, NULL,
+                                            SKIP_DEAF | SKIP_BURST | SKIP_NONOPS,
+                                            '\0', "+x=a", "%s :%s", "#c", "@ hello");
+  assert_non_null(strstr(all_tags, ",P@,C+x=a "));
+  assert_non_null(strstr(all_tags, ",P,C+x=a "));
+  /* same "@A<time><msgid>" head */
+  a = strstr(all_tags, "@A");
+  b = strstr(a + 1, "@A");
+  assert_non_null(b);
+  assert_int_equal(0, strncmp(a, b, 2 + 7 + 14));
+}
+
+/* A NOTICE: the 'S' form marked ,P%, the wall line carries no ,P -- the
+ * wall line IS the NOTICE form toward every other link. */
+static void test_statusmsg_notice_wall_line_unmarked(void **state)
+{
+  static struct Channel chan;
+  (void)state;
+  memset(&chan, 0, sizeof(chan));
+  strcpy(chan.chname, "#c");
+
+  sendcmdto_set_statusmsg("hello", 1);
+  sendcmdto_channel_butone_with_client_tags(&user, "WALLHOPS", "WH", &chan, NULL,
+                                            SKIP_DEAF | SKIP_BURST | SKIP_NONHOPS,
+                                            '\0', NULL, "%s :%s", "#c", "% hello");
+  assert_non_null(strstr(all_tags, ",P% "));
+  assert_null(strstr(all_tags, ",P "));
+  /* and nothing is left armed: the next wall send is the wall line alone */
+  all_tags[0] = '\0';
+  sendcmdto_channel_butone_with_client_tags(&user, "WALLHOPS", "WH", &chan, NULL,
+                                            SKIP_DEAF | SKIP_BURST | SKIP_NONHOPS,
+                                            '\0', NULL, "%s :%s", "#c", "% hello");
+  assert_non_null(strstr(all_tags, "@A"));
+  assert_null(strstr(all_tags, ",P"));
+}
+
+/* Armed, but the send has no wall status filter: neither form. */
+static void test_statusmsg_notice_ordinary_send_unmarked(void **state)
+{
+  static struct Channel chan;
+  (void)state;
+  memset(&chan, 0, sizeof(chan));
+  strcpy(chan.chname, "#c");
+
+  sendcmdto_set_statusmsg("hello", 1);
+  sendcmdto_channel_butone_with_client_tags(&user, "NOTICE", "O", &chan, NULL,
+                                            SKIP_DEAF | SKIP_BURST, '\0', NULL,
+                                            "%s :%s", "#c", "hello");
+  assert_non_null(strstr(all_tags, "@A"));
+  assert_null(strstr(all_tags, ",P"));
+}
+
+/* Arming one kind disarms the other: a NOTICE armed after a PRIVMSG
+ * leaves no ,P for the wall line. */
+static void test_statusmsg_arms_replace(void **state)
+{
+  static struct Channel chan;
+  (void)state;
+  memset(&chan, 0, sizeof(chan));
+  strcpy(chan.chname, "#c");
+
+  sendcmdto_set_statusmsg("hello", 0);
+  sendcmdto_set_statusmsg("hello", 1);
+  sendcmdto_channel_butone_with_client_tags(&user, "WALLVOICES", "WV", &chan, NULL,
+                                            SKIP_DEAF | SKIP_BURST | SKIP_NONVOICES,
+                                            '\0', NULL, "%s :%s", "#c", "+ hello");
+  assert_non_null(strstr(all_tags, ",P+ "));
+  assert_null(strstr(all_tags, ",P "));
+}
+
+/* --- Which link gets which line ------------------------------------ */
+
+/* Three remote chanops, each behind its own link: one that announced 'S',
+ * one IRCv3-aware without it, one legacy.  fds are set so the member loop
+ * and send_buffer() reach msgq_add(), which records the line per link. */
+static struct Client dl_link[3], dl_user[3];
+static struct Connection dl_link_con[3];
+static struct Membership dl_member[3];
+static struct Channel dl_chan;
+
+static void dispatch_setup(void)
+{
+  static struct Connection me_con;   /* send_buffer() counts cli_sendM(&me) */
+  int i;
+  memset(&me_con, 0, sizeof(me_con));
+  cli_connect(&me) = &me_con;
+  con_client(&me_con) = &me;
+  memset(&dl_chan, 0, sizeof(dl_chan));
+  strcpy(dl_chan.chname, "#c");
+  for (i = 0; i < 3; i++) {
+    mk_link(&dl_link[i], &dl_link_con[i], i < 2);
+    cli_fd(&dl_link[i]) = 20 + i;
+    memset(&dl_user[i], 0, sizeof(dl_user[i]));
+    cli_status(&dl_user[i]) = STAT_USER;
+    cli_connect(&dl_user[i]) = &dl_link_con[i];   /* cli_from() = the link */
+    memset(&dl_member[i], 0, sizeof(dl_member[i]));
+    dl_member[i].user = &dl_user[i];
+    dl_member[i].channel = &dl_chan;
+    dl_member[i].status = CHFL_CHANOP;
+    dl_member[i].next_member = i < 2 ? &dl_member[i + 1] : NULL;
+    sent_q[i] = &cli_sendQ(&dl_link[i]);
+    sent_line[i] = NULL;
+  }
+  SetStatusMsgAware(&dl_link[0]);
+  dl_chan.members = &dl_member[0];
+}
+
+static void dispatch_send(int notice, const char *ctags)
+{
+  if (notice)
+    sendcmdto_set_statusmsg("hello", 1);
+  else
+    sendcmdto_set_statusmsg("hello", 0);
+  sendcmdto_channel_butone_with_client_tags(&user, "WALLCHOPS", "WC", &dl_chan,
+                                            NULL, SKIP_DEAF | SKIP_BURST | SKIP_NONOPS,
+                                            '\0', ctags, "%s :%s", "#c", "@ hello");
+}
+
+/* A PRIVMSG: the 'S' link gets P marked ,P@; the IRCv3 link the wall
+ * line marked ,P; the legacy link the bare wall line. */
+static void test_statusmsg_dispatch_privmsg(void **state)
+{
+  (void)state;
+  dispatch_setup();
+  dispatch_send(0, NULL);
+  assert_non_null(sent_line[0]);
+  assert_string_equal(sent_line[0]->tok, "P");
+  assert_non_null(strstr(sent_line[0]->tags, ",P@ "));
+  assert_non_null(sent_line[1]);
+  assert_string_equal(sent_line[1]->tok, "WC");
+  assert_non_null(strstr(sent_line[1]->tags, ",P "));
+  assert_non_null(sent_line[2]);
+  assert_string_equal(sent_line[2]->tok, "WC");
+  assert_string_equal(sent_line[2]->tags, "");
+  /* one msgid for both tagged forms */
+  assert_int_equal(0, strncmp(sent_line[0]->tags, sent_line[1]->tags, 2 + 7 + 14));
+}
+
+/* A NOTICE: O marked ,P@ toward 'S'; the unmarked wall line elsewhere. */
+static void test_statusmsg_dispatch_notice(void **state)
+{
+  (void)state;
+  dispatch_setup();
+  dispatch_send(1, NULL);
+  assert_string_equal(sent_line[0]->tok, "O");
+  assert_non_null(strstr(sent_line[0]->tags, ",P@ "));
+  assert_string_equal(sent_line[1]->tok, "WC");
+  assert_null(strstr(sent_line[1]->tags, ",P"));
+  assert_string_equal(sent_line[2]->tok, "WC");
+  assert_string_equal(sent_line[2]->tags, "");
+}
+
+/* With client tags the tagged forms carry ,C after the mark. */
+static void test_statusmsg_dispatch_ctags(void **state)
+{
+  (void)state;
+  dispatch_setup();
+  dispatch_send(0, "+x=a");
+  assert_string_equal(sent_line[0]->tok, "P");
+  assert_non_null(strstr(sent_line[0]->tags, ",P@,C+x=a "));
+  assert_string_equal(sent_line[1]->tok, "WC");
+  assert_non_null(strstr(sent_line[1]->tags, ",P,C+x=a "));
+  assert_string_equal(sent_line[2]->tags, "");
+}
+
+/* P10_MESSAGE_TAGS off: no tag region, so every link, 'S' or not, gets
+ * the bare wall line. */
+static void test_statusmsg_dispatch_tags_off(void **state)
+{
+  int i;
+  (void)state;
+  tags_on = 0;
+  dispatch_setup();
+  dispatch_send(0, NULL);
+  for (i = 0; i < 3; i++) {
+    assert_non_null(sent_line[i]);
+    assert_string_equal(sent_line[i]->tok, "WC");
+    assert_string_equal(sent_line[i]->tags, "");
+  }
+  tags_on = 1;
 }
 
 /* --- A session echo line toward a server (#229) -------------------- */
@@ -625,12 +802,16 @@ int main(void)
     cmocka_unit_test_setup(test_bx_ctags_full_size_is_whole, setup),
     cmocka_unit_test_setup(test_ordinary_channel_send_drops_statusmsg_mark, setup),
     cmocka_unit_test_setup(test_ordinary_channel_send_with_ctags_drops_statusmsg_mark, setup),
-    cmocka_unit_test_setup(test_statusmsg_mark_placed_and_consumed, setup),
-    cmocka_unit_test_setup(test_statusmsg_mark_alone, setup),
-    cmocka_unit_test_setup(test_statusmsg_mark_order_with_every_segment, setup),
-    cmocka_unit_test_setup(test_no_statusmsg_mark_unless_armed, setup),
-    cmocka_unit_test_setup(test_one_send_clears_statusmsg_mark, setup),
-    cmocka_unit_test_setup(test_reset_clears_statusmsg_mark, setup),
+    cmocka_unit_test_setup(test_statusmsg_privmsg_both_forms, setup),
+    cmocka_unit_test_setup(test_statusmsg_notice_wall_line_unmarked, setup),
+    cmocka_unit_test_setup(test_statusmsg_notice_ordinary_send_unmarked, setup),
+    cmocka_unit_test_setup(test_statusmsg_arms_replace, setup),
+    cmocka_unit_test_setup(test_statusmsg_dispatch_privmsg, setup),
+    cmocka_unit_test_setup(test_statusmsg_dispatch_notice, setup),
+    cmocka_unit_test_setup(test_statusmsg_dispatch_ctags, setup),
+    cmocka_unit_test_setup(test_statusmsg_dispatch_tags_off, setup),
+    cmocka_unit_test_setup(test_format_never_places_statusmsg_mark, setup),
+    cmocka_unit_test_setup(test_statusmsg_arm_cleared, setup),
     cmocka_unit_test_setup(test_format_places_and_consumes_mark, setup),
     cmocka_unit_test_setup(test_no_mark_unless_armed, setup),
     cmocka_unit_test_setup(test_send_to_v3_link_carries_mark, setup),
