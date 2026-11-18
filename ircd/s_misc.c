@@ -396,6 +396,12 @@ static void exit_one_client(struct Client* bcptr, const char* comment)
   struct SLink *lp;
   struct Ban *bp;
 
+  /* Its numeric is free for the next client once this returns: a
+   * federated page or SEARCH still out for it must not be answered to,
+   * or counted against, whoever takes the numeric. */
+  if (MyUser(bcptr))
+    chathistory_forget_client(bcptr);
+
   /* Forwarded commands sent to it, or out over the link it was, will
    * not be answered: their labels are answered now (forwarded_label.c). */
   if (IsServer(bcptr))
