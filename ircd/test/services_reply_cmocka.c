@@ -440,16 +440,6 @@ uint64_t history_event_time_ms(struct Client *link)
   return NOW_MS;
 }
 
-void sendcmdto_set_client_event(const char *msgid, uint64_t event_ms)
-{
-  (void)msgid; (void)event_ms;
-}
-
-uint64_t history_event_time_ms(struct Client *link)
-{
-  (void)link;
-  return 0;
-}
 
 void sendcmdto_want_s2s_tags(int want)
 {
