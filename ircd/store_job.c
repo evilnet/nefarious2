@@ -120,18 +120,33 @@ static void pool_del(struct StoreJob *job)
   pool_count--;
 }
 
-/** Run @a job here, on the main thread, and answer it. */
-static void run_here(struct StoreJob *job)
-{
-  job->ops->run(job);
-  job->ops->done(job, 1);
-}
-
 /** Give back the store handles of @a job, which will not run. */
 static void abandon(struct StoreJob *job)
 {
   if (job->ops->abandon)
     job->ops->abandon(job);
+}
+
+/** Has @a job waited past the time its answer was wanted?  Then it is
+ * abandoned and answered as not run: a scan for nobody would only hold
+ * the jobs behind it up further.
+ * @return 1 when it was. */
+static int expired(struct StoreJob *job)
+{
+  if (!job->expire || time(NULL) < job->expire)
+    return 0;
+  abandon(job);
+  job->ops->done(job, 0);
+  return 1;
+}
+
+/** Run @a job here, on the main thread, and answer it. */
+static void run_here(struct StoreJob *job)
+{
+  if (expired(job))
+    return;
+  job->ops->run(job);
+  job->ops->done(job, 1);
 }
 
 void store_jobs_count(unsigned int *in_pool, unsigned int *waiting)
@@ -231,13 +246,8 @@ static void pump(void)
       break;
     wait_del(job);
     job->sj_state = SJ_NEW;
-    /* It waited past the time its answer was wanted: a scan for nobody
-     * would only hold the jobs behind it up further. */
-    if (job->expire && time(NULL) >= job->expire) {
-      abandon(job);
-      job->ops->done(job, 0);
+    if (expired(job))
       continue;
-    }
     if (!cap || job_submit(job) < 0)
       run_here(job);
   }

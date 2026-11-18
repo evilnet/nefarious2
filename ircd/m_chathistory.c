@@ -8080,8 +8080,8 @@ static void search_job_abandon(struct StoreJob *job)
   sj->base.view = NULL;
 }
 
-/** Answer and free (main thread).  Nothing is sent when the scan never
- * ran (the store is closing) or the asking server has left. */
+/** Answer and free (main thread).  A scan that never ran is answered
+ * "E <reqid> 0 U"; nothing is sent when the asking server has left. */
 static void search_job_done(struct StoreJob *job, int ran)
 {
   struct SearchJob *sj = (struct SearchJob *)job;
@@ -8121,6 +8121,12 @@ static void search_job_done(struct StoreJob *job, int ran)
         sendcmdto_one(&me, CMD_CHATHISTORY, origin, "E %s %d", sj->reqid, sj->count);
     }
   }
+
+  /* Never ran, with the asking server still there: it waited too long
+   * for a worker, or the store is closing.  Partial, not "nothing
+   * here", and the requester need not wait out its timer. */
+  if (!ran && origin)
+    sendcmdto_one(&me, CMD_CHATHISTORY, origin, "E %s 0 U", sj->reqid);
 
   history_free_messages(sj->rows);
   presence_query_filter_close(sj->pf);
@@ -9101,8 +9107,10 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
         return 0;
       }
       /* The requester gives up after its CHATHISTORY_TIMEOUT; ours is the
-       * best guess at it. */
-      sj->job.expire = CurrentTime + feature_int(FEAT_CHATHISTORY_TIMEOUT);
+       * best guess at it.  If its own is longer, the "U" a dropped scan
+       * is answered with (search_job_done()) ends its wait at once. */
+      if (feature_int(FEAT_CHATHISTORY_TIMEOUT) > 0)
+        sj->job.expire = time(NULL) + feature_int(FEAT_CHATHISTORY_TIMEOUT);
       store_job_start(&sj->job);  /* may have answered and freed it already */
       return 0;
     } else if (query_subcmd_char == 'X') {

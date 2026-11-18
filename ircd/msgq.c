@@ -340,6 +340,8 @@ msgq_vmake(struct Client *dest, const char *format, va_list vl)
   int len, alloc_size;
   int s2s = dest && (IsServer(dest) || IsMe(dest));
 
+  assert_main_thread();
+
   assert(0 != format);
 
   /* Format into scratch buffer first to determine actual size */
@@ -433,8 +435,6 @@ msgq_make(struct Client *dest, const char *format, ...)
 {
   va_list vl;
   struct MsgBuf *mb;
-
-  assert_main_thread();
 
   va_start(vl, format);
   mb = msgq_vmake(dest, format, vl);

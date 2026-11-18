@@ -36,7 +36,7 @@ int log_inassert;
 /* The wrapped world                                                   */
 /* ------------------------------------------------------------------ */
 
-static int fail_alloc;          /**< malloc() and realloc() return NULL */
+static int fail_alloc;          /**< malloc(), calloc() and realloc() return NULL */
 static int handler_calls;       /**< the out-of-memory handler ran */
 static pthread_t handler_thread;
 static int exit_calls;          /**< _exit() was called ... */
