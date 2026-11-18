@@ -50,6 +50,25 @@
 #include <stdlib.h>
 #include <string.h>
 
+struct capabilities {
+  enum Capab cap;
+  char *capstr;
+  unsigned long flags;
+  char *name;
+  int namelen;
+  int feat;
+  char *value;           /**< CAP 302 value (e.g., "PLAIN,EXTERNAL" for sasl) */
+};
+static const struct capabilities *cap_named(const char *name);
+
+/** The capabilities some client was told are offered (listed by CAP LS,
+ * or ACKed) since their last CAP DEL.  A CAP NEW for one of them changes
+ * only its value: news for a CAP 302 client, nothing for an older one,
+ * which sees no values.  One set for the server: every change of what CAP
+ * LS lists is announced, so the clients that know of a capability are all
+ * of them or none. */
+static struct CapSet cap_announced;
+
 /* ---------------------------------------------------------------------------
  * CAP notify batching for rehash
  *
@@ -68,6 +87,8 @@ struct cap_batch_entry {
   char capname[64];    /**< CAP name (e.g., "draft/multiline") */
   char value[256];     /**< Optional value (e.g., "max-bytes=4096") */
   int available;       /**< 1 for NEW, 0 for DEL */
+  int known;           /**< A NEW of a capability already announced
+                        *   (cap_announced): only its value changes */
 };
 
 /** CAP notify batch state */
@@ -106,7 +127,8 @@ void cap_notify_begin_batch(void)
 /** Add a CAP change to the batch buffer.
  * @return 1 if buffered, 0 if buffer full (should send immediately)
  */
-static int cap_batch_add(const char *capname, int available, const char *value)
+static int cap_batch_add(const char *capname, int available, const char *value,
+                         int known)
 {
   struct cap_batch_entry *entry;
   int i;
@@ -118,6 +140,7 @@ static int cap_batch_add(const char *capname, int available, const char *value)
   for (i = 0; i < cap_batch.count; i++) {
     if (!strcmp(cap_batch.entries[i].capname, capname)) {
       cap_batch.entries[i].available = available;
+      cap_batch.entries[i].known = known;
       if (value && *value)
         ircd_strncpy(cap_batch.entries[i].value, value, sizeof(cap_batch.entries[i].value) - 1);
       else
@@ -131,6 +154,7 @@ static int cap_batch_add(const char *capname, int available, const char *value)
   ircd_strncpy(entry->capname, capname, sizeof(entry->capname) - 1);
   entry->capname[sizeof(entry->capname) - 1] = '\0';
   entry->available = available;
+  entry->known = known;
   if (value && *value)
     ircd_strncpy(entry->value, value, sizeof(entry->value) - 1);
   else
@@ -161,7 +185,8 @@ cap_notify_v302(struct Client *cptr)
  * @param[in] to        Local client, or NULL to log.
  * @param[in] available 1 for the NEW list, 0 for the DEL list.
  * @param[in] v302      A CAP 302 client: values and sts.  Others get bare
- *                      names and no sts. */
+ *                      names, no sts, and no NEW that only changes a
+ *                      value (it would tell them nothing). */
 static void
 cap_batch_send(struct Client *to, int available, int v302)
 {
@@ -177,7 +202,8 @@ cap_batch_send(struct Client *to, int available, int v302)
 
       if (!entry->available != !available)
         continue;
-      if (!v302 && !strcmp(entry->capname, "sts"))
+      if (!v302 && (!strcmp(entry->capname, "sts")
+                    || (available && entry->known)))
         continue;
       if (v302 && entry->value[0])
         ircd_snprintf(0, item, sizeof(item), "%s=%s", entry->capname,
@@ -329,10 +355,16 @@ sasl_server_available(void)
 void send_cap_notify(const char *capname, int available, const char *value)
 {
   struct Client *cptr;
+  const struct capabilities *cap = cap_named(capname);
+  /* A NEW of a capability already announced changes only its value. */
+  int known = cap && CapHas(&cap_announced, cap->cap);
+
+  if (cap && !available)
+    CapClr(&cap_announced, cap->cap);
 
   /* If batching is active, buffer instead of sending immediately */
   if (cap_batch.active) {
-    if (cap_batch_add(capname, available, value))
+    if (cap_batch_add(capname, available, value, known))
       return;
     /* Buffer full - fall through to send immediately */
   }
@@ -345,6 +377,9 @@ void send_cap_notify(const char *capname, int available, const char *value)
       continue;
     /* sts and values are CAP 302's (see cap_notify_v302()). */
     if (!cap_notify_v302(cptr) && !strcmp(capname, "sts"))
+      continue;
+    /* A new value of a capability it knows tells a pre-302 client nothing. */
+    if (!cap_notify_v302(cptr) && available && known)
       continue;
 
     if (available) {
@@ -362,15 +397,7 @@ void send_cap_notify(const char *capname, int available, const char *value)
 }
 
 
-static struct capabilities {
-  enum Capab cap;
-  char *capstr;
-  unsigned long flags;
-  char *name;
-  int namelen;
-  int feat;
-  char *value;           /**< CAP 302 value (e.g., "PLAIN,EXTERNAL" for sasl) */
-} capab_list[] = {
+static struct capabilities capab_list[] = {
 #define _CAP(cap, flags, name, feat) \
     { CAP_ ## cap, #cap, (flags), (name), sizeof(name) - 1, feat, 0 }
 #define _CAP_V(cap, flags, name, feat, val) \
@@ -479,6 +506,18 @@ void cap_set_value(enum Capab cap, const char *value)
                             cap_value_store[slot].value : NULL;
       return;
     }
+}
+
+/** The capability called \a name, or NULL. */
+static const struct capabilities *
+cap_named(const char *name)
+{
+  size_t i;
+
+  for (i = 0; i < CAPAB_LIST_LEN; i++)
+    if (!strcmp(capab_list[i].name, name))
+      return &capab_list[i];
+  return NULL;
 }
 
 /* qsort/bsearch comparators take const void *: calling one through a
@@ -660,6 +699,9 @@ send_caplist(struct Client *sptr, const struct CapSet *set,
     if (capab_list[i].cap == CAP_STS && is_ls && cap_version < 302)
       continue;
 #endif
+
+    if (!(rem && CapHas(rem, capab_list[i].cap)))   /* LS, ACK: told */
+      CapSet(&cap_announced, capab_list[i].cap);
 
     /* Build the prefix (space separator and any modifiers needed). */
     pfx_len = 0;
