@@ -13,7 +13,9 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -40,10 +42,13 @@ static long elapsed_ms(const struct timespec *t0)
 /* Close every descriptor from 3 up, in the child.  One close() per
  * number up to the hard limit costs the server a blocked loop in
  * proportion to it (300 ms and more at 524288); closefrom() or Linux's
- * close_range() is one call. */
+ * close_range() is one call.  The BSDs and Solaris are named here as
+ * well as tested for: a configure that was not regenerated does not
+ * define HAVE_CLOSEFROM. */
 static void close_from_3(void)
 {
-#ifdef HAVE_CLOSEFROM
+#if defined(HAVE_CLOSEFROM) || defined(__FreeBSD__) || defined(__OpenBSD__) \
+    || defined(__NetBSD__) || defined(__DragonFly__) || defined(__sun)
   closefrom(3);
 #else
   int fd, max;
@@ -60,9 +65,10 @@ static void close_from_3(void)
 #endif
 }
 
-static void run_check(const char *exe, const char *argv0, const char *dpath,
-                      const char *conf, int wfd)
+static void run_check(const char *exe, const char *dpath, const char *conf,
+                      int wfd)
 {
+  static const struct rlimit no_core = { 0, 0 };
   struct sigaction dfl;
   char *argv[7];
   sigset_t none;
@@ -85,7 +91,11 @@ static void run_check(const char *exe, const char *argv0, const char *dpath,
   /* Every descriptor of the server's goes: its sockets, its store, its
    * poll set.  Few are marked close-on-exec. */
   close_from_3();
-  argv[0] = (char *)argv0;
+  /* A check that crashes leaves no core file: the server's limit
+   * (set_core_limit()) is inherited, and a file that crashes the parser
+   * would leave one at every try. */
+  setrlimit(RLIMIT_CORE, &no_core);
+  argv[0] = (char *)exe;
   argv[1] = (char *)"-k";
   argv[2] = (char *)"-d";
   argv[3] = (char *)dpath;
@@ -113,12 +123,12 @@ static void note_end(char *out, size_t outlen, size_t used, const char *note)
 }
 
 static enum conf_precheck_result
-precheck_run(const char *exe, const char *argv0, const char *dpath,
-             const char *conf, int timeout_ms, char *out, size_t outlen);
+precheck_run(const char *exe, const char *dpath, const char *conf,
+             int timeout_ms, char *out, size_t outlen);
 
 enum conf_precheck_result
-conf_precheck_run(const char *exe, const char *argv0, const char *dpath,
-                  const char *conf, int timeout_ms, char *out, size_t outlen)
+conf_precheck_run(const char *exe, const char *dpath, const char *conf,
+                  int timeout_ms, char *out, size_t outlen)
 {
   struct sigaction chld, dfl;
   enum conf_precheck_result res;
@@ -135,8 +145,7 @@ conf_precheck_run(const char *exe, const char *argv0, const char *dpath,
     sigemptyset(&dfl.sa_mask);
     restore = sigaction(SIGCHLD, &dfl, NULL) == 0;
   }
-  res = precheck_run(exe, argv0 ? argv0 : exe, dpath, conf, timeout_ms,
-                     out, outlen);
+  res = precheck_run(exe, dpath, conf, timeout_ms, out, outlen);
   if (restore)
     sigaction(SIGCHLD, &chld, NULL);
   return res;
@@ -159,8 +168,8 @@ static int exited(pid_t pid, int *gone)
 }
 
 static enum conf_precheck_result
-precheck_run(const char *exe, const char *argv0, const char *dpath,
-             const char *conf, int timeout_ms, char *out, size_t outlen)
+precheck_run(const char *exe, const char *dpath, const char *conf,
+             int timeout_ms, char *out, size_t outlen)
 {
   struct timespec t0, exited_at;
   size_t used = 0;
@@ -182,8 +191,12 @@ precheck_run(const char *exe, const char *argv0, const char *dpath,
   sigprocmask(SIG_BLOCK, &all, &old);
   pid = fork();
   if (pid == 0)
-    run_check(exe, argv0, dpath, conf, p[1]);
+    run_check(exe, dpath, conf, p[1]);
   i = errno;
+  /* Here as well as in the child: the group must exist before a timeout
+   * can kill it, whichever of the two runs first. */
+  if (pid > 0)
+    setpgid(pid, pid);
   sigprocmask(SIG_SETMASK, &old, NULL);
   if (pid < 0) {
     close(p[0]);
@@ -279,7 +292,7 @@ precheck_run(const char *exe, const char *argv0, const char *dpath,
              WTERMSIG(status), strsignal(WTERMSIG(status)));
   else if (WIFEXITED(status) && WEXITSTATUS(status) == 127)
     snprintf(note, sizeof(note), "it could not be run (%s: exit status "
-             "127)\n", argv0);
+             "127)\n", exe);
   else
     snprintf(note, sizeof(note), "it exited with status %d\n",
              WIFEXITED(status) ? WEXITSTATUS(status) : -1);

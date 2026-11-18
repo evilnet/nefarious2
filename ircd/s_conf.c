@@ -1588,15 +1588,12 @@ conf_get_error_flag(void)
   return conf_error;
 }
 
-/** Why the last rehash() returned without applying anything
- * (CONF_ABANDON_*). */
+/** Whether the last rehash() returned without applying anything. */
 static int rehash_abandoned;
 
 /** Did the last rehash() stop before it discarded anything?  Then the
  * running configuration is the one from before it.
- * @return CONF_ABANDON_NONE if it applied the file, CONF_ABANDON_ERRORS
- *   if the check found errors in it, CONF_ABANDON_OTHER for any other
- *   reason (nothing is known of the file).
+ * @return Non-zero if it did.
  */
 int
 conf_rehash_abandoned(void)
@@ -1901,33 +1898,13 @@ static int rehash_conf_unchanged(void)
       && path.st_dev == now.st_dev && path.st_ino == now.st_ino;
 }
 
-/** The binary a configuration check runs, and the name it runs under.
- * /proc/self/exe runs the image this server runs, even when an upgrade
- * replaced the file; its argv[0] (what the check logs and is listed
- * under) is the path it resolves to.  Elsewhere SPATH.
- * @param[out] argv0 The resolved path.
- * @param[in] len    Its size.
- * @return What to execute. */
-static const char *precheck_binary(char *argv0, size_t len)
+/** The binary a configuration check runs: /proc/self/exe, the image this
+ * server runs even when an upgrade replaced the file; elsewhere SPATH. */
+static const char *precheck_binary(void)
 {
   static const char self[] = "/proc/self/exe";
-  static const char deleted[] = " (deleted)";
-  ssize_t n;
 
-  if (access(self, X_OK) != 0) {
-    ircd_strncpy(argv0, SPATH, len);
-    return SPATH;
-  }
-  n = readlink(self, argv0, len - 1);
-  if (n <= 0) {
-    ircd_strncpy(argv0, SPATH, len);
-    return self;
-  }
-  argv0[n] = '\0';
-  if ((size_t)n > sizeof(deleted) - 1
-      && !strcmp(argv0 + n - (sizeof(deleted) - 1), deleted))
-    argv0[n - (sizeof(deleted) - 1)] = '\0';
-  return self;
+  return access(self, X_OK) == 0 ? self : SPATH;
 }
 
 /** Read the new configuration in a fresh "ircd -k" before anything of
@@ -1944,15 +1921,13 @@ static const char *precheck_binary(char *argv0, size_t len)
 static enum conf_precheck_result rehash_precheck(void)
 {
   static char out[4096];
-  char argv0[PATH_MAX];
   char *line, *next, *why;
-  const char *exe = precheck_binary(argv0, sizeof(argv0));
   int shown = 0, more = 0;
   enum conf_precheck_result res;
 
   /* "." for -d: the server is in its working directory (main() went
    * there), and the -d it was given may be relative to where it started. */
-  res = conf_precheck_run(exe, argv0, ".", configfile,
+  res = conf_precheck_run(precheck_binary(), ".", configfile,
                           CONF_PRECHECK_TIMEOUT_MS, out, sizeof(out));
   /* The check read the file by name, the parse reads what was opened: a
    * deploy that rewrote it in place, or renamed another over it, would
@@ -1979,11 +1954,11 @@ static enum conf_precheck_result rehash_precheck(void)
     while (why > out && why[-1] != '\n')
       why--;
     log_write(LS_CONFIG, L_ERROR, LOG_NOSNOTICE, "Rehash abandoned, nothing "
-              "changed: the configuration check (%s -k) did not finish "
-              "cleanly: %s", argv0, why);
+              "changed: the configuration check (ircd -k) did not finish "
+              "cleanly: %s", why);
     sendto_opmask_butone(0, SNO_OLDSNO, "Rehash abandoned, nothing changed: "
-                         "the configuration check (%s -k) did not finish "
-                         "cleanly: %s", argv0, why);
+                         "the configuration check (ircd -k) did not finish "
+                         "cleanly: %s", why);
     if (why > out) {
       why[-1] = '\0';
       for (line = out; line && *line; line = next) {    /* what it said */
@@ -2047,20 +2022,17 @@ int rehash(struct Client *cptr, int sig)
     sendto_opmask_butone(0, SNO_OLDSNO,
                          "Got signal SIGHUP, reloading ircd conf. file");
 
-  /* Until the old configuration is discarded: rehash_precheck() says
-   * when the file itself is at fault. */
-  rehash_abandoned = CONF_ABANDON_OTHER;
+  /* Until the old configuration is discarded. */
+  rehash_abandoned = 1;
   if (!rehash_open_conf())
     return 0;
   res = rehash_precheck();
   rehash_conf_file = NULL;      /* init_lexer() takes it over */
   if (res != CONF_PRECHECK_OK) {
     lexer_close_config();
-    if (res == CONF_PRECHECK_ERRORS)
-      rehash_abandoned = CONF_ABANDON_ERRORS;
     return 0;
   }
-  rehash_abandoned = CONF_ABANDON_NONE;
+  rehash_abandoned = 0;
 
   while ((tmp2 = *tmp)) {
     if (tmp2->clients) {
