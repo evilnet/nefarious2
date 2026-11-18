@@ -40,9 +40,10 @@
  *    was for has left (store_jobs_link_gone): nothing is sent then.
  *
  * A job runs on the main thread, inside store_job_start(), when there is
- * no thread pool, the pool is not running or refuses the job, or more
- * jobs are waiting than STORE_JOBS_WAIT_MAX: the read as it was before,
- * done() called before store_job_start() returns.
+ * no thread pool, or the pool is not running or refuses the job: the read
+ * as it was before, done() called before store_job_start() returns.  With
+ * more jobs waiting than STORE_JOBS_WAIT_MAX a new job is not run at all:
+ * abandon() and done(job, 0), before store_job_start() returns.
  *
  * The pool is shared with the password checks (OPER, SETHOST, WEBIRC): at
  * most store_jobs_cap() jobs are in the pool at once, one worker fewer
@@ -86,8 +87,8 @@ struct StoreJob {
   int sj_state;               /**< private; the job mutex guards it */
 };
 
-/** The most jobs that wait for a place in the pool; the next one runs on
- * the main thread. */
+/** The most jobs that wait for a place in the pool; the next one is not
+ * run (done(job, 0)). */
 #define STORE_JOBS_WAIT_MAX 64
 /** The most jobs in the pool at once, whatever its size. */
 #define STORE_JOBS_POOL_MAX 8
