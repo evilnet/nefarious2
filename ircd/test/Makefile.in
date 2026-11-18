@@ -2,7 +2,9 @@ top_srcdir = @top_srcdir@
 srcdir = @srcdir@
 VPATH = @srcdir@
 CPPFLAGS = -I${top_srcdir}/include -I../..
-CFLAGS   = -g -Wall
+# -MMD -MP: each object records the headers (and included .c files) it
+# was compiled with, read back at the end of this file.
+CFLAGS   = -g -Wall -MMD -MP
 LDFLAGS  =
 CC = @CC@
 
@@ -1010,7 +1012,9 @@ distclean: clean
 	rm -f Makefile
 
 clean:
-	rm -f core *.o *.log ${TESTPROGS} ${CMOCKA_TESTPROGS}
+	rm -f core *.o *.d *.log ${TESTPROGS} ${CMOCKA_TESTPROGS}
+
+-include *.d
 
 # DO NOT DELETE THIS LINE (or the blank line after it) -- make depend depends on them.
 
