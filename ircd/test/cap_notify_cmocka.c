@@ -139,6 +139,8 @@ void labeled_batch_end(struct Client *sptr) { (void)sptr; }
 const char *batch_current_id(struct Client *cli) { (void)cli; return ""; }
 int send_reply(struct Client *to, int reply, ...)
 { (void)to; (void)reply; return 0; }
+/* m_cap.o calls Debug() once #288 is in; unused until then. */
+void debug(int level, const char *form, ...) { (void)level; (void)form; }
 void log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
                const char *fmt, ...)
 { (void)subsys; (void)severity; (void)flags; (void)fmt; }
