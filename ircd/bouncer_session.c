@@ -6197,20 +6197,21 @@ int bounce_db_restore(void)
              * keeping. */
             (void)v7;
             should_delete = 1;
-          } else if (version == BOUNCER_DB_VERSION
-                     && vlen == sizeof(struct BounceSessionRecord)) {
+          } else {
             struct BounceSessionRecord erec;
             uint32_t ever;
-            /* The restore's own rule, on an aligned copy. */
-            if (bounce_record_decode(vbuf, vlen, &erec, &ever) != BOUNCE_REC_CURRENT
+            enum BounceRecordStatus est;
+            /* The restore's own rule, on an aligned copy, for every
+             * version it reads: a migrated record restored here is re-put
+             * below under the same key, and one the restore loop left
+             * out because its nick was held stays until its hold ends.
+             * Unknown versions and wrong sizes go; the restore loop
+             * counted each one. */
+            est = bounce_record_decode(vbuf, vlen, &erec, &ever);
+            if ((est != BOUNCE_REC_CURRENT && est != BOUNCE_REC_MIGRATED)
                 || bounce_record_restore(&erec, ever, &clock, NULL)
                    == BOUNCE_RESTORE_EXPIRED)
               should_delete = 1;
-          } else {
-            /* Unknown version or wrong size — evict.  v8..v11 records
-             * also land here; they were migrated and are re-put below.
-             * The restore loop logged each one it skipped. */
-            should_delete = 1;
           }
         }
         if (should_delete
