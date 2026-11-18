@@ -1464,6 +1464,21 @@ static void overlong_line_label(struct Client *cptr, const char *line,
   }
 }
 
+/** Is the cut line @a line an AUTHENTICATE?  Its tags, when whole, are
+ * stepped over. */
+static int overlong_line_is_authenticate(const char *line, const char *end)
+{
+  static const char cmd[] = "AUTHENTICATE";
+
+  if (line < end && *line == '@' && !(line = memchr(line, ' ', end - line)))
+    return 0;
+  while (line < end && *line == ' ')
+    line++;
+  return end - line > (long)sizeof(cmd) - 1
+      && 0 == ircd_strncmp(line, cmd, sizeof(cmd) - 1)
+      && line[sizeof(cmd) - 1] == ' ';
+}
+
 /** Parse a line of data from a user.
  * NOTE: parse_*() should not be called recursively by any other
  * functions!
@@ -1552,8 +1567,11 @@ parse_client_line(struct Client *cptr, char *buffer, char *bufend)
    * the rest would change the message. */
   if (!IsServer(cptr) && !IsHandshake(cptr)
       && recv_line_overlong(cptr, buffer, bufend - buffer)) {
+    int is_auth = overlong_line_is_authenticate(buffer, bufend);
+
     overlong_line_label(cptr, buffer, bufend);
-    send_reply(cptr, ERR_INPUTTOOLONG);
+    if (!is_auth)
+      send_reply(cptr, ERR_INPUTTOOLONG);
     if (cli_ml_batch_id(cptr)[0])
       multiline_fail_batch(cptr);
     if (!IsAnOper(cptr)) {
@@ -1570,6 +1588,11 @@ parse_client_line(struct Client *cptr, char *buffer, char *bufend)
         cli_since(cptr) += fakelag_charge_client(cptr, "",
                              lagmin + BUFSIZE / lagfactor);
     }
+    /* An AUTHENTICATE gets SASL's own answer, 905, and its exchange ends
+     * (sasl-3.1), as for one that is too long but fits a line.  Last:
+     * that may exit the client. */
+    if (is_auth && authenticate_too_long(cptr) == CPTR_KILLED)
+      return CPTR_KILLED;
     return -1;
   }
 

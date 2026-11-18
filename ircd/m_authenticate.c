@@ -243,6 +243,23 @@ static int authenticate_end(struct Client *cptr, int client_abort)
   return 0;
 }
 
+/** @a cptr's AUTHENTICATE was too long: 905, and the exchange in
+ * progress ends.  Also for a line the parser cut before it could reach
+ * m_authenticate() (parse_client()): left open, the exchange would take
+ * the client's next AUTHENTICATE <mechanism> for its data.
+ * @return As authenticate_end(): nothing may touch @a cptr after it. */
+int authenticate_too_long(struct Client *cptr)
+{
+  if (CapActive(cptr, CAP_STANDARDREPLIES))
+    send_fail(cptr, "AUTHENTICATE", "TOO_LONG", NULL, "SASL message too long");
+  /* The response of an exchange in flight: a failure (SASL_MAX_FAILURES).
+   * A line with no exchange behind it ends none. */
+  if (cli_saslcookie(cptr) && !IsSASLExchangeDone(cptr))
+    sasl_failure_count(cptr);
+  send_reply(cptr, ERR_SASLTOOLONG);
+  return authenticate_end(cptr, 0);
+}
+
 int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Client* acptr;
@@ -273,16 +290,8 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
    * command."  905 fails the exchange in progress as 904 does: it ends
    * here, in its tier, or the client's next AUTHENTICATE <mechanism> would
    * be read as data of this one (and its QUIT answered 906). */
-  if (strlen(parv[1]) > 400) {
-    if (CapActive(cptr, CAP_STANDARDREPLIES))
-      send_fail(cptr, "AUTHENTICATE", "TOO_LONG", NULL, "SASL message too long");
-    /* The response of an exchange in flight: a failure (SASL_MAX_FAILURES).
-     * A line with no exchange behind it ends none. */
-    if (cli_saslcookie(cptr) && !IsSASLExchangeDone(cptr))
-      sasl_failure_count(cptr);
-    send_reply(cptr, ERR_SASLTOOLONG);
-    return authenticate_end(cptr, 0);
-  }
+  if (strlen(parv[1]) > 400)
+    return authenticate_too_long(cptr);
 
   /* Handle AUTHENTICATE * to abort SASL session (IRCv3 spec); only an
    * exchange in progress is aborted -- or lines held for a WEBIRC check
