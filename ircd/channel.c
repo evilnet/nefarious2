@@ -2409,7 +2409,10 @@ int rename_channel(struct Channel **chptr_p, const char *newname)
 
   oldlen = strlen(chptr->chname);
   /* The receive window moves to the new name (W5 Task 9): the rows stay
-   * under the old one, and so must what it says was received. */
+   * under the old one, and so must what it says was received.  Strict
+   * presence is kept by name too: the members' open intervals close
+   * under the old name and open under the new one
+   * (presence_on_channel_rename). */
   ircd_strncpy(oldname, chptr->chname, sizeof(oldname));
 
   /* If new name fits in existing allocation, just update in place */
@@ -2417,6 +2420,7 @@ int rename_channel(struct Channel **chptr_p, const char *newname)
     hChangeChannel(chptr, newname);
     strcpy(chptr->chname, newname);
     history_recv_rename(chptr, oldname);
+    presence_on_channel_rename(chptr, oldname);
     return 0;
   }
 
@@ -2469,6 +2473,7 @@ int rename_channel(struct Channel **chptr_p, const char *newname)
   *chptr_p = newchptr;
 
   history_recv_rename(newchptr, oldname);
+  presence_on_channel_rename(newchptr, oldname);
   return 0;
 }
 
