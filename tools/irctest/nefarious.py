@@ -81,6 +81,7 @@ features {{
     "CAP_draft_multiline" = "TRUE";
     "CAP_draft_message_redaction" = "TRUE";
     "CAP_draft_chathistory" = "TRUE";
+    "CAP_draft_event_playback" = "TRUE";
     "CAP_draft_read_marker" = "TRUE";
     "CAP_draft_channel_rename" = "TRUE";
     "CAP_draft_metadata_2" = "TRUE";

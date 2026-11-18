@@ -70,6 +70,12 @@ static const struct capabilities *cap_named(const char *name);
  * LS lists is announced, so the clients that know of a capability are all
  * of them or none. */
 static struct CapSet cap_announced;
+static int cap_offered_at(const struct capabilities *cap,
+                          unsigned short version);
+static int cap_offered_to(struct Client *sptr, const struct capabilities *cap);
+static const char *cap_new_value(const struct capabilities *cap,
+                                 const char *value);
+static void cap_take_away(struct Client *cptr, const struct capabilities *cap);
 
 /* ---------------------------------------------------------------------------
  * CAP notify batching for rehash
@@ -254,6 +260,33 @@ void cap_notify_flush(void)
   if (cap_batch.count == 0)
     return;
 
+  /* No NEW for a capability that CAP LS does not offer once the batch is
+   * done (a CAP 302 client's view); sasl's and draft/webpush's values as
+   * they stand now, since the same rehash may have changed them after
+   * the entry was queued. */
+  {
+    int i, kept = 0;
+
+    for (i = 0; i < cap_batch.count; i++) {
+      struct cap_batch_entry *entry = &cap_batch.entries[i];
+      const struct capabilities *cap = cap_named(entry->capname);
+
+      if (entry->available && cap) {
+        const char *val;
+
+        if (!cap_offered_at(cap, CAP_VERSION_302))
+          continue;
+        val = cap_new_value(cap, entry->value);
+        if (val != entry->value)
+          ircd_strncpy(entry->value, val ? val : "", sizeof(entry->value));
+      }
+      if (kept != i)
+        cap_batch.entries[kept] = *entry;
+      kept++;
+    }
+    cap_batch.count = kept;
+  }
+
   /* Send to all clients with cap-notify: CAP 302 clients with values and
    * sts, older ones with neither (cap_batch_send()). */
   for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
@@ -266,6 +299,18 @@ void cap_notify_flush(void)
 
     v302 = cap_notify_v302(cptr);
     cap_batch_send(cptr, 1, v302);
+    {
+      int i;
+
+      /* A DEL takes the capability from the client it goes to
+       * (cap_take_away()). */
+      for (i = 0; i < cap_batch.count; i++) {
+        const struct capabilities *cap = cap_named(cap_batch.entries[i].capname);
+
+        if (cap && !cap_batch.entries[i].available)
+          cap_take_away(cptr, cap);
+      }
+    }
     cap_batch_send(cptr, 0, v302);
   }
 
@@ -353,6 +398,13 @@ sasl_server_available(void)
  * @param[in] capname Name of the capability (e.g., "sasl").
  * @param[in] available 1 if capability is now available, 0 if removed.
  * @param[in] value Optional value for CAP NEW (e.g., mechanism list). NULL for no value.
+ *
+ * CAP NEW goes only to a client that CAP LS would offer the capability
+ * to now (cap_offered_to()), so a client never hears of a capability
+ * that its CAP REQ would then NAK: a caller may announce sasl that has
+ * no mechanisms behind it, or one whose feature switch is off.  sasl's
+ * and draft/webpush's values are always what CAP LS gives
+ * (cap_new_value()), whatever the caller had at hand.
  */
 void send_cap_notify(const char *capname, int available, const char *value)
 {
@@ -371,6 +423,11 @@ void send_cap_notify(const char *capname, int available, const char *value)
     /* Buffer full - fall through to send immediately */
   }
 
+  /* As CAP LS spells it: the caller's list may be another tier's, or
+   * none at all (a re-advertisement after services left). */
+  if (available && cap)
+    value = cap_new_value(cap, value);
+
   /* Iterate all local clients with cap-notify enabled */
   for (cptr = GlobalClientList; cptr; cptr = cli_next(cptr)) {
     if (!MyConnect(cptr) || IsServer(cptr) || !IsUser(cptr))
@@ -385,6 +442,8 @@ void send_cap_notify(const char *capname, int available, const char *value)
       continue;
 
     if (available) {
+      if (cap && !cap_offered_to(cptr, cap))
+        continue;
       /* CAP NEW with optional value */
       if (value && *value && cap_notify_v302(cptr))
         sendrawto_one(cptr, "CAP %s NEW :%s=%s",
@@ -393,6 +452,8 @@ void send_cap_notify(const char *capname, int available, const char *value)
         sendrawto_one(cptr, "CAP %s NEW :%s", cli_name(cptr), capname);
     } else {
       /* CAP DEL */
+      if (cap)
+        cap_take_away(cptr, cap);
       sendrawto_one(cptr, "CAP %s DEL :%s", cli_name(cptr), capname);
     }
   }
@@ -647,6 +708,102 @@ static void cap_reply(struct Client *sptr, char lines[][BUFSIZE], int n)
     labeled_batch_end(sptr);
 }
 
+/** Whether CAP LS offers \a cap to \a sptr now, and so whether CAP REQ
+ * may add it (cap_offered(), capab.h).  What decides it:
+ * - its feature switch;
+ * - sasl: a SASL server ("Servers MUST NOT advertise the sasl capability
+ *   if the authentication layer is unavailable");
+ * - draft/authtoken: a service, since without one there is nothing to
+ *   negotiate (registration-burst SERVICELIST, TOKEN NEW/DEL); the TOKEN
+ *   command itself never needs the cap;
+ * - draft/webpush: libkc's HTTP transport, which delivers the pushes and
+ *   is set up only at boot (switching the feature on later cannot
+ *   start it);
+ * - sts: CAP 302, for its value to mean anything. */
+static int
+cap_offered_at(const struct capabilities *cap, unsigned short version)
+{
+  int available = 1;
+  unsigned short min_version = 0;
+
+  /* cap-notify: "Servers MUST accept and CAP ACK the request" from a
+   * CAP 302 client, which gets CAP NEW and DEL whether it asks or not
+   * (cap_notify_wanted()), whatever CAP_cap_notify says. */
+  if (cap->cap == CAP_CAPNOTIFY && version >= CAP_VERSION_302)
+    return 1;
+
+  if (cap->cap == CAP_SASL)
+    available = sasl_server_available();
+  else if (cap->cap == CAP_DRAFT_AUTHTOKEN)
+    available = authtoken_service_count() != 0;
+  else if (cap->cap == CAP_DRAFT_WEBPUSH)
+    available = kc_transport_ready;   /* no delivery without libkc */
+#ifdef USE_SSL
+  else if (cap->cap == CAP_STS)
+    min_version = CAP_VERSION_302;
+#endif
+
+  return cap_offered(cap->flags, !cap->feat || feature_bool(cap->feat),
+                     available, min_version, version);
+}
+
+/** CAP DEL is about to tell \a cptr that \a cap is gone: the client no
+ * longer has it ("servers MUST cancel any capability-specific behavior
+ * for a client after sending the CAP DEL message to the client"), as if
+ * it had sent CAP REQ -cap -- unless CAP LS still offers it to that
+ * client.  Its next CAP REQ for it is judged by what
+ * CAP LS offers then. */
+static void
+cap_take_away(struct Client *cptr, const struct capabilities *cap)
+{
+  struct CapSet before = *cli_active_own(cptr);
+
+  if (!HasCap(cptr, cap->cap) && !CapOwnHas(cptr, cap->cap))
+    return;
+  /* Not one the client can still have: cap-notify at CAP 302 with its
+   * feature off, or sasl announced gone while another tier keeps it
+   * offered (a DEL and a NEW follow each other there). */
+  if (cap_offered_to(cptr, cap))
+    return;
+  CapClr(cli_capab(cptr), cap->cap);
+  CapClr(cli_active_own(cptr), cap->cap);
+  if (MetadataAwareCap(cap->cap))
+    metadata_sub_free(cptr);
+  cap_dependents_drop(cptr, &before, cli_active_own(cptr));
+  bounce_recompute_session_caps(cptr);
+  bounce_emit_alias_caps(cptr);
+}
+
+/** cap_offered_at() for \a sptr's CAP version. */
+static int
+cap_offered_to(struct Client *sptr, const struct capabilities *cap)
+{
+  return cap_offered_at(cap, cli_capab_version(sptr));
+}
+
+/** The value CAP NEW gives \a cap, as CAP LS 302 spells it now: sasl's
+ * mechanism list (cap_sasl_mechanisms()) and draft/webpush's vapid=<key>
+ * (get_vapid_pubkey()), whatever the caller had at hand; any other
+ * capability keeps \a value.  NULL or "" for none.  The webpush value is
+ * in a static buffer, good until the next call. */
+static const char *
+cap_new_value(const struct capabilities *cap, const char *value)
+{
+  static char webpush_val[sizeof("vapid=") + VAPID_KEY_LEN];
+
+  if (cap->cap == CAP_SASL)
+    return cap_sasl_mechanisms();
+  if (cap->cap == CAP_DRAFT_WEBPUSH) {
+    const char *vapid = get_vapid_pubkey();
+
+    if (!vapid)
+      return NULL;
+    ircd_snprintf(0, webpush_val, sizeof(webpush_val), "vapid=%s", vapid);
+    return webpush_val;
+  }
+  return value;
+}
+
 #define CAP_REPLY_LINES 16
 
 /** Send a CAP reply listing capabilities (send_caplist()).
@@ -685,30 +842,14 @@ send_caplist_lines(struct Client *sptr, const struct CapSet *set,
      */
     if (!(rem && CapHas(rem, capab_list[i].cap))
         && !(set && CapHas(set, capab_list[i].cap))
-        && (rem || set || (flags & CAPFL_HIDDEN)
-            || (capab_list[i].feat && (!feature_bool(capab_list[i].feat)))))
+        && (rem || set || !cap_offered_to(sptr, &capab_list[i])))
       continue;
 
-    /* Don't advertise SASL if the SASL server is not available */
-    if (capab_list[i].cap == CAP_SASL && is_ls && !sasl_server_available())
-      continue;
-
-    /* draft/authtoken is only worth negotiating (registration-burst
-     * SERVICELIST, TOKEN NEW/DEL) when a service exists; the TOKEN
-     * command itself never needs the cap. */
-    if (capab_list[i].cap == CAP_DRAFT_AUTHTOKEN && is_ls && !authtoken_service_count())
-      continue;
 
     /* An LS that must fit one line and did not: the vendor and draft
      * capabilities are left out (cap_line.h). */
     if (is_ls && cap_ls_left_out(capab_list[i].name, narrow))
       continue;
-
-#ifdef USE_SSL
-    /* STS requires CAP 302+ for values to be meaningful */
-    if (capab_list[i].cap == CAP_STS && is_ls && cap_version < 302)
-      continue;
-#endif
 
     if (!(rem && CapHas(rem, capab_list[i].cap)))   /* LS, ACK: told */
       CapSet(&cap_announced, capab_list[i].cap);
@@ -872,9 +1013,10 @@ cap_req(struct Client *sptr, const char *caplist)
   memset(&rem, 0, sizeof(rem));
   while (cl) { /* walk through the capabilities list... */
     if (!(cap = find_cap(&cl, &neg)) /* look up capability... */
-        || (!neg && (cap->flags & CAPFL_PROHIBIT)) /* is it prohibited? */
-        || (neg && ((cap->flags & CAPFL_STICKY)   /* is it sticky? */
-                    || cap_kept_on(cap->cap, cli_capab_version(sptr))))) {
+        || cap_req_refused(cap->flags, neg, /* prohibited, not offered, sticky? */
+                           neg || CapHas(cli_capab(sptr), cap->cap)
+                           || cap_offered_to(sptr, cap))
+        || (neg && cap_kept_on(cap->cap, cli_capab_version(sptr)))) {
       static char nak[1][BUFSIZE];
       ircd_snprintf(0, nak[0], BUFSIZE, MSG_CAP " %s NAK :%s",
                     BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr), caplist);
