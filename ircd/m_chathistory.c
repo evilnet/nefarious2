@@ -322,116 +322,6 @@ const char *msg_type_cmd[] = {
   "PRIVMSG" /* MULTILINE rendered as PRIVMSG */
 };
 
-/** Validate a timestamp value.
- * Valid formats:
- *   - Unix timestamp: digits with optional decimal (e.g., "1234567890.123")
- *   - ISO 8601: "YYYY-MM-DDTHH:MM:SS.sssZ" or similar
- * @param[in] ts Timestamp string to validate.
- * @return 1 if valid, 0 if invalid.
- */
-static int validate_timestamp(const char *ts)
-{
-  const char *p;
-
-  if (!ts || !*ts)
-    return 0;
-
-  /* Check for Unix timestamp format: digits with optional decimal point */
-  if (IsDigit(*ts)) {
-    int has_decimal = 0;
-    for (p = ts; *p; p++) {
-      if (*p == '.') {
-        if (has_decimal)
-          return 0;  /* Multiple decimals */
-        has_decimal = 1;
-      } else if (*p == 'T' || *p == '-' || *p == ':' || *p == 'Z') {
-        /* This looks like ISO 8601 format - validate below */
-        break;
-      } else if (!IsDigit(*p)) {
-        return 0;  /* Invalid character */
-      }
-    }
-    if (!*p)
-      return 1;  /* Valid Unix timestamp */
-  }
-
-  /* Check for ISO 8601 format: YYYY-MM-DDTHH:MM:SS[.sss]Z
-   * Relaxed validation - just check basic structure */
-  if (strlen(ts) >= 19) {  /* Minimum: YYYY-MM-DDTHH:MM:SS */
-    /* Check YYYY-MM-DD pattern at start */
-    if (IsDigit(ts[0]) && IsDigit(ts[1]) && IsDigit(ts[2]) && IsDigit(ts[3]) &&
-        ts[4] == '-' &&
-        IsDigit(ts[5]) && IsDigit(ts[6]) &&
-        ts[7] == '-' &&
-        IsDigit(ts[8]) && IsDigit(ts[9]) &&
-        ts[10] == 'T') {
-      return 1;  /* Valid ISO 8601 */
-    }
-  }
-
-  return 0;  /* Invalid format */
-}
-
-/** Validate a timestamp value in strict ISO 8601 format only.
- * Per IRCv3 chathistory spec, clients should send ISO 8601 timestamps.
- * Valid format: "YYYY-MM-DDTHH:MM:SS[.sss]Z"
- * @param[in] ts Timestamp string to validate.
- * @return 1 if valid ISO 8601, 0 if invalid.
- */
-static int validate_iso_timestamp(const char *ts)
-{
-  if (!ts || !*ts)
-    return 0;
-
-  /* Check for ISO 8601 format: YYYY-MM-DDTHH:MM:SS[.sss]Z
-   * Relaxed validation - just check basic structure */
-  if (strlen(ts) >= 19) {  /* Minimum: YYYY-MM-DDTHH:MM:SS */
-    /* Check YYYY-MM-DD pattern at start */
-    if (IsDigit(ts[0]) && IsDigit(ts[1]) && IsDigit(ts[2]) && IsDigit(ts[3]) &&
-        ts[4] == '-' &&
-        IsDigit(ts[5]) && IsDigit(ts[6]) &&
-        ts[7] == '-' &&
-        IsDigit(ts[8]) && IsDigit(ts[9]) &&
-        ts[10] == 'T') {
-      return 1;  /* Valid ISO 8601 */
-    }
-  }
-
-  return 0;  /* Not ISO 8601 format */
-}
-
-/** Validate a client-facing timestamp value.
- * Respects FEAT_CHATHISTORY_STRICT_TIMESTAMPS:
- *   - If TRUE: only accepts ISO 8601 format (per IRCv3 spec)
- *   - If FALSE: accepts both ISO 8601 and Unix timestamps (permissive)
- * @param[in] ts Timestamp string to validate.
- * @return 1 if valid, 0 if invalid.
- */
-static int validate_client_timestamp(const char *ts)
-{
-  if (feature_bool(FEAT_CHATHISTORY_STRICT_TIMESTAMPS))
-    return validate_iso_timestamp(ts);
-  return validate_timestamp(ts);
-}
-
-/** Does a client's timestamp convert to a store key?  The validators
- * check its shape only: an offset or other text after the seconds
- * passed them, and the stores, which fall back to reading a timestamp
- * that does not convert as unix, then built keys from the ISO text.  An
- * ISO time must be the spec's form (history_iso_to_unix(), strict); a
- * unix "sec[.ms]" (no '-', taken when STRICT_TIMESTAMPS is off) must be
- * one the walks can key from (history_ref_to_unix(): no trailing dot,
- * not too long), or it passed here and failed later as MESSAGE_ERROR
- * instead of INVALID_PARAMS. */
-static int timestamp_converts(const char *ts)
-{
-  char unix_buf[HISTORY_TIMESTAMP_LEN];
-
-  return strchr(ts, '-')
-      ? history_iso_to_unix(ts, unix_buf, sizeof(unix_buf)) == 0
-      : history_ref_to_unix(ts, unix_buf, sizeof(unix_buf)) == 0;
-}
-
 /** Parse a message reference (timestamp= or msgid=).
  * @param[in] ref Reference string.
  * @param[out] ref_type Type of reference.
@@ -451,9 +341,11 @@ static int parse_reference(const char *ref, enum HistoryRefType *ref_type, const
 
   if (strncmp(ref, "timestamp=", 10) == 0) {
     const char *ts = ref + 10;
-    /* Validate the timestamp value per IRCv3 spec.
-     * Uses validate_client_timestamp which respects STRICT_TIMESTAMPS config. */
-    if (!validate_client_timestamp(ts) || !timestamp_converts(ts))
+    char unix_buf[HISTORY_TIMESTAMP_LEN];
+
+    /* Only the spec's form, YYYY-MM-DDThh:mm:ss.sssZ (history_iso_to_unix(),
+     * strict): no unix time, offset or other spelling. */
+    if (history_iso_to_unix(ts, unix_buf, sizeof(unix_buf)) != 0)
       return -1;
     *ref_type = HISTORY_REF_TIMESTAMP;
     *value = ts;
