@@ -1017,14 +1017,16 @@ log_feature_unmark(void)
 }
 
 /** Reset unmodified fields in all log subsystems to their defaults.
- * @param[in] flag If non-zero, clear default syslog facility.
+ * @param[in] flag Non-zero if the configuration just read set the LOG
+ *   feature's default syslog facility (feature_log_set() marks it); the
+ *   facility is reset only when it did not.
  */
 int
 log_feature_mark(int flag)
 {
   int i;
 
-  if (flag)
+  if (!flag)
     log_set_default(0);
 
   for (i = 0; i < LS_LAST_SYSTEM; i++) {

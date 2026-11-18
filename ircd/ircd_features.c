@@ -125,9 +125,16 @@ feature_log_set(struct Client* from, const char* const* fields, int count)
 
       if (from) /* send an error */
 	send_reply(from, ERR_BADLOGVALUE, fields[0]);
-      else
+      else {
 	log_write(LS_CONFIG, L_ERROR, 0,
 		  "Bad value \"%s\" for default facility", fields[0]);
+	/* The facility stays as it was.  Reading ircd.conf, every mark was
+	 * cleared, and log_feature_mark() would put an unmarked facility
+	 * back to the default: mark it, so a refused value keeps the
+	 * running one.  A running facility that is the default stays
+	 * unmarked, so STATS f does not report it as configured. */
+	return ircd_strcmp(log_get_default(), "USER") ? 1 : 0;
+      }
     } else
       return count < 1 ? -1 : 1; /* tell feature to set or clear mark */
   } else if (!(subsys = log_canon(fields[0]))) { /* no such subsystem */
@@ -1661,13 +1668,12 @@ feature_set(struct Client* from, const char* const* fields, int count)
 	  feat->flags |= FEAT_MARK;
 	else /* i < 0 */
 	  feat->flags &= ~FEAT_MARK;
-	break;
       }
-      /* A set handler that returns 0 falls through, as it always has.
-       * For "LOG" = "<subsystem>" ... lines that stores 0 in the unused
-       * v_int and clears LOG's mark, which log_feature_mark() depends on
-       * as it stands: changing either belongs with that function, not
-       * here.  Only a real integer feature's value is checked below. */
+      /* A handler's 0 leaves the mark alone.  Falling through to
+       * FEAT_INT read the value as a number and cleared the mark, so a
+       * LOG subsystem line cleared the mark of a default facility set
+       * before it (log_feature_mark()). */
+      break;
 
     case FEAT_INT: /* an integer value */
       tmp = feat->v_int; /* detect changes... */
@@ -1676,9 +1682,7 @@ feature_set(struct Client* from, const char* const* fields, int count)
 	feat->v_int = feat->def_int;
 	feat->flags &= ~FEAT_MARK;
       } else { /* ok, figure out the value and whether to mark it */
-	if ((feat->flags & FEAT_MASK) != FEAT_INT)
-	  feat->v_int = strtoul(fields[1], 0, 0); /* see FEAT_NONE above */
-	else if (!ircd_strtoint(fields[1], &feat->v_int)) {
+	if (!ircd_strtoint(fields[1], &feat->v_int)) {
 	  /* The value stays as it was.  Reading ircd.conf, feature_unmark()
 	   * has cleared every mark, and feature_mark() would put an unmarked
 	   * feature back to its default: keep the mark for a kept value. */
