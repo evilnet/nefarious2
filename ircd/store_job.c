@@ -293,7 +293,11 @@ void store_job_start(struct StoreJob *job)
     return;
   }
   if (wait_count >= STORE_JOBS_WAIT_MAX) {
-    run_here(job);
+    /* No room to wait: not run, and answered as such.  Running it here
+     * would bring back the stalled main loop the pool is for, at the
+     * moment the server is busiest. */
+    abandon(job);
+    job->ops->done(job, 0);
     return;
   }
   job->sj_state = SJ_WAITING;

@@ -11,7 +11,7 @@
  *    worker left as the pool keeps it: muted, like every pool worker),
  *    done() on the main thread;
  *  - the cap: one worker never runs a read, the jobs over the cap wait
- *    in order, and past STORE_JOBS_WAIT_MAX a job runs on the caller;
+ *    in order, and past STORE_JOBS_WAIT_MAX a job is not run;
  *  - the link gone while a job waits, is queued in the pool, or runs: the
  *    job loses its link, and one no worker has started never runs;
  *  - the store closing (store_jobs_quiesce): waits for the job a worker is
@@ -453,10 +453,10 @@ static void a_job_that_waited_too_long_is_abandoned(void **state)
   assert_finished(&t[2], 1);
 }
 
-/** Past STORE_JOBS_WAIT_MAX waiting jobs the next one runs on the caller,
- * as every job did before: the main loop slows, which is what holds the
- * requests back. */
-static void past_the_waiting_room_a_job_runs_on_the_caller(void **state)
+/** Past STORE_JOBS_WAIT_MAX waiting jobs the next one is not run: it is
+ * abandoned and answered as not run, at once, and the main loop is not
+ * held for it. */
+static void past_the_waiting_room_a_job_is_not_run(void **state)
 {
   static struct TJob t[STORE_JOBS_WAIT_MAX + 2];
   unsigned int in_pool, waiting;
@@ -477,9 +477,7 @@ static void past_the_waiting_room_a_job_runs_on_the_caller(void **state)
   i = STORE_JOBS_WAIT_MAX + 1;
   tjob_init(&t[i], &link);
   store_job_start(&t[i].job);
-  assert_finished(&t[i], 1);
-  assert_true(t[i].run_on_main);
-  assert_false(t[i].run_muted);
+  assert_finished(&t[i], 0);
 
   set_gate(1);
   for (i = 0; i < STORE_JOBS_WAIT_MAX + 1; i++)
@@ -837,7 +835,7 @@ int main(void)
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(waiting_jobs_run_in_order,
                                     case_setup, case_teardown),
-    cmocka_unit_test_setup_teardown(past_the_waiting_room_a_job_runs_on_the_caller,
+    cmocka_unit_test_setup_teardown(past_the_waiting_room_a_job_is_not_run,
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(a_job_the_pool_refuses_runs_on_the_caller,
                                     case_setup, case_teardown),

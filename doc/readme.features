@@ -1006,7 +1006,9 @@ one worker fewer than the pool has (a pool of one: that one), at most
 eight.  That is a bound on a password check's wait, not a worker kept
 free: a check waits behind the checks already there and behind at most
 that many scans, never behind the scans over that number, which wait
-their turn, in order.  An allocation that fails on a worker ends the
+their turn, in order.  With 64 scans waiting, a new one is not run and
+the asking server gets a partial answer at once, as it does for a scan
+that waited past CHATHISTORY_TIMEOUT.  An allocation that fails on a worker ends the
 server with one line to syslog (and to stderr when the server kept it:
 -t or -x); it does not restart itself from there.  A failed assertion on
 a worker is reported the same way.  With no pool (it could not be
