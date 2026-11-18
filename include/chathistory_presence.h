@@ -163,6 +163,24 @@ extern void presence_on_channel_add(struct Client *who, struct Channel *chptr);
  * if FEAT_CHATHISTORY_STRICT_PRESENCE is disabled. */
 extern void presence_on_channel_remove(struct Client *who, struct Channel *chptr);
 
+/** Hook for rename_channel(): @a chptr, until now @a oldname, has its
+ * new name.  Presence is kept by channel NAME, so every member's open
+ * interval is closed under the old name and opened under the new one, at
+ * the rename's time: what is said in the channel from here on is stored
+ * under the new name and checked against the presence recorded there,
+ * and nobody is left "present" under the old name, which may be another
+ * channel's next.  (A relocation needs none of this: its members leave
+ * the old channel and join the new one, through the ordinary hooks.)
+ *
+ * Nothing is moved or copied: a member's closed intervals from before
+ * the rename stay under the old name, as the rows from before it do.
+ * Every server runs this as it executes the rename, at its own clock's
+ * time (the RN line carries none); no PN is sent.  A rename between two
+ * spellings of one name is nothing.  Cheap early-out if
+ * FEAT_CHATHISTORY_STRICT_PRESENCE is disabled. */
+extern void presence_on_channel_rename(struct Channel *chptr,
+                                       const char *oldname);
+
 /** Sweep presence records: prune intervals fully older than the
  * configured chathistory retention; truncate the leading edge of any
  * interval that straddles the retention boundary.  Drops in-memory

@@ -983,6 +983,52 @@ void presence_on_channel_remove(struct Client *who, struct Channel *chptr)
   presence_record_part(anchor, is_session, chptr->chname, presence_now_time());
 }
 
+void presence_on_channel_rename(struct Channel *chptr, const char *oldname)
+{
+  struct Membership *m;
+  int64_t when;
+
+  if (!feature_bool(FEAT_CHATHISTORY_STRICT_PRESENCE))
+    return;
+  if (!chptr || !chptr->chname[0] || !oldname || !*oldname
+      || 0 == ircd_strcmp(oldname, chptr->chname))
+    return;
+
+  when = presence_now_time();
+  for (m = chptr->members; m; m = m->next_member) {
+    const char *anchor;
+    int is_session = 0;
+
+    /* As at a JOIN: an alias membership opens nothing of its own. */
+    if (!m->user || IsMemberAlias(m))
+      continue;
+    anchor = presence_anchor_for(m->user, &is_session);
+    if (!anchor)
+      continue;
+
+    /* Close under the old name.  No PN: every server executes the
+     * rename and closes its own (presence_record_part would flood one
+     * line per member from each of them). */
+    if (is_session) {
+      struct presence_session_entry *e = session_find(anchor, oldname);
+      if (e)
+        record_apply_part(&e->record, when);
+    } else {
+      struct presence_record r;
+      if (acct_load(anchor, oldname, &r) == 0 && r.open_since != 0) {
+        record_apply_part(&r, when);
+        (void)acct_store(anchor, oldname, &r);
+      }
+    }
+    /* Open under the new one.  Not for a kicked member whose PART has
+     * not arrived (a zombie): its presence ended with the KICK, and the
+     * removal still to come closes under the new name, where nothing is
+     * open. */
+    if (!IsZombie(m))
+      presence_record_join(anchor, is_session, chptr->chname, when);
+  }
+}
+
 /** Open an interval NOW for every current non-alias member of every
  * channel.  Called when FEAT_CHATHISTORY_STRICT_PRESENCE flips ON at
  * runtime: pre-existing memberships otherwise have no open interval

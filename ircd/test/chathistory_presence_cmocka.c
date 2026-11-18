@@ -822,6 +822,79 @@ static void test_presence_move_carries_only_a_rename(void **state)
   strict_on = 0;
 }
 
+#define RT_MS   ((int64_t)1700000000 * 1000 + 9000000)
+#define RT      PRESENCE_TIME_FROM_MS(RT_MS)
+
+/* A RENAME moves every member's open presence to the new name: closed
+ * under the old one at the rename, open under the new one from it. */
+static void test_presence_rename_moves_open_intervals(void **state)
+{
+  struct Client mem, kicked, alias;
+  struct Membership m1, m2, m3;
+  struct Channel *ch = calloc(1, sizeof(struct Channel) + 16);
+  int64_t t0 = RT - SEC(600);
+  (void)state;
+
+  assert_non_null(ch);
+  memset(&mem, 0, sizeof(mem));
+  memset(&kicked, 0, sizeof(kicked));
+  memset(&alias, 0, sizeof(alias));
+  memset(&m1, 0, sizeof(m1));
+  memset(&m2, 0, sizeof(m2));
+  memset(&m3, 0, sizeof(m3));
+  strcpy(cli_session_id(&mem), "rn-member");
+  strcpy(cli_session_id(&kicked), "rn-kicked");
+  strcpy(cli_session_id(&alias), "rn-alias");
+  m1.user = &mem;    m1.channel = ch; m1.next_member = &m2;
+  m2.user = &kicked; m2.channel = ch; m2.next_member = &m3;
+  m2.status = CHFL_ZOMBIE;
+  m3.user = &alias;  m3.channel = ch; m3.status = CHFL_ALIAS;
+  ch->members = &m1;
+  strcpy(ch->chname, "#new");            /* rename_channel has renamed it */
+
+  presence_record_join("rn-member", 1, "#old", t0);
+  presence_record_join("rn-kicked", 1, "#old", t0);
+
+  /* off: nothing moves */
+  presence_set_event_time(RT);
+  presence_on_channel_rename(ch, "#old");
+  assert_true(presence_was_present("rn-member", 1, "#old", RT + SEC(5)));
+  assert_false(presence_was_present("rn-member", 1, "#new", RT + SEC(5)));
+
+  strict_on = 1;
+  presence_on_channel_rename(ch, "#old");
+  presence_set_event_time(0);
+
+  /* the member: [t0, RT] under #old, open from RT under #new */
+  assert_true(presence_was_present("rn-member", 1, "#old", t0));
+  assert_true(presence_was_present("rn-member", 1, "#old", RT));
+  assert_false(presence_was_present("rn-member", 1, "#old", RT + 1));
+  assert_false(presence_was_present("rn-member", 1, "#new", RT - 1));
+  assert_true(presence_was_present("rn-member", 1, "#new", RT));
+  assert_true(presence_was_present("rn-member", 1, "#new", RT + SEC(3600)));
+  /* a kicked member whose PART has not come: closed under the old name
+   * (the removal will look under the new one and find nothing to
+   * close), never opened under the new one */
+  assert_true(presence_was_present("rn-kicked", 1, "#old", RT - SEC(1)));
+  assert_false(presence_was_present("rn-kicked", 1, "#old", RT + 1));
+  assert_false(presence_was_present("rn-kicked", 1, "#new", RT + SEC(1)));
+  /* an alias membership opens nothing, as at a JOIN */
+  assert_false(presence_was_present("rn-alias", 1, "#new", RT + SEC(1)));
+
+  /* two spellings of one name: nothing to move */
+  strcpy(ch->chname, "#NEW");
+  presence_set_event_time(RT + SEC(100));
+  presence_on_channel_rename(ch, "#new");
+  presence_set_event_time(0);
+  assert_true(presence_was_present("rn-member", 1, "#new", RT + SEC(3600)));
+  assert_true(presence_was_present("rn-member", 1, "#new", RT + SEC(50)));
+
+  strict_on = 0;
+  presence_purge_session("rn-member");
+  presence_purge_session("rn-kicked");
+  free(ch);
+}
+
 /* The msgid's embedded HLC is the row's presence time when it agrees
  * with the row's millisecond stamp; a foreign/legacy msgid, or one that
  * disagrees, falls back to (row ms, logical 0). */
@@ -891,6 +964,7 @@ int main(void)
     cmocka_unit_test(test_presence_part_coalesce_keeps_earlier_open),
     cmocka_unit_test(test_presence_next_visible_boundaries),
     cmocka_unit_test(test_presence_millisecond_edges),
+    cmocka_unit_test(test_presence_rename_moves_open_intervals),
     cmocka_unit_test(test_presence_event_time_from_msgid),
     cmocka_unit_test(test_presence_coalesce_window_ms),
     cmocka_unit_test(test_presence_norm_ms),
