@@ -107,8 +107,6 @@ int getpeername (int $arg2 *, $t *);],[$t len;
 
 dnl Checks for library functions.
 AC_CHECK_FUNCS([kqueue setrlimit getrusage times])
-dnl closefrom(): the REHASH check closes the server's descriptors in its child
-AC_CHECK_FUNCS([closefrom])
 
 dnl Do we have restarting syscalls ?
 AC_SYS_RESTARTABLE_SYSCALLS

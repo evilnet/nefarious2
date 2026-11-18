@@ -30,8 +30,6 @@ enum conf_precheck_result {
  * shares the server's sockets, poll set, TLS and store state, and a
  * parse there reaches all of them.
  * @param[in] exe        The ircd binary (what is executed).
- * @param[in] argv0      The check's argv[0], the name it logs and is
- *                       listed under (NULL: @a exe).
  * @param[in] dpath      Its working directory (-d).
  * @param[in] conf       The configuration file (-f).
  * @param[in] timeout_ms How long to wait.
@@ -41,7 +39,7 @@ enum conf_precheck_result {
  * @param[in] outlen     The size of @a out (at least 1).
  * @return What it found. */
 extern enum conf_precheck_result
-conf_precheck_run(const char *exe, const char *argv0, const char *dpath,
-                  const char *conf, int timeout_ms, char *out, size_t outlen);
+conf_precheck_run(const char *exe, const char *dpath, const char *conf,
+                  int timeout_ms, char *out, size_t outlen);
 
 #endif /* INCLUDED_conf_precheck_h */
