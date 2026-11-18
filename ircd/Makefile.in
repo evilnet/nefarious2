@@ -365,9 +365,13 @@ all:
 
 .SUFFIXES: .c .o
 
+# -MMD -MP: each object records the headers it was compiled with (a .d
+# file beside it, read back below), so a header change rebuilds every
+# object that includes it -- also those the "make depend" list at the end
+# of this file does not know.
 .c.o:
 	@d=`dirname $@`; test -d "$$d" || mkdir -p "$$d"
-	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
+	${CC} ${CFLAGS} ${CPPFLAGS} -MMD -MP -c $< -o $@
 
 # The kc/ subtree is the vendored libkc (sources ircd/kc/*.c, headers
 # include/kc/*.h).  It talks to the ircd only through the kc_event_ops /
@@ -550,7 +554,7 @@ uninstall:
 	@echo "Please remove the contents of ${DPATH} manually"
 
 clean:
-	${RM} -f *.o kc/*.o *.bak ircd umkpasswd convert-conf chattr.tab.c table_gen y.tab.* lex.yy.* version.c
+	${RM} -f *.o kc/*.o *.d kc/*.d *.bak ircd umkpasswd convert-conf chattr.tab.c table_gen y.tab.* lex.yy.* version.c
 
 distclean: clean
 	${RM} -f Makefile stamp-m
@@ -586,6 +590,8 @@ depend: ${DEP_SRC} chattr.tab.c
 
 # ../config/config.h:
 # 	@cd ../config; ${MAKE} config.h
+
+-include *.d kc/*.d
 
 # DO NOT DELETE THIS LINE (or the blank line after it) -- make depend depends on them.
 
