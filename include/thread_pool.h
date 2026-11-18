@@ -117,6 +117,12 @@ int thread_pool_get_signal_fd(void);
 int thread_pool_is_running(void);
 
 /**
+ * How many workers run.
+ * @return The worker count, 0 with no pool
+ */
+int thread_pool_workers(void);
+
+/**
  * Get thread pool statistics.
  * @param[out] pending Number of tasks waiting to be processed
  * @param[out] completed Total tasks completed since init
@@ -134,6 +140,7 @@ void thread_pool_stats(unsigned int *pending, unsigned long *completed,
 #define thread_pool_poll()                          do {} while (0)
 #define thread_pool_get_signal_fd()                 (-1)
 #define thread_pool_is_running()                    (0)
+#define thread_pool_workers()                       (0)
 #define thread_pool_stats(p, c, a)                  do { if (p) *(p) = 0; if (c) *(c) = 0; if (a) *(a) = 0; } while (0)
 
 #endif /* HAVE_PTHREAD */

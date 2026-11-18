@@ -37,6 +37,7 @@
 #include "ircd_compress.h"
 #include "ircd_geoip.h"
 #include "ircd_log.h"
+#include "ircd_log_async.h"
 #include "ircd_reply.h"
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
@@ -54,6 +55,7 @@
 #include "send.h"
 #include "struct.h"
 #include "sys.h"    /* FALSE bleah */
+#include "thread_pool.h"
 #include "webpush.h"
 #include "whowas.h"	/* whowas_realloc */
 #include "gitsync.h"
@@ -909,12 +911,22 @@ typedef void (*feat_notify_call)(void);
  * SET).  Both are read once, at startup: say that the new value waits
  * for a restart, rather than leave GET showing one that is not in force.
  * Nothing while ircd.conf is first read (no server yet). */
-static void feature_notify_at_restart(void)
+static void feature_notify_pool_size(void)
 {
   if (cli_serv(&me))
-    log_write(LS_CONFIG, L_WARNING, 0, "THREAD_POOL_SIZE and ASYNC_LOGGING "
-              "are read at startup: the change takes effect at the next "
-              "restart");
+    log_write(LS_CONFIG, L_WARNING, 0, "THREAD_POOL_SIZE is read at "
+              "startup: %d takes effect at the next restart (%d workers "
+              "running)", feature_int(FEAT_THREAD_POOL_SIZE),
+              thread_pool_workers());
+}
+
+static void feature_notify_async_logging(void)
+{
+  if (cli_serv(&me))
+    log_write(LS_CONFIG, L_WARNING, 0, "ASYNC_LOGGING is read at startup: "
+              "%s takes effect at the next restart (async logging is %s)",
+              feature_bool(FEAT_ASYNC_LOGGING) ? "TRUE" : "FALSE",
+              log_async_available() ? "on" : "off");
 }
 /** Unmarks all sub-feature values prior to reading .conf. */
 typedef void (*feat_unmark_call)(void);
@@ -1072,8 +1084,8 @@ static struct FeatureDesc {
   F_I(TOS_SERVER, 0, 0x08, 0),
   F_I(TOS_CLIENT, 0, 0x08, 0),
   F_I(POLLS_PER_LOOP, 0, 200, 0),
-  F_I(THREAD_POOL_SIZE, 0, 4, feature_notify_at_restart),
-  F_B(ASYNC_LOGGING, 0, 0, feature_notify_at_restart),
+  F_I(THREAD_POOL_SIZE, 0, 4, feature_notify_pool_size),
+  F_B(ASYNC_LOGGING, 0, 0, feature_notify_async_logging),
   F_I(IRCD_RES_RETRIES, 0, 2, 0),
   F_I(IRCD_RES_TIMEOUT, 0, 4, 0),
   F_I(AUTH_TIMEOUT, 0, 9, 0),

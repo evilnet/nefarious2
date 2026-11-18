@@ -69,7 +69,11 @@ static struct {
   unsigned long dropped;            /**< Lines that found the buffer full and waited */
 } log_async;
 
-/* running is read without the mutex (log_async_write(), the
+/* No child of fork() may log before it execs: the writer thread does not
+ * exist there, and the mutex may have been held by a thread that does
+ * not either.
+ *
+ * running is read without the mutex (log_async_write(), the
  * availability check), by thread-pool workers as well as the main
  * thread: an atomic acquire load sees everything log_async_init() set up
  * before its release store. */
