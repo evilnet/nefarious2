@@ -72,7 +72,7 @@ static void errors_are_reported(void)
 
   make_script("echo 'Config parse error in file ircd.conf on line 3: syntax error' >&2\n"
               "exit 7");
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "ircd.conf", 5000,
+  assert_int_equal(conf_precheck_run(script, "/tmp", "ircd.conf", 5000,
                                      out, sizeof(out)),
                    CONF_PRECHECK_ERRORS);
   assert_non_null(strstr(out, "on line 3: syntax error"));
@@ -83,7 +83,7 @@ static void a_clean_file_passes(void)
   char out[512];
 
   make_script("echo 'Configuration file ircd.conf checked okay.' >&2\nexit 0");
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "ircd.conf", 5000,
+  assert_int_equal(conf_precheck_run(script, "/tmp", "ircd.conf", 5000,
                                      out, sizeof(out)),
                    CONF_PRECHECK_OK);
 }
@@ -94,7 +94,7 @@ static void the_arguments(void)
   char out[512];
 
   make_script("echo \"$#:$1:$2:$3:$4:$5\"");
-  assert_int_equal(conf_precheck_run(script, NULL, "/some/dir", "x.conf", 5000,
+  assert_int_equal(conf_precheck_run(script, "/some/dir", "x.conf", 5000,
                                      out, sizeof(out)),
                    CONF_PRECHECK_OK);
   assert_string_equal(out, "5:-k:-d:/some/dir:-f:x.conf\n");
@@ -107,14 +107,14 @@ static void other_ends_fail(void)
   char out[512];
 
   make_script("exit 4");          /* "ircd -k" could not reach a path */
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out, sizeof(out)),
+  assert_int_equal(conf_precheck_run(script, "/tmp", "c", 5000, out, sizeof(out)),
                    CONF_PRECHECK_FAILED);
   assert_non_null(strstr(out, "it exited with status 4"));
   make_script("kill -KILL $$");   /* the OOM killer, or an operator */
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out, sizeof(out)),
+  assert_int_equal(conf_precheck_run(script, "/tmp", "c", 5000, out, sizeof(out)),
                    CONF_PRECHECK_FAILED);
   assert_non_null(strstr(out, "it died of signal 9"));
-  assert_int_equal(conf_precheck_run("/nonexistent/ircd", NULL, "/tmp", "c", 5000,
+  assert_int_equal(conf_precheck_run("/nonexistent/ircd", "/tmp", "c", 5000,
                                      out, sizeof(out)),
                    CONF_PRECHECK_FAILED);
   assert_non_null(strstr(out, "it could not be run (/nonexistent/ircd"));
@@ -134,7 +134,7 @@ static void a_failed_fork_says_why(void)
   assert_int_equal(getrlimit(RLIMIT_NPROC, &old), 0);
   none.rlim_max = old.rlim_max;
   assert_int_equal(setrlimit(RLIMIT_NPROC, &none), 0);
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out,
+  assert_int_equal(conf_precheck_run(script, "/tmp", "c", 5000, out,
                                      sizeof(out)),
                    CONF_PRECHECK_FAILED);
   setrlimit(RLIMIT_NPROC, &old);
@@ -165,7 +165,7 @@ static void a_large_descriptor_limit_is_quick(void)
   }
   make_script("exit 0");
   t0 = now_ms();
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out,
+  assert_int_equal(conf_precheck_run(script, "/tmp", "c", 5000, out,
                                      sizeof(out)),
                    CONF_PRECHECK_OK);
   t0 = now_ms() - t0;
@@ -180,27 +180,27 @@ static void a_crash_fails(void)
   char out[512], small[24];
 
   make_script("echo 'reading ircd.conf'; kill -SEGV $$");
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out, sizeof(out)),
+  assert_int_equal(conf_precheck_run(script, "/tmp", "c", 5000, out, sizeof(out)),
                    CONF_PRECHECK_FAILED);
   assert_non_null(strstr(out, "reading ircd.conf\nit died of signal 11"));
   make_script("kill -ABRT $$");   /* an assert() */
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out, sizeof(out)),
+  assert_int_equal(conf_precheck_run(script, "/tmp", "c", 5000, out, sizeof(out)),
                    CONF_PRECHECK_FAILED);
   /* No room: the note goes over the tail of the output. */
   make_script("echo 0123456789012345678901234567890123456789; exit 4");
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, small,
+  assert_int_equal(conf_precheck_run(script, "/tmp", "c", 5000, small,
                                      sizeof(small)),
                    CONF_PRECHECK_FAILED);
   assert_int_equal(strlen(small), sizeof(small) - 1);
   assert_non_null(strstr(small, "status 4"));
   /* Room for the note: it starts a line of its own over the tail. */
   make_script("echo 01234567890123456789012345678901234567890123456789; exit 4");
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out, 40),
+  assert_int_equal(conf_precheck_run(script, "/tmp", "c", 5000, out, 40),
                    CONF_PRECHECK_FAILED);
   assert_int_equal(strlen(out), 39);
   assert_non_null(strstr(out, "\nit exited with status 4\n"));
   make_script("kill -TERM $$");   /* a stop */
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out, sizeof(out)),
+  assert_int_equal(conf_precheck_run(script, "/tmp", "c", 5000, out, sizeof(out)),
                    CONF_PRECHECK_FAILED);
   assert_non_null(strstr(out, "it died of signal 15"));
 }
@@ -217,7 +217,7 @@ static void sigchld_ignored_is_still_waited_for(void)
   sigemptyset(&ign.sa_mask);
   assert_int_equal(sigaction(SIGCHLD, &ign, NULL), 0);
   make_script("echo 'on line 3: syntax error'; exit 7");
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out, sizeof(out)),
+  assert_int_equal(conf_precheck_run(script, "/tmp", "c", 5000, out, sizeof(out)),
                    CONF_PRECHECK_ERRORS);
   assert_int_equal(sigaction(SIGCHLD, NULL, &now), 0);
   assert_true(now.sa_handler == SIG_IGN);
@@ -234,7 +234,7 @@ static void a_hung_check_is_killed(void)
 
   make_script("exec sleep 30");
   t0 = now_ms();
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 300, out, sizeof(out)),
+  assert_int_equal(conf_precheck_run(script, "/tmp", "c", 300, out, sizeof(out)),
                    CONF_PRECHECK_FAILED);
   assert_true(now_ms() - t0 < 3000);
   assert_non_null(strstr(out, "it did not finish in 300 ms"));
@@ -242,7 +242,7 @@ static void a_hung_check_is_killed(void)
   /* Closing its output does not end the wait early either. */
   make_script("exec >&- 2>&-; exec sleep 30");
   t0 = now_ms();
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 300, out, sizeof(out)),
+  assert_int_equal(conf_precheck_run(script, "/tmp", "c", 300, out, sizeof(out)),
                    CONF_PRECHECK_FAILED);
   assert_true(now_ms() - t0 < 3000);
   assert_int_equal(waitpid(-1, &st, WNOHANG), -1);
@@ -259,7 +259,7 @@ static void a_leftover_process_does_not_hold_the_wait(void)
   make_script("echo 'Config parse error in file c on line 2: x' >&2\n"
               "sleep 30 &\nexit 7");
   t0 = now_ms();
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 5000, out, sizeof(out)),
+  assert_int_equal(conf_precheck_run(script, "/tmp", "c", 5000, out, sizeof(out)),
                    CONF_PRECHECK_ERRORS);
   assert_true(now_ms() - t0 < 2000);
   assert_non_null(strstr(out, "on line 2"));
@@ -272,7 +272,7 @@ static void long_output_is_cut(void)
   char out[64];
 
   make_script("i=0; while [ $i -lt 4000 ]; do echo 'Config parse error in file a on line 1: x' >&2; i=$((i+1)); done; exit 7");
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", "c", 10000, out, sizeof(out)),
+  assert_int_equal(conf_precheck_run(script, "/tmp", "c", 10000, out, sizeof(out)),
                    CONF_PRECHECK_ERRORS);
   assert_int_equal(strlen(out), sizeof(out) - 1);
 }
@@ -286,11 +286,27 @@ static void descriptors_are_not_inherited(void)
   assert_int_equal(pipe(p), 0);
   snprintf(conf, sizeof(conf), "%d", p[1]);
   make_script("if [ -e /proc/$$/fd/$5 ]; then echo open; else echo closed; fi");
-  assert_int_equal(conf_precheck_run(script, NULL, "/tmp", conf, 5000, out, sizeof(out)),
+  assert_int_equal(conf_precheck_run(script, "/tmp", conf, 5000, out, sizeof(out)),
                    CONF_PRECHECK_OK);
   assert_string_equal(out, "closed\n");
   close(p[0]);
   close(p[1]);
+}
+
+/* A check that crashes leaves no core file, whatever the server's own
+ * limit: the check runs with a core limit of 0. */
+static void a_check_leaves_no_core(void)
+{
+  struct rlimit rl;
+  char out[64];
+
+  assert_int_equal(getrlimit(RLIMIT_CORE, &rl), 0);
+  rl.rlim_cur = rl.rlim_max;    /* as set_core_limit() does */
+  assert_int_equal(setrlimit(RLIMIT_CORE, &rl), 0);
+  make_script("ulimit -c");
+  assert_int_equal(conf_precheck_run(script, "/tmp", "c", 5000, out, sizeof(out)),
+                   CONF_PRECHECK_OK);
+  assert_string_equal(out, "0\n");
 }
 
 int main(void)
@@ -301,7 +317,7 @@ int main(void)
     a_large_descriptor_limit_is_quick, a_crash_fails,
     sigchld_ignored_is_still_waited_for, a_hung_check_is_killed,
     a_leftover_process_does_not_hold_the_wait, long_output_is_cut,
-    descriptors_are_not_inherited,
+    descriptors_are_not_inherited, a_check_leaves_no_core,
   };
   size_t i;
 
