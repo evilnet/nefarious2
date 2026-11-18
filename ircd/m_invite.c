@@ -108,7 +108,8 @@
  * invitee's INVITE, the invite-notify lines and the S2S INVITE lines.
  * A relayed invite (\a cptr a server link with the origin's tags
  * stashed) keeps the origin's; a local one mints.  Armed as the client
- * event (sendcmdto_set_client_event) until invite_event_end(). */
+ * event (sendcmdto_set_client_event) until the handler clears it
+ * (sendcmdto_set_client_msgid(NULL)). */
 static void invite_event_start(struct Client *cptr, struct Client *sptr,
                                char *msgid, size_t len, uint64_t *ms)
 {
