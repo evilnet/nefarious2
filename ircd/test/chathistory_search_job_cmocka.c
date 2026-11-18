@@ -925,6 +925,7 @@ int history_has_channel(const char *p0) { never("history_has_channel"); }
 int history_has_msgid(const char *p0) { never("history_has_msgid"); }
 int history_identity_pm_targets(const char *p0, uint64_t p1, uint64_t p2, int p3, int p4, struct HistoryTarget **p5, history_target_filter_fn p6, void *p7) { never("history_identity_pm_targets"); }
 int history_lookup_message(const char *p0, const char *p1, struct HistoryMessage **p2) { never("history_lookup_message"); }
+int history_lookup_live_message(const char *p0, const char *p1, struct HistoryMessage **p2) { never("history_lookup_live_message"); }
 int history_msgid_ref_timestamp(const char *p0, const char *p1, char *p2) { never("history_msgid_ref_timestamp"); }
 void history_pm_identity(struct Client *p0, char *p1, size_t p2) { never("history_pm_identity"); }
 int history_pm_identity_matches(struct Client *p0, const char *p1, size_t p2) { never("history_pm_identity_matches"); }
