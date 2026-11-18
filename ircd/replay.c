@@ -1280,17 +1280,18 @@ void replay_start_bouncer_at(struct Client *sptr, const char *since_timestamp,
 
   rs = MyCalloc(1, sizeof(struct ReplayState));
   rs->phase = REPLAY_PHASE_CHANNELS;
-  /* Bouncer replay wraps in the evilnet.github.io/bouncer-replay outer
-   * batch when the client has negotiated draft/persistence + batch.
-   * The outer batch is emitted lazily on the first inner batch open so
-   * empty replays don't ship an empty wrapper. */
-  /* Cap gate is `batch` only.  Unknown batch types (including
-   * vendor-scoped ones like evilnet.github.io/bouncer-replay) are
-   * tolerated by the batch spec; clients that understand the type
-   * use it for grouping semantics, others process inner messages
-   * normally. */
+  /* The inner chathistory batches need `batch` alone.  The outer
+   * evilnet.github.io/bouncer-replay batch around them is unprompted
+   * output of an extra with a vendor batch type, so it follows the
+   * restore batch's rule (persistence_restore_batch_type()): for a
+   * connection that negotiated evilnet.github.io/persistence, and for any
+   * other only while PERSISTENCE_DRAFT_EXTRAS keeps the old behaviour.
+   * It is emitted lazily on the first inner batch open so empty replays
+   * don't ship an empty wrapper. */
   rs->framed = CapRecipientHas(sptr, CAP_BATCH) ? 1 : 0;
-  rs->wants_outer_batch = rs->framed;
+  rs->wants_outer_batch = rs->framed
+      && (CapRecipientHas(sptr, CAP_EVILNET_PERSISTENCE)
+          || feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS));
   rs->replay_limit = (limit > 0) ? limit : feature_int(FEAT_BOUNCER_AUTO_REPLAY_LIMIT);
   if (rs->replay_limit <= 0)
     rs->replay_limit = 100;
