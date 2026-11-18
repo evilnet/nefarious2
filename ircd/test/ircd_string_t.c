@@ -28,6 +28,7 @@ static void test_strtoint(void)
   assert(ircd_strtoint("99999999999999999999999", &v) == 0);
   assert(ircd_strtoint("", &v) == 0);
   assert(ircd_strtoint("   ", &v) == 0);
+  assert(ircd_strtoint("abc", &v) == 0);
   assert(ircd_strtoint("12abc", &v) == 0);
   assert(ircd_strtoint("1 2", &v) == 0);
   assert(ircd_strtoint("TRUE", &v) == 0);
