@@ -2160,8 +2160,16 @@ value, a SET is answered with its STATUS alone (the 'PERSISTENCE SET'
 line before it goes only to a connection with the vendor capability),
 and a restore is wrapped in a batch only for a connection with the
 vendor capability; any other gets the same lines unwrapped, since it
-could not know the batch's type.  The subcommands themselves do not
-depend on this setting (see CAP_evilnet_persistence).
+could not know the batch's type.  The automatic replay's outer
+'evilnet.github.io/bouncer-replay' batch follows the same rule; its
+inner chathistory batches need only 'batch'.  The subcommands themselves
+do not depend on this setting (see CAP_evilnet_persistence).
+
+Changing this setting on a running server sends CAP 302 clients a
+'CAP NEW :draft/persistence' with the new value.  Going to FALSE, that
+NEW is bare: CAP has no way to say a value was removed, so a client may
+keep the old 'attach-cursor' until it reconnects.  A DEL followed by a
+NEW would say it, and would cancel the capability for every client.
 
 UPING_ENABLE
  * Type: boolean
