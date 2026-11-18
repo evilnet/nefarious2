@@ -244,22 +244,25 @@ void away_notify_common(struct Client *sptr, struct Client *one,
                                          ":%s", away_text_for(NULL, text));
 }
 
-/** The same for one channel (a JOIN announcing an existing away). */
+/** The same for one channel, after the JOIN a host change sends to
+ * members without chghost (hide_hostmask(), unhide_hostmask()).  Not to
+ * the user or its own devices: they got no QUIT or JOIN of their own
+ * nick, and get no AWAY of it either. */
 void away_notify_channel(struct Client *sptr, struct Channel *chptr,
                          const char *text)
 {
   if (!away_is_star(text)) {
-    sendcmdto_channel_capab_butserv_butone(sptr, CMD_AWAY, chptr, NULL,
-                                           SKIP_CHGHOST, CAP_AWAYNOTIFY,
+    sendcmdto_channel_capab_butserv_butone(sptr, CMD_AWAY, chptr, sptr,
+                                           SKIP_CHGHOST | SKIP_SESSION, CAP_AWAYNOTIFY,
                                            CAP_NONE, ":%s", text ? text : "");
     return;
   }
   sendcmdto_set_extra_withcap(CAP_DRAFT_PREAWAY);
-  sendcmdto_channel_capab_butserv_butone(sptr, CMD_AWAY, chptr, NULL,
-                                         SKIP_CHGHOST, CAP_AWAYNOTIFY,
+  sendcmdto_channel_capab_butserv_butone(sptr, CMD_AWAY, chptr, sptr,
+                                         SKIP_CHGHOST | SKIP_SESSION, CAP_AWAYNOTIFY,
                                          CAP_NONE, ":*");
-  sendcmdto_channel_capab_butserv_butone(sptr, CMD_AWAY, chptr, NULL,
-                                         SKIP_CHGHOST, CAP_AWAYNOTIFY,
+  sendcmdto_channel_capab_butserv_butone(sptr, CMD_AWAY, chptr, sptr,
+                                         SKIP_CHGHOST | SKIP_SESSION, CAP_AWAYNOTIFY,
                                          CAP_DRAFT_PREAWAY, ":%s",
                                          away_text_for(NULL, text));
 }
