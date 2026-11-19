@@ -3,10 +3,26 @@
  */
 
 import { promises as dns } from 'node:dns';
-import type { CacheEntry, DNSBLConfig } from './types.js';
+import type { CacheEntry, DNSBLAnswer, DNSBLConfig } from './types.js';
 
-/** Global DNSBL result cache */
+/** Global DNSBL result cache: definite answers only */
 const cache = new Map<string, CacheEntry>();
+
+/** Lookups in flight, by query: a later asker shares the same lookup.
+ * ttl: the longest cache time among the askers -- what the answer is
+ * stored for (0: not stored). */
+const inflight = new Map<string, { answer: Promise<DNSBLAnswer>; ttl: number }>();
+
+/**
+ * Expired entries are swept out on insert, once the inserts since the last
+ * sweep reach the size the cache had after it (at least SWEEP_MIN): the
+ * cost per insert stays constant, and the cache never holds more than twice
+ * its size after the last sweep (the answers stored within the longest
+ * cache time) plus SWEEP_MIN.
+ */
+const SWEEP_MIN = 256;
+let insertsSinceSweep = 0;
+let sizeAfterSweep = 0;
 
 /**
  * Reverse an IPv4 address for DNSBL lookup
@@ -30,18 +46,28 @@ export function isIPv4(ip: string): boolean {
   return /^(?:\d{1,3}\.){3}\d{1,3}$/.test(ip);
 }
 
+/** Has \a entry outlived \a seconds? (<= 0: always) */
+function olderThan(entry: CacheEntry, seconds: number, now: number): boolean {
+  return seconds <= 0 || entry.ts <= now - seconds * 1000;
+}
+
 /**
- * Get cache entry if valid
+ * Get cache entry if valid for a reader whose cache time is \a cacheTime
+ * (and the entry has not outlived the cache time it was stored for)
  */
 export function getCacheEntry(query: string, cacheTime: number): CacheEntry | null {
   const entry = cache.get(query);
   if (!entry) return null;
 
   const now = Date.now();
-  // cacheTime <= 0 means always expired, otherwise check age
-  if (cacheTime <= 0 || entry.ts <= now - cacheTime * 1000) {
-    // Cache expired
+  if (olderThan(entry, entry.ttl, now)) {
+    // Expired for everybody
     cache.delete(query);
+    return null;
+  }
+  if (olderThan(entry, cacheTime, now)) {
+    // Too old for this reader (cachetime=0, or shorter than another line
+    // naming the same list): it may still serve the others
     return null;
   }
 
@@ -49,13 +75,36 @@ export function getCacheEntry(query: string, cacheTime: number): CacheEntry | nu
 }
 
 /**
- * Set cache entry
+ * Set cache entry, kept for \a ttl seconds (<= 0: not stored)
  */
-export function setCacheEntry(query: string, result: string[] | null): void {
+export function setCacheEntry(query: string, result: string[], ttl: number): void {
+  if (!(ttl > 0)) return;
   cache.set(query, {
     result,
     ts: Date.now(),
+    ttl,
   });
+  if (++insertsSinceSweep >= Math.max(SWEEP_MIN, sizeAfterSweep)) {
+    sweepCache();
+  }
+}
+
+/**
+ * Remove every entry that has outlived the cache time it was stored for.
+ * Returns how many were removed.
+ */
+export function sweepCache(): number {
+  const now = Date.now();
+  let removed = 0;
+  for (const [query, entry] of cache) {
+    if (olderThan(entry, entry.ttl, now)) {
+      cache.delete(query);
+      removed++;
+    }
+  }
+  insertsSinceSweep = 0;
+  sizeAfterSweep = cache.size;
+  return removed;
 }
 
 /**
@@ -66,34 +115,93 @@ export function getCacheSize(): number {
 }
 
 /**
+ * Error codes from dns.resolve4 that are a definite "not listed": the list's
+ * server answered NXDOMAIN (ENOTFOUND) or NODATA (ENODATA).  Every other
+ * failure -- SERVFAIL (ESERVFAIL), REFUSED (EREFUSED), the resolver's own
+ * timeout (ETIMEOUT), an unreachable server (ECONNREFUSED), our DNSTIMEOUT --
+ * says nothing about the address.
+ */
+const NOT_LISTED_CODES = new Set(['ENOTFOUND', 'ENODATA']);
+
+/**
  * Perform a DNSBL lookup
- * Returns array of result IPs or empty array if not listed
+ * Returns the result IPs ([] if not listed).  definite is false when the
+ * lookup failed or timed out: the address then counts as not listed for the
+ * client at hand, but the answer must not be cached.
  */
 export async function lookupDNSBL(
   reversedIp: string,
   dnsblServer: string,
   timeout: number
-): Promise<string[]> {
+): Promise<DNSBLAnswer> {
   const query = `${reversedIp}.${dnsblServer}`;
+  let timer: NodeJS.Timeout | undefined;
 
   try {
-    // Create a DNS resolver with timeout
-    const resolver = new dns.Resolver();
-    resolver.setServers(['8.8.8.8', '8.8.4.4']); // Use Google DNS as fallback
-
     // Race against timeout
     const timeoutPromise = new Promise<string[]>((_, reject) => {
-      setTimeout(() => reject(new Error('DNS timeout')), timeout * 1000);
+      timer = setTimeout(() => reject(new Error('DNS timeout')), timeout * 1000);
     });
 
     const lookupPromise = dns.resolve4(query);
-    const result = await Promise.race([lookupPromise, timeoutPromise]);
+    const results = await Promise.race([lookupPromise, timeoutPromise]);
 
-    return result;
+    return { results, definite: true };
   } catch (err) {
-    // NXDOMAIN or timeout = not listed
-    return [];
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code && NOT_LISTED_CODES.has(code)) {
+      return { results: [], definite: true };
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    return { results: [], definite: false, error: code ?? message };
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+/** Where queryDNSBL's answer comes from */
+export type DNSBLAnswerSource = 'cache' | 'shared' | 'lookup';
+
+/**
+ * Answer a DNSBL query from the cache, from the lookup of the same query
+ * already in flight, or from a new lookup.  A definite answer is cached when
+ * the lookup ends; a failed one is not, and every client that waited on it
+ * gets the same "not listed, not definite" answer.  A waiter never waits
+ * longer than the lookup it shares, which gives up after \a timeout seconds.
+ */
+export function queryDNSBL(
+  reversedIp: string,
+  dnsblServer: string,
+  timeout: number,
+  cacheTime: number
+): { source: DNSBLAnswerSource; answer: Promise<DNSBLAnswer> } {
+  const query = `${reversedIp}.${dnsblServer}`;
+
+  const cached = getCacheEntry(query, cacheTime);
+  if (cached) {
+    return { source: 'cache', answer: Promise.resolve({ results: cached.result, definite: true }) };
+  }
+
+  const pending = inflight.get(query);
+  if (pending) {
+    pending.ttl = Math.max(pending.ttl, cacheTime);
+    return { source: 'shared', answer: pending.answer };
+  }
+
+  const answer = lookupDNSBL(reversedIp, dnsblServer, timeout)
+    .catch((err): DNSBLAnswer => ({ results: [], definite: false, error: String(err) }))
+    .then((result) => {
+      // Before any waiter sees the answer: the lookup is over, and a
+      // definite answer is in the cache for the next asker.
+      inflight.delete(query);
+      if (result.definite) {
+        setCacheEntry(query, result.results, record.ttl);
+      }
+      return result;
+    });
+  const record = { answer, ttl: cacheTime };
+  inflight.set(query, record);
+  return { source: 'lookup', answer };
 }
 
 /**

@@ -2,8 +2,8 @@
  * Unit tests for configuration parser
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { writeFileSync, unlinkSync, mkdtempSync } from 'node:fs';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { readConfigFile } from '../src/config.js';
@@ -18,9 +18,7 @@ describe('Config Parser', () => {
   });
 
   afterAll(() => {
-    try {
-      unlinkSync(configPath);
-    } catch {}
+    rmSync(tempDir, { recursive: true, force: true });
   });
 
   it('should parse POLICY directive', () => {
@@ -33,6 +31,12 @@ describe('Config Parser', () => {
     writeFileSync(configPath, '#IAUTH CACHETIME 3600\n');
     const { config } = readConfigFile(configPath);
     expect(config.cacheTime).toBe(3600);
+  });
+
+  it('CACHETIME 0 means answers are not reused (not the default)', () => {
+    writeFileSync(configPath, '#IAUTH CACHETIME 0\n');
+    const { config } = readConfigFile(configPath);
+    expect(config.cacheTime).toBe(0);
   });
 
   it('should parse DNSTIMEOUT directive', () => {
@@ -180,5 +184,83 @@ General { name = "test"; };
     expect(config.dnsbls[0].cfgNum).toBe(2);
     expect(config.dnsbls[1].cfgNum).toBe(3);
     expect(config.dnsbls[2].cfgNum).toBe(4);
+  });
+
+  // A cache time that is not a whole number of seconds is ignored (with a
+  // complaint on stderr, which the ircd logs) rather than read as NaN --
+  // which never expired -- or as 0.
+  describe('bad cache times', () => {
+    for (const bad of ['abc', '10x', '1.5', '-', '--5']) {
+      it(`ignores cachetime=${bad} on a DNSBL line: the global CACHETIME applies`, () => {
+        const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+        writeFileSync(configPath, `#IAUTH DNSBL server=dnsbl.example.com cachetime=${bad}\n`);
+        const { config } = readConfigFile(configPath);
+        expect(config.dnsbls[0].cacheTime).toBeUndefined();
+        expect(err).toHaveBeenCalledWith(expect.stringMatching(/cachetime.*dnsbl\.example\.com/i));
+        err.mockRestore();
+      });
+    }
+
+    for (const bad of ['abc', '']) {
+      it(`ignores "CACHETIME${bad ? ' ' + bad : ''}": the default applies`, () => {
+        const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+        writeFileSync(configPath, `#IAUTH CACHETIME${bad ? ' ' + bad : ''}\n`);
+        const { config } = readConfigFile(configPath);
+        expect(config.cacheTime).toBe(86400);
+        expect(err).toHaveBeenCalledWith(expect.stringMatching(/CACHETIME/));
+        err.mockRestore();
+      });
+    }
+
+    // A negative cache time has always meant "not reused" (here and in
+    // iauthd.pl): it is read as 0, silently.
+    it('a negative cachetime on a DNSBL line or CACHETIME means 0 (not reused), silently', () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      writeFileSync(configPath, '#IAUTH CACHETIME -1\n#IAUTH DNSBL server=a.example cachetime=-5\n');
+      const { config } = readConfigFile(configPath);
+      expect(config.cacheTime).toBe(0);
+      expect(config.dnsbls[0].cacheTime).toBe(0);
+      expect(err).not.toHaveBeenCalled();
+      err.mockRestore();
+    });
+
+    it('a good cachetime says nothing', () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      writeFileSync(configPath, '#IAUTH CACHETIME 0\n#IAUTH DNSBL server=a.example cachetime=0\n');
+      const { config } = readConfigFile(configPath);
+      expect(config.cacheTime).toBe(0);
+      expect(config.dnsbls[0].cacheTime).toBe(0);
+      expect(err).not.toHaveBeenCalled();
+      err.mockRestore();
+    });
+  });
+
+  // A misspelt directive (CACHETIMEOUT for CACHETIME) used to vanish without
+  // a trace, leaving the default in force.
+  describe('unknown directives', () => {
+    it('reports an unknown directive with its line, and otherwise ignores it', () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      writeFileSync(configPath, '#IAUTH POLICY RTAWUwFr\n#IAUTH CACHETIMEOUT 21600\n');
+      const { config, configLines } = readConfigFile(configPath);
+      expect(config.cacheTime).toBe(86400);
+      expect(config.policy).toBe('RTAWUwFr');
+      expect(configLines).toHaveLength(2);
+      expect(err).toHaveBeenCalledTimes(1);
+      expect(err).toHaveBeenCalledWith(expect.stringMatching(/unknown #IAUTH directive CACHETIMEOUT.*line 2.*CACHETIMEOUT 21600/));
+      err.mockRestore();
+    });
+
+    it('says nothing about any directive it knows', () => {
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      writeFileSync(configPath, [
+        '#IAUTH POLICY RTAWUwFr', '#IAUTH DNSBL server=a.example index=2', '#IAUTH DEBUG',
+        '#IAUTH DNSTIMEOUT 5', '#IAUTH BLOCKMSG go away', '#IAUTH CACHETIME 3600',
+        '#IAUTH SASLDB /nonexistent/users', '#IAUTH SASLFAILMSG no', '#IAUTH AUTH provider=file path=/nonexistent/users',
+        '',
+      ].join('\n'));
+      readConfigFile(configPath);
+      expect(err).not.toHaveBeenCalled();
+      err.mockRestore();
+    });
   });
 });

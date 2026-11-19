@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { writeFileSync, unlinkSync, mkdtempSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -142,9 +142,7 @@ describe('SASL Module', () => {
     });
 
     afterAll(() => {
-      try {
-        unlinkSync(usersFile);
-      } catch {}
+      rmSync(tmpDir, { recursive: true, force: true });
     });
 
     it('should parse simple users file', () => {
@@ -223,9 +221,7 @@ describe('SASL Module', () => {
     });
 
     afterAll(() => {
-      try {
-        unlinkSync(usersFile);
-      } catch {}
+      rmSync(tmpDir, { recursive: true, force: true });
     });
 
     it('should authenticate with plain text password', () => {

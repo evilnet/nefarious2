@@ -14,6 +14,16 @@ const DEFAULT_POLICY = 'RTAWUwFr';
 const DEFAULT_SASL_FAIL_MSG = 'SASL authentication failed';
 
 /**
+ * Parse a cache time: a whole number of seconds.  0 or a negative number
+ * means answers are not reused (as it always has, here and in iauthd.pl)
+ * and gives 0.  Anything else gives undefined (the caller falls back and
+ * says so).
+ */
+function parseCacheTime(value: string): number | undefined {
+  return /^-?\d+$/.test(value) ? Math.max(0, parseInt(value, 10)) : undefined;
+}
+
+/**
  * Parse a DNSBL configuration line
  * Format: server=dnsbl.sorbs.net index=2,3,4 mark=sorbs block=anonymous
  */
@@ -48,9 +58,17 @@ function parseDNSBLConfig(args: string, cfgNum: number): DNSBLConfig {
         case 'class':
           config.class = value;
           break;
-        case 'cachetime':
-          config.cacheTime = parseInt(value, 10);
+        case 'cachetime': {
+          const seconds = parseCacheTime(value);
+          if (seconds === undefined) {
+            // Not NaN (which never expired): the global CACHETIME applies
+            console.error(`Ignoring bad cachetime=${value} on DNSBL ${args.trim()}: ` +
+              'not a whole number of seconds; the global CACHETIME applies');
+          } else {
+            config.cacheTime = seconds;
+          }
           break;
+        }
         case 'whitelist':
           config.whitelist = true;
           break;
@@ -84,7 +102,8 @@ export function readConfigFile(filePath: string): { config: Config; configLines:
 
   const content = readFileSync(filePath, 'utf-8');
 
-  for (const line of content.split('\n')) {
+  const lines = content.split('\n');
+  for (const [index, line] of lines.entries()) {
     const match = line.match(/^#IAUTH\s+(\w+)(?:\s+(.+))?$/);
     if (!match) continue;
 
@@ -118,9 +137,18 @@ export function readConfigFile(filePath: string): { config: Config; configLines:
         config.blockMsg = args.trim();
         break;
 
-      case 'CACHETIME':
-        config.cacheTime = parseInt(args.trim(), 10) || DEFAULT_CACHE_TIME;
+      case 'CACHETIME': {
+        // 0 is a value (answers are not reused), not "unset"
+        const seconds = parseCacheTime(args.trim());
+        if (seconds === undefined) {
+          console.error(`Ignoring bad CACHETIME '${args.trim()}': not a whole number of seconds; ` +
+            `using ${DEFAULT_CACHE_TIME}`);
+          config.cacheTime = DEFAULT_CACHE_TIME;
+        } else {
+          config.cacheTime = seconds;
+        }
         break;
+      }
 
       case 'SASLDB':
         // Legacy support: convert to file auth provider
@@ -137,6 +165,13 @@ export function readConfigFile(filePath: string): { config: Config; configLines:
         if (authConfig) {
           config.authProviders.push(authConfig);
         }
+        break;
+
+      default:
+        // Skipped as before, but a misspelling (CACHETIMEOUT for
+        // CACHETIME) must not vanish without a word
+        console.error(`Ignoring unknown #IAUTH directive ${directive} ` +
+          `(${filePath} line ${index + 1}: ${line.trim()})`);
         break;
     }
   }

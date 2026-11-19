@@ -8,10 +8,8 @@ import { readConfigFile } from './config.js';
 import {
   reverseIPv4,
   isIPv4,
-  getCacheEntry,
-  setCacheEntry,
   getCacheSize,
-  lookupDNSBL,
+  queryDNSBL,
   matchesDNSBL,
 } from './dnsbl.js';
 import {
@@ -25,6 +23,8 @@ const VERSION = '1.0.0';
 
 export class IAuthDaemon {
   private config: Config;
+  /** The #IAUTH lines as last loaded, shown to the ircd (A * iauthd-ts) */
+  private configLines: string[];
   private configPath: string;
   private options: CLIOptions;
   private clients = new Map<number, ClientState>();
@@ -41,8 +41,10 @@ export class IAuthDaemon {
   constructor(options: CLIOptions) {
     this.options = options;
     this.configPath = options.config;
-    const { config } = readConfigFile(options.config);
+    // One parse per load: it is also where bad lines are reported
+    const { config, configLines } = readConfigFile(options.config);
     this.config = config;
+    this.configLines = configLines;
 
     // Initialize DNSBL counters
     for (const dnsbl of this.config.dnsbls) {
@@ -140,8 +142,7 @@ export class IAuthDaemon {
     this.send('a');
     this.send(`A * version :Nefarious iauthd-ts ${VERSION}`);
 
-    const { configLines } = readConfigFile(this.configPath);
-    for (const line of configLines) {
+    for (const line of this.configLines) {
       this.send(`A * iauthd-ts :${line}`);
     }
   }
@@ -260,8 +261,9 @@ export class IAuthDaemon {
       case 'e': // Event
         if (args === 'rehash') {
           this.debug('Got a rehash. Rereading config file');
-          const { config } = readConfigFile(this.configPath);
+          const { config, configLines } = readConfigFile(this.configPath);
           this.config = config;
+          this.configLines = configLines;
           // Reinitialize auth providers
           if (this.authManager) {
             this.authManager.reload().catch(err => {
@@ -336,6 +338,7 @@ export class IAuthDaemon {
       hurry: false,
       lookups: new Map(),
       hits: new Map(),
+      generation: 0,
     };
 
     this.clients.set(id, client);
@@ -356,34 +359,54 @@ export class IAuthDaemon {
     const reversedIp = reverseIPv4(client.ip);
     if (!reversedIp) return;
 
+    // The address these lookups are for: a trusted WEBIRC moves the client
+    // to a new address (and generation) while they run.
+    const generation = client.generation;
+
+    // Every list is pending before any answer is looked at: an answer that
+    // is at hand (cached) must not let a hurried client be decided while
+    // the lists after it have not been asked yet.
+    for (const dnsbl of this.config.dnsbls) {
+      client.lookups.set(dnsbl.cfgNum, true);
+    }
+
     // Start all lookups concurrently
     const lookupPromises = this.config.dnsbls.map(async (dnsbl) => {
       const query = `${reversedIp}.${dnsbl.server}`;
-      client.lookups.set(dnsbl.cfgNum, true); // Mark as pending
 
       this.debug(`Looking up client ${client.id}: ${query}`);
 
-      // Check cache
+      // From the cache, from the same lookup already in flight for another
+      // client (or another line naming the same list), or from a new lookup
       const cacheTime = dnsbl.cacheTime ?? this.config.cacheTime;
-      const cached = getCacheEntry(query, cacheTime);
-
-      let results: string[];
-      if (cached && cached.result !== null) {
+      const { source, answer } = queryDNSBL(reversedIp, dnsbl.server, this.config.dnsTimeout, cacheTime);
+      if (source === 'cache') {
         this.debug(`Found dnsbl cache entry for ${query}`);
-        results = cached.result;
-      } else if (cached) {
-        // Cache entry exists but result is null (pending)
-        this.debug(`Cache pending... on ${query}`);
-        // Wait a bit and retry from cache
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        const retryCache = getCacheEntry(query, cacheTime);
-        results = retryCache?.result ?? [];
+      } else if (source === 'shared') {
+        this.debug(`Waiting on the lookup in flight for ${query}`);
       } else {
-        // Start new lookup
         this.debug(`Starting DNS lookup for ${query}`);
-        setCacheEntry(query, null); // Mark as pending
-        results = await lookupDNSBL(reversedIp, dnsbl.server, this.config.dnsTimeout);
-        setCacheEntry(query, results);
+      }
+
+      const { results, definite, error } = await answer;
+
+      // The client left (D) while the lookup ran: the ircd reuses ids (they
+      // are fds), so acting now would decide for, or delete, whoever holds
+      // the id by now.  Or a trusted WEBIRC moved it to another address:
+      // only the lookups for that address count.
+      if (this.clients.get(client.id) !== client) {
+        this.debug(`Dropping the answer for ${query}: client ${client.id} is gone`);
+        return;
+      }
+      if (client.generation !== generation) {
+        this.debug(`Dropping the answer for ${query}: client ${client.id} is now ${client.ip}`);
+        return;
+      }
+
+      if (!definite) {
+        // No answer from the list: not listed for this client only. Nothing
+        // is cached, so the next connection from the address asks again.
+        this.debug(`DNS lookup for ${query} failed (${error}); not listed for client ${client.id}, not cached`);
       }
 
       // Process results
@@ -518,28 +541,22 @@ export class IAuthDaemon {
       return;
     }
 
-    // Save state
-    const wasHurry = client.hurry;
+    // The same client at a new address: its login, SASL exchange and
+    // hurry stay; everything the old address's lists said goes, and the
+    // lookups still running for the old address no longer count.
+    client.generation++;
+    client.ip = newIp;
+    client.whitelist = false;
+    client.block = false;
+    client.class = undefined;
+    client.marks = new Map();
+    client.hits = new Map();
+    client.lookups = new Map();
 
-    // Delete and recreate with new IP
-    this.clients.delete(id);
-
-    const newClient: ClientState = {
-      id,
-      ip: newIp,
-      port: client.port,
-      serverIp: client.serverIp,
-      serverPort: client.serverPort,
-      whitelist: false,
-      block: false,
-      marks: new Map(),
-      hurry: wasHurry,
-      lookups: new Map(),
-      hits: new Map(),
-    };
-
-    this.clients.set(id, newClient);
-    this.startDNSBLLookups(newClient);
+    this.startDNSBLLookups(client);
+    // Hurried already and nothing to wait for (an address not checked, or
+    // no lists): decide now -- no lookup will.
+    this.handleClientUpdate(client);
   }
 
   /**
@@ -637,6 +654,7 @@ export class IAuthDaemon {
         hurry: false,
         lookups: new Map(),
         hits: new Map(),
+        generation: 0,
         sasl: { started: false },
       };
       this.clients.set(id, client);

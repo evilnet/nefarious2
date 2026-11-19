@@ -78,10 +78,20 @@ DNSBLs return `127.0.0.X` addresses where X indicates the listing reason:
 
 ### Caching
 
-DNS results are cached globally in `dnsbl.ts`. Cache entries store:
+DNS results are cached globally in `dnsbl.ts` (`queryDNSBL`). Cache entries store:
 - Query string (reversed IP + server)
-- Result IPs or null (pending)
-- Timestamp for expiration
+- Result IPs ([] = not listed)
+- Timestamp, and the time to keep the entry (the longest `cachetime` among
+  the DNSBL lines that asked; answers for lines with cache time 0 are not stored)
+
+Expired entries are swept out on insert (`sweepCache`, once the inserts since
+the last sweep reach the size after it, at least 256), so the cache holds about
+the answers stored within the longest cache time, at most twice that plus 256.
+
+Only definite answers are cached (A records, NXDOMAIN, NODATA); a timeout or
+failed lookup is "not listed" for the client at hand and is never cached. A
+lookup in flight is kept apart from the cache: a second client (or a second
+line naming the same list) asking for the same query awaits that same lookup.
 
 ### SASL Authentication
 
@@ -105,6 +115,8 @@ Tests use Vitest with mocked DNS resolution:
 - **`tests/dnsbl.test.ts`** - IP functions, caching, matching
 - **`tests/dnsbl-integration.test.ts`** - Full DNSBL pipeline with mock DNS
 - **`tests/iauth.test.ts`** - Protocol integration tests
+- **`tests/verdict.test.ts`** - In-process verdict accounting (one verdict, after every list)
+- **`tests/daemon-config.test.ts`** - In-process config loading (one parse per start/rehash)
 - **`tests/sasl.test.ts`** - SASL authentication utilities
 - **`tests/auth/config.test.ts`** - AUTH directive parsing
 - **`tests/auth/file.test.ts`** - FileAuthProvider tests

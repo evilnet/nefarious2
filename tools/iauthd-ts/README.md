@@ -16,6 +16,33 @@ This is a port of the original Perl `iauthd.pl` to TypeScript/Node.js.
 - **Class Assignment**: Assign users to connection classes based on DNSBL results
 - **Whitelisting**: Exempt users matching certain DNSBLs from all blocks
 
+## What Changes on Upgrade
+
+Behaviour that differs from earlier versions of this script:
+
+- **`#IAUTH CACHETIME 0`** means answers are not reused; it used to mean
+  the 24-hour default. A list's `cachetime=0` always meant "not reused"
+  and still does, and so does a **negative** value in either place.
+- **A malformed cache time** (`abc`, `1h`, `10x`, `1.5`) is ignored and
+  reported on stderr (the IRCd's IAuth log): a list falls back to the
+  global `CACHETIME`, and `CACHETIME` to 24 hours. Before, a value with
+  leading digits was cut to them (`1h` meant 1 second, `10x` meant 10),
+  a list's `cachetime=abc` never expired, and `CACHETIME abc` silently
+  gave 24 hours. So `CACHETIME 1h` used to mean 1 second and now means
+  24 hours, with a warning. `#IAUTH CACHETIME` with no value is reported
+  too; a list's empty `cachetime=` is not read as an option at all.
+- **An unknown directive** (`CACHETIMEOUT` for `CACHETIME`) is reported;
+  it is still ignored.
+- **A lookup that times out or fails is not cached.** While one list is
+  down, every connection waits up to `DNSTIMEOUT` for it and the list is
+  asked again each time. Before, the first connection waited once and the
+  address was then taken as "not listed" by that list for the cache time.
+- **A second connection from the same address while its lookup is still
+  running waits for that lookup** (up to `DNSTIMEOUT`) and is judged by its
+  answer. Before, it was taken as "not listed" after 100 ms.
+- **After a trusted WEBIRC**, only the lists' answers for the real address
+  count, and an answer that arrives after its client has gone is dropped.
+
 ## How It Works
 
 ```
@@ -87,6 +114,10 @@ Only that one file is read: `include` lines in it are not followed. If your `#IA
 
 ### Directives
 
+An `#IAUTH` line naming a directive the script does not know (a misspelling
+such as `CACHETIMEOUT`) is skipped and reported on stderr, which the IRCd
+writes to its IAuth log.
+
 #### POLICY
 ```
 #IAUTH POLICY RTAWUwFr
@@ -97,13 +128,24 @@ Sets the IAuth policy flags. See `doc/readme.iauth` for details.
 ```
 #IAUTH DNSTIMEOUT 5
 ```
-Seconds to wait for DNSBL lookups. Default: 5
+Seconds to wait for DNSBL lookups. Default: 5. A list that has not answered
+by then (or whose lookup fails: SERVFAIL, REFUSED, server unreachable) counts
+as "not listed" for that client only; the failure is not cached, so the next
+connection from the address asks the list again.
 
 #### CACHETIME
 ```
 #IAUTH CACHETIME 86400
 ```
-Seconds to cache DNSBL results. Default: 86400 (24 hours)
+Seconds to cache DNSBL results. Default: 86400 (24 hours). `0`: answers are
+not reused -- every connection asks the lists again; a negative value means
+the same. A value that is not a whole number of seconds is ignored (the default applies) and reported on
+stderr, which the IRCd logs. Only definite
+answers are cached: the list's records, or its "no such name" / "no data"
+(NXDOMAIN / NODATA) answer. Timeouts and failed lookups are never cached.
+Answers are kept no longer than their cache time and expired ones are swept
+out as new answers come in, so the cache holds roughly the answers of the
+last CACHETIME seconds (a list with cache time 0 stores nothing).
 
 #### BLOCKMSG
 ```
@@ -145,7 +187,7 @@ Options:
 | `block=anonymous` | Block matching clients unless SASL authenticated |
 | `class=<name>` | Assign matching clients to this connection class |
 | `whitelist` | Matching clients are exempt from all blocks |
-| `cachetime=<n>` | Override cache time for this DNSBL |
+| `cachetime=<n>` | Override cache time for this DNSBL (seconds; `0` or negative = answers not reused; a bad value is ignored and reported, the global `CACHETIME` applies) |
 
 ### Example Configuration
 

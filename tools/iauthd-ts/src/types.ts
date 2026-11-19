@@ -90,14 +90,32 @@ export interface ClientState {
   hits: Map<number, boolean>;
   /** SASL authentication state */
   sasl?: SASLState;
+  /** Bumped when a trusted WEBIRC changes the address: lookups started
+   * for an earlier generation no longer count */
+  generation: number;
+}
+
+/** The outcome of one DNSBL lookup */
+export interface DNSBLAnswer {
+  /** A records returned by the list ([] = not listed, or the lookup failed) */
+  results: string[];
+  /** true: the list answered (records, NXDOMAIN or NODATA) and the answer may
+   * be cached; false: the lookup failed or timed out -- not listed for this
+   * client only, never cached */
+  definite: boolean;
+  /** Why the lookup failed (error code or message), when !definite */
+  error?: string;
 }
 
 /** DNSBL cache entry */
 export interface CacheEntry {
-  /** DNS lookup results (IP addresses) */
-  result: string[] | null;
+  /** DNS lookup results (IP addresses); [] = not listed */
+  result: string[];
   /** Timestamp when cached */
   ts: number;
+  /** Seconds the entry is kept (the longest cache time among the lines
+   * that asked for it); swept out after that */
+  ttl: number;
 }
 
 /** Parsed server message */
