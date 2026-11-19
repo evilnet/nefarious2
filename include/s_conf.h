@@ -314,6 +314,7 @@ extern void clear_sslcert_confs(void);
 #endif
 
 extern int conf_get_error_flag(void);
+extern int conf_rehash_abandoned(void);
 
 extern void conf_include_absent(const char *name);
 extern void conf_set_check_only(void);

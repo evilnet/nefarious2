@@ -1599,6 +1599,36 @@ gitsync_apply(const char *content, size_t len, int force,
   if (rehash(cptr, 0) == CPTR_KILLED)
     *killed = CPTR_KILLED;
 
+  /* The rehash was abandoned before it discarded anything: the running
+   * configuration is the one from before it.  Put the file back; the next
+   * sync tries the content again, whatever the reason (errors the check
+   * found, or a check that crashed, timed out or could not run, or a file
+   * that changed while it was checked).  The check judges the whole
+   * configuration, so its errors need not be this commit's: refusing the
+   * content here would outlast a fix made outside it. */
+  if (conf_get_error_flag() && conf_rehash_abandoned()) {
+    sendto_opmask_butone(0, SNO_OLDSNO, "GitSync: Rehash abandoned, %s",
+                         had_backup ? "restoring backup"
+                         : "removing the new file (no previous file)");
+    if (!(had_backup ? 0 == rename(bak_file, conf_file)
+                     : 0 == unlink(conf_file)))
+      ircd_snprintf(0, gitsync_stats.last_error,
+                    sizeof(gitsync_stats.last_error),
+                    "Rehash with commit %.8s abandoned - cannot %s %s: %s; "
+                    "retried at the next sync", gitsync_stats.last_commit,
+                    had_backup ? "restore the backup of" : "remove",
+                    conf_file, strerror(errno));
+    else
+      ircd_snprintf(0, gitsync_stats.last_error,
+                    sizeof(gitsync_stats.last_error),
+                    "Rehash with commit %.8s abandoned (see the CONFIG log) - "
+                    "%s; retried at the next sync", gitsync_stats.last_commit,
+                    had_backup ? "restored from backup"
+                    : "taken back (there was no previous file)");
+    log_write(LS_SYSTEM, L_ERROR, 0, "GitSync: %s", gitsync_stats.last_error);
+    return GITSYNC_VALIDATION_ERROR;
+  }
+
   /* Check if config parsing failed */
   if (conf_get_error_flag()) {
     sendto_opmask_butone(0, SNO_OLDSNO,
