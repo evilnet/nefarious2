@@ -2231,6 +2231,79 @@ uint64_t msgid_decode_time_ms(const char *msgid)
   return ms;
 }
 
+/** The msgid of the JOIN that shows a hidden (delayed-join) member, made
+ * from what every server already has: the msgid of the event that shows
+ * the member (@a event: the message, TOPIC or MODE), the channel's name
+ * (@a chname, any case) and the member's numeric (@a server_yxx,
+ * @a user_yxx).  Every server that handles the event under one msgid
+ * shows and stores the JOIN under one msgid, with nothing more on the
+ * wire.
+ *
+ * The id has the minted layout, <node_2><logical_3><time_7><counter_2>,
+ * and decodes like one:
+ *  - time: the event's, less 1 ms -- the JOIN sorts before the event it
+ *    precedes, on every server;
+ *  - logical: bit 15 set.  A minted id has it clear (hlc_step() carries
+ *    into the time before the logical counter reaches it), so the two
+ *    kinds never meet;
+ *  - node, the other 15 bits of logical, counter: 39 bits of a hash
+ *    (FNV-1a, 64 bits, mixed) of the event's id, the channel and the
+ *    member.  That is all the room the layout has, and less than the
+ *    three inputs: two reveals whose events are in the same millisecond
+ *    and that differ in event, channel or member share an id with
+ *    probability 2^-39 (1 in 5.5e11).  Reveals a millisecond apart never
+ *    do.
+ * @return 1 with @a out filled; 0 when @a event is not a minted id or an
+ * argument is missing (@a out is then ""). */
+int msgid_derive_join(char *out, size_t outlen, const char *event,
+                      const char *chname, const char *server_yxx,
+                      const char *user_yxx)
+{
+  uint64_t ms = msgid_decode_time_ms(event);
+  uint64_t h = 14695981039346656037ULL;
+  const char *part[4];
+  const char *p;
+  unsigned int logical;
+  int i;
+
+  if (outlen)
+    out[0] = '\0';
+  if (!ms || outlen <= MSGID_HLC_LEN || !chname || !server_yxx || !user_yxx)
+    return 0;
+
+  part[0] = event;
+  part[1] = server_yxx;
+  part[2] = user_yxx;
+  part[3] = chname;
+  for (i = 0; i < 4; i++) {
+    /* Each part and its end: ("AB", "C") is not ("A", "BC").  The
+     * channel's name in one case: servers may hold it in two. */
+    for (p = part[i]; ; p++) {
+      h = (h ^ (unsigned char)(i == 3 ? ToLower(*p) : *p)) * 1099511628211ULL;
+      if (!*p)
+        break;
+    }
+  }
+  h ^= h >> 33;                 /* FNV's low bits are its weak ones */
+  h *= 0xff51afd7ed558ccdULL;
+  h ^= h >> 33;
+
+  logical = 0x8000 | (unsigned int)(h & 0x7FFF);
+  h >>= 15;
+  ms--;
+
+  for (i = 1; i >= 0; i--, h >>= 6)
+    out[i] = msgid_b64_alphabet[h & 63];
+  for (i = 4; i >= 2; i--, logical >>= 6)
+    out[i] = msgid_b64_alphabet[logical & 63];
+  for (i = 11; i >= 5; i--, ms >>= 6)
+    out[i] = msgid_b64_alphabet[ms & 63];
+  for (i = 13; i >= 12; i--, h >>= 6)
+    out[i] = msgid_b64_alphabet[h & 63];
+  out[MSGID_HLC_LEN] = '\0';
+  return 1;
+}
+
 /** msgid_decode_time_ms() for an id a client hands back as a CHATHISTORY
  * selector: also 0 when the id says it was minted more than @a max_ahead_ms
  * after @a now_ms.  The caller passes as @a now_ms the later of the wall

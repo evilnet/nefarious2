@@ -1458,7 +1458,7 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
   if (!MyUser(member->user))
   {
     if (IsDelayedJoin(member) && reveal)
-      RevealDelayedJoin(member);
+      RevealDelayedJoin(member, NULL);
     return 1;
   }
 
@@ -1472,7 +1472,7 @@ int member_can_send_to_channel(struct Membership* member, int reveal)
     return 0;
 
   if (IsDelayedJoin(member) && reveal)
-    RevealDelayedJoin(member);
+    RevealDelayedJoin(member, NULL);
 
   return 1;
 }
@@ -2714,7 +2714,7 @@ show_delayed_joins(const struct Channel *chan)
   struct Membership *memb;
   for (memb = chan->members; memb; memb = memb->next_member)
     if (IsDelayedJoin(memb))
-      RevealDelayedJoin(memb);
+      RevealDelayedJoin(memb, NULL);
 }
 
 /** Flush out the modes
@@ -2871,6 +2871,18 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
       rembuf_local[rembuf_local_i++] = flag_p[1];
   }
 
+  /* The status changes go out in this MODE, whatever else has to wait
+   * for the next: their room is taken first (MAXMODEPARAMS nicks always
+   * fit).  A hidden member given a status was shown under a JOIN named
+   * after the first msgid minted since (RevealDelayedJoin()), and that
+   * is this MODE's; another server names its JOIN after the MODE line
+   * that carries the status. */
+  for (i = 0; i < mbuf->mb_count; i++)
+    if (MB_TYPE(mbuf, i) & (MODE_CHANOP | MODE_HALFOP | MODE_VOICE)) {
+      tmp = strlen(cli_name(MB_CLIENT(mbuf, i)));
+      totalbuflen -= IRCD_MAX(9, tmp) + 1;
+    }
+
   /* Now go through the modes with arguments... */
   for (i = 0; i < mbuf->mb_count; i++) {
     if (MB_TYPE(mbuf, i) & MODE_ADD) { /* adding or removing? */
@@ -2882,15 +2894,8 @@ modebuf_flush_int(struct ModeBuf *mbuf, int all)
     }
 
     if (MB_TYPE(mbuf, i) & (MODE_CHANOP | MODE_HALFOP | MODE_VOICE)) {
-      tmp = strlen(cli_name(MB_CLIENT(mbuf, i)));
-
-      if ((totalbuflen - IRCD_MAX(9, tmp)) <= 0) /* don't overflow buffer */
-	MB_TYPE(mbuf, i) |= MODE_SAVE; /* save for later */
-      else {
-	bufptr[(*bufptr_i)++] = MB_TYPE(mbuf, i) & MODE_CHANOP ? 'o' :
-                                (MB_TYPE(mbuf, i) & MODE_HALFOP ? 'h' : 'v');
-	totalbuflen -= IRCD_MAX(9, tmp) + 1;
-      }
+      bufptr[(*bufptr_i)++] = MB_TYPE(mbuf, i) & MODE_CHANOP ? 'o' :
+                              (MB_TYPE(mbuf, i) & MODE_HALFOP ? 'h' : 'v');
     } else if (MB_TYPE(mbuf, i) & (MODE_BAN | MODE_EXCEPT | MODE_APASS | MODE_UPASS)) {
       tmp = strlen(MB_STRING(mbuf, i));
 
@@ -5047,7 +5052,7 @@ mode_process_clients(struct ParseState *state)
     if (state->flags & MODE_PARSE_SET) {
       if (state->cli_change[i].flag & MODE_ADD) {
         if (IsDelayedJoin(member) && !IsZombie(member))
-          RevealDelayedJoin(member);
+          RevealDelayedJoin(member, NULL);
 	member->status |= (state->cli_change[i].flag &
 			   (MODE_CHANOP | MODE_HALFOP | MODE_VOICE));
 	if (state->cli_change[i].flag & MODE_CHANOP)
@@ -6269,15 +6274,65 @@ int IsInvited(struct Client* cptr, const void* chptr)
 
 /* RevealDelayedJoin: sends a join for a hidden user */
 
-void RevealDelayedJoin(struct Membership *member)
+/** The msgid and time of the JOIN that shows @a who, hidden until now.
+ *
+ * One JOIN on every server (N067).  Every server reveals the member
+ * itself, on the event that causes it (a message, a TOPIC, a MODE), and
+ * every server has that event's msgid.  So the JOIN's msgid is made from
+ * the event's, the channel's name and the member's numeric
+ * (msgid_derive_join()): the same everywhere, with nothing more on the
+ * wire, for every member one event shows and every channel one line
+ * names, and 1 ms before the event, which it precedes.
+ *
+ * The event's msgid is @a event when the caller has it; else the one
+ * the line being handled arrived with; else -- the event starts here, or
+ * came untagged, and its code mints its id after the reveal -- the id
+ * that mint will get, taken now (generate_msgid_ahead()).  An event id
+ * that is not a minted one (another implementation's) gives a JOIN id
+ * minted here, as before. */
+static void reveal_msgid_for(struct Client *who, const struct Channel *chan,
+                             const char *event, char *out, size_t outlen,
+                             uint64_t *ms_out)
+{
+  struct Client *link = sendcmdto_inbound_link();
+  uint64_t line_ms = 0;
+
+  if (!event && link && cli_s2s_msgid(link)[0]) {
+    event = cli_s2s_msgid(link);
+    line_ms = cli_s2s_time_ms(link);
+  }
+  if (!event)
+    event = generate_msgid_ahead();
+  if (cli_user(who) && cli_user(who)->server
+      && msgid_derive_join(out, outlen, event, chan->chname,
+                           cli_yxx(cli_user(who)->server), cli_yxx(who))) {
+    /* The event's time less 1 ms, as in the id.  Not decoded back from
+     * the id: an event at the decoder's lower bound gives an id below it. */
+    *ms_out = msgid_decode_time_ms(event) - 1;
+  } else {
+    generate_msgid(out, outlen);
+    *ms_out = history_event_time_ms(NULL);
+  }
+  /* A line's time is not always its msgid's: parse.c replaces one too
+   * far ahead of our clock, and the event is shown and stored at that
+   * time.  A line whose msgid is not a minted one gives a JOIN minted
+   * here, at our time, which can be after the line's.  Either way the
+   * JOIN still comes before the event. */
+  if (line_ms && *ms_out >= line_ms)
+    *ms_out = line_ms - 1;
+}
+
+void RevealDelayedJoin(struct Membership *member, const char *event_msgid)
 {
   char reveal_msgid[64] = "";
+  uint64_t reveal_ms = 0;
 
   ClearDelayedJoin(member);
 
   if (feature_bool(FEAT_MSGID)) {
-    generate_msgid(reveal_msgid, sizeof(reveal_msgid));
-    sendcmdto_set_client_event(reveal_msgid, history_event_time_ms(NULL));
+    reveal_msgid_for(member->user, member->channel, event_msgid,
+                     reveal_msgid, sizeof(reveal_msgid), &reveal_ms);
+    sendcmdto_set_client_event(reveal_msgid, reveal_ms);
   }
 
   sendcmdto_channel_capab_butserv_butone(member->user, CMD_JOIN, member->channel,
@@ -6297,7 +6352,7 @@ void RevealDelayedJoin(struct Membership *member)
 
 #ifdef USE_ROCKSDB
   store_channel_event(member->user, member->channel, "", HISTORY_JOIN,
-                      reveal_msgid[0] ? reveal_msgid : NULL, 0);
+                      reveal_msgid[0] ? reveal_msgid : NULL, reveal_ms);
 #endif
 
   CheckDelayedJoins(member->channel);
@@ -6320,7 +6375,7 @@ void RevealDelayedJoinIfNeeded(struct Client *sptr, struct Channel *chptr)
 {
   struct Membership *member = find_member_link(chptr, sptr);
   if (member && IsDelayedJoin(member))
-    RevealDelayedJoin(member);
+    RevealDelayedJoin(member, NULL);
 }
 
 /* Returns the number of common channels between two users, upto max. */

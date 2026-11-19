@@ -976,7 +976,7 @@ int is_half_op(struct Client *cptr, struct Channel *chptr)
   return 0;
 }
 
-void RevealDelayedJoin(struct Membership *member)
+void RevealDelayedJoin(struct Membership *member, const char *event_msgid)
 {
   (void)member;
 }

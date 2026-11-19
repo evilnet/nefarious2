@@ -173,6 +173,16 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
    }
    chptr->topic_time = ts ? ts : TStime();
 
+   /* A hidden setter is shown before the TOPIC's msgid is minted: the
+    * TOPIC's time is read right after its mint, and the reveal names its
+    * JOIN after the id that mint gets (RevealDelayedJoin). */
+   if (newtopic)
+   {
+     struct Membership *member = find_channel_member(sptr, chptr);
+     if (member && IsDelayedJoin(member))
+       RevealDelayedJoin(member, NULL);
+   }
+
    /* Generate or reuse msgid before S2S relay so all servers use the same one */
    {
      char topic_msgid[64] = "";
@@ -205,13 +215,6 @@ static void do_settopic(struct Client *sptr, struct Client *cptr,
    }
    if (newtopic)
    {
-     struct Membership *member;
-
-     /* If the member is delayed-join, show them. */
-     member = find_channel_member(sptr, chptr);
-     if (member && IsDelayedJoin(member))
-       RevealDelayedJoin(member);
-
      /* Use the same msgid for broadcast and chathistory storage */
      {
        if (topic_msgid[0])

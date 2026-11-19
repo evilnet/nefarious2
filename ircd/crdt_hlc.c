@@ -5,13 +5,16 @@
  *   "Logical Physical Clocks and Consistent Snapshots in Globally
  *    Distributed Databases"
  *
- * The logical counter uses uint16_t (max 65535).  It is not bounded by
- * events per wall-clock millisecond: while the clock is pinned ahead of
- * the wall clock (a peer that read ahead, an NTP step back) every event
- * increments it.  On overflow the step carries into physical_ms instead
- * of wrapping: a wrap at the same physical_ms would mint a stamp older
- * than the previous one and, since 65536 is a multiple of the msgid's
- * 12-bit counter, an exact duplicate msgid (formal/cbmc/crdt_hlc).
+ * The logical counter is a uint16_t that stops at HLC_LOGICAL_MAX
+ * (0x7FFF).  It is not bounded by events per wall-clock millisecond:
+ * while the clock is pinned ahead of the wall clock (a peer that read
+ * ahead, an NTP step back) every event increments it.  At the maximum
+ * the step carries into physical_ms instead of wrapping: a wrap at the
+ * same physical_ms would mint a stamp older than the previous one and,
+ * since 32768 is a multiple of the msgid's 12-bit counter, an exact
+ * duplicate msgid (formal/cbmc/crdt_hlc).  The top bit stays clear in
+ * every stamp this clock gives, so in every msgid minted from one: a
+ * msgid with it set is a derived one (msgid_derive_join()).
  */
 
 #include "config.h"
@@ -25,10 +28,11 @@
 static struct HLC global_hlc;
 
 /** Step @a h to the next stamp at or after (pt, logical): logical + 1,
- * or on overflow the next millisecond with logical 0. */
+ * or past HLC_LOGICAL_MAX the next millisecond with logical 0.  A peer
+ * without the maximum may hand in a larger logical; it carries too. */
 static void hlc_step(struct HLC *h, uint64_t pt, uint16_t logical)
 {
-  if (logical == UINT16_MAX) {
+  if (logical >= HLC_LOGICAL_MAX) {
     log_write(LS_SYSTEM, L_WARNING, 0,
               "HLC logical counter overflow (node %u, pt %llu) — carrying "
               "into physical time", (unsigned)h->node_id,

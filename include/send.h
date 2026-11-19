@@ -550,6 +550,12 @@ extern const char *get_active_network_batch(void);
 
 /* Generate unique message ID for IRCv3 message-ids */
 extern char *generate_msgid(char *buf, size_t buflen);
+/** The msgid the next generate_msgid() will return, minted now: for a
+ * caller that must name an event before the event's own code mints its
+ * id (a delayed-join reveal's JOIN is named after the event that shows
+ * it).  Asked twice before that event, it answers the same id.  An id no
+ * event took is dropped at the end of the line. */
+extern const char *generate_msgid_ahead(void);
 /* Format S2S compact tags (time + msgid) for inter-server messages */
 extern char *format_s2s_tags(char *buf, size_t buflen, struct Client *cptr,
                              char *msgid_out, size_t msgid_out_len);

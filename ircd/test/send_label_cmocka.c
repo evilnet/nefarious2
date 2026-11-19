@@ -60,6 +60,11 @@ struct HLC hlc_global_event(void)
   memset(&h, 0, sizeof(h));
   return h;
 }
+const struct HLC *hlc_global(void)
+{
+  static struct HLC h;
+  return &h;
+}
 const char *inttobase64_64(char *buf, uint64_t v, unsigned int count)
 {
   unsigned int i;

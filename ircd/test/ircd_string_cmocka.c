@@ -1925,6 +1925,83 @@ static void test_msgid_decode_strict_form(void **state)
 
 /* #214: a reference id stamped further ahead of now than the HLC's own
  * forward slack was not minted by this server family. */
+/* N067: a delayed-join reveal's JOIN is named after the event that shows
+ * the member and the member's numeric. */
+static void test_msgid_derive_join(void **state)
+{
+  const unsigned long long now = 1794500000000ULL;   /* 2026-11 */
+  char ev[16], ev2[16], t7[8], a[16], b[16];
+  uint64_t ms = 0;
+  uint16_t logical = 0;
+  int n;
+  (void)state;
+
+  msgid_encode7(t7, now);
+  snprintf(ev, sizeof(ev), "AB" "AAa" "%s" "LK", t7);
+
+  /* A minted-form id, 1 ms before the event: it sorts before the event
+   * by time on every server; logical bit 15 marks it (a mint's logical
+   * stops at 0x7FFF). */
+  assert_int_equal(msgid_derive_join(a, sizeof(a), ev, "#c", "AC", "D4f"), 1);
+  assert_int_equal(strlen(a), 14);
+  assert_int_equal(msgid_decode_hlc(a, &ms, &logical), 1);
+  assert_int_equal((unsigned long long)ms, now - 1);
+  assert_true(logical & 0x8000);
+
+  /* The same inputs give the same id: every server agrees, also one
+   * that holds the channel's name in another case. */
+  assert_int_equal(msgid_derive_join(b, sizeof(b), ev, "#c", "AC", "D4f"), 1);
+  assert_string_equal(a, b);
+  assert_int_equal(msgid_derive_join(b, sizeof(b), ev, "#C", "AC", "D4f"), 1);
+  assert_string_equal(a, b);
+
+  /* One event, several members (a MODE on two, -D): one id each, also
+   * when they differ only in one character's case. */
+  assert_int_equal(msgid_derive_join(b, sizeof(b), ev, "#c", "AC", "D4g"), 1);
+  assert_string_not_equal(a, b);
+  assert_int_equal(msgid_derive_join(b, sizeof(b), ev, "#c", "AC", "d4f"), 1);
+  assert_string_not_equal(a, b);
+  assert_int_equal(msgid_derive_join(b, sizeof(b), ev, "#c", "AD", "D4f"), 1);
+  assert_string_not_equal(a, b);
+  /* One event, one member, two channels (one line that names both). */
+  assert_int_equal(msgid_derive_join(b, sizeof(b), ev, "#d", "AC", "D4f"), 1);
+  assert_string_not_equal(a, b);
+  /* The parts do not run into each other. */
+  assert_int_equal(msgid_derive_join(a, sizeof(a), ev, "#c", "AC", "D4f"), 1);
+  assert_int_equal(msgid_derive_join(b, sizeof(b), ev, "f#c", "AC", "D4"), 1);
+  assert_string_not_equal(a, b);
+
+  /* One member, every event one server can mint in one millisecond and
+   * a run of the counter (logical 0..4095 with the counter in step, as a
+   * mint moves both): 4096 ids, all different.  The ids 18 apart that
+   * the 9-bit fold gave one JOIN id are among them. */
+  {
+    static char ids[4096][16];
+    char l3[4];
+
+    for (n = 0; n < 4096; n++) {
+      l3[0] = 'A';
+      l3[1] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789[]"[n >> 6];
+      l3[2] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789[]"[n & 63];
+      l3[3] = '\0';
+      snprintf(ev2, sizeof(ev2), "AB" "%s" "%s" "%s", l3, t7, l3 + 1);
+      assert_int_equal(msgid_derive_join(ids[n], sizeof(ids[n]), ev2, "#c", "AC", "D4f"), 1);
+    }
+    qsort(ids, 4096, sizeof(ids[0]), (int (*)(const void *, const void *))strcmp);
+    for (n = 1; n < 4096; n++)
+      assert_string_not_equal(ids[n - 1], ids[n]);
+  }
+
+  /* Not a minted event id, a missing part, no room: none. */
+  assert_int_equal(msgid_derive_join(a, sizeof(a), "zzzz-unknown", "#c", "AC", "D4f"), 0);
+  assert_string_equal(a, "");
+  assert_int_equal(msgid_derive_join(a, sizeof(a), NULL, "#c", "AC", "D4f"), 0);
+  assert_int_equal(msgid_derive_join(a, sizeof(a), ev, NULL, "AC", "D4f"), 0);
+  assert_int_equal(msgid_derive_join(a, sizeof(a), ev, "#c", NULL, "D4f"), 0);
+  assert_int_equal(msgid_derive_join(a, sizeof(a), ev, "#c", "AC", NULL), 0);
+  assert_int_equal(msgid_derive_join(a, 14, ev, "#c", "AC", "D4f"), 0);
+}
+
 static void test_msgid_decode_ref_time_bound(void **state)
 {
   char id[16], t7[8];
@@ -2013,6 +2090,7 @@ int main(void)
     cmocka_unit_test(test_msgid_decode_rejects),
     cmocka_unit_test(test_msgid_decode_strict_form),
     cmocka_unit_test(test_msgid_decode_ref_time_bound),
+    cmocka_unit_test(test_msgid_derive_join),
         /* ircd_strncpy */
         cmocka_unit_test(test_ircd_strncpy_normal),
         cmocka_unit_test(test_ircd_strncpy_truncation),
