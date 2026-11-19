@@ -191,16 +191,12 @@ int authenticate_replay(struct Client *cptr)
  * gets 906 (904 after a local error challenge, RFC 7628 3.2.3); else the
  * caller has sent the failure numeric itself (905) and nothing more goes.
  * IAuth and services are told to drop their side (A X, SASL D A), as for
- * an abort.  @a for_registration: the abort is the server's, at
- * registration (sasl_abort_for_registration()): it counts as no failure
- * (SASL_MAX_FAILURES), so it can never close the connection the client is
- * completing -- SASL 3.1 registers that client without authentication.
+ * an abort.
  * @return What resuming registration did to @a cptr (CPTR_KILLED when it
  * exited or freed it): the handler's own result, nothing may touch
  * @a cptr after it.
  */
-static int authenticate_end(struct Client *cptr, int client_abort,
-                            int for_registration)
+static int authenticate_end(struct Client *cptr, int client_abort)
 {
   /* Only an exchange in progress: a cookie whose exchange has not
    * completed -- a REGISTER login meanwhile, or the completed login a
@@ -213,7 +209,7 @@ static int authenticate_end(struct Client *cptr, int client_abort,
   /* The client abandons an exchange its credentials already went out for
    * (SASL_MAX_FAILURES; once per exchange).  A refused token's end is
    * counted below, and not at all when Keycloak could not be asked. */
-  if (client_abort && !for_registration && !(cli_saslsession(cptr)
+  if (client_abort && !(cli_saslsession(cptr)
                         && cli_saslsession(cptr)->state == SASL_STATE_FAILED))
     sasl_exchange_abandoned(cptr, 0);
 
@@ -224,9 +220,7 @@ static int authenticate_end(struct Client *cptr, int client_abort,
        * to acknowledge failure — reply with SASLFAIL, not SASLABORTED. */
       if (cli_saslsession(cptr)->state == SASL_STATE_FAILED) {
         /* The end of a refused token: counted, unless Keycloak could not
-         * be asked (SASL_MAX_FAILURES).  Also when registration ends it
-         * in place of the client's "*": the token was judged and refused,
-         * only an abort of data not yet judged is free. */
+         * be asked (SASL_MAX_FAILURES). */
         if (!cli_saslsession(cptr)->fail_unavailable)
           sasl_failure_count(cptr);
         send_reply(cptr, ERR_SASLFAIL, "");
@@ -264,38 +258,7 @@ int authenticate_too_long(struct Client *cptr)
   if (cli_saslcookie(cptr) && !IsSASLExchangeDone(cptr))
     sasl_failure_count(cptr);
   send_reply(cptr, ERR_SASLTOOLONG);
-  return authenticate_end(cptr, 0, 0);
-}
-
-/** Whether @a cptr has a SASL exchange in flight that waits for the
- * client, not for its backend (sasl_turn_is_clients()).
- * @param[in] cptr Local client.
- */
-int sasl_exchange_awaits_client(struct Client *cptr)
-{
-  if (!MyConnect(cptr) || !cli_saslcookie(cptr) || IsSASLExchangeDone(cptr)
-      || (con_sasl_xflags(cli_connect(cptr)) & SASLX_COMPLETING))
-    return 0;
-  return sasl_turn_is_clients(
-      cli_saslsession(cptr) != NULL,
-      cli_saslsession(cptr)
-        && cli_saslsession(cptr)->state == SASL_STATE_WAITING_KC,
-      con_sasl_unanswered(cli_connect(cptr)));
-}
-
-/** The client completed registration while its exchange waits for it:
- * abort the exchange in the tier that holds it, answer 906 (904 after a
- * local error challenge), and let registration go on without a login.
- * SASL 3.1: "If the client completes registration (with CAP END, NICK,
- * USER and any other necessary messages) while the SASL authentication
- * is still in progress, the server SHOULD abort it and send a 906
- * numeric, then register the client without authentication."
- * @return What resuming registration did to @a cptr (CPTR_KILLED when it
- * exited or freed it).
- */
-int sasl_abort_for_registration(struct Client *cptr)
-{
-  return authenticate_end(cptr, 1, 1);
+  return authenticate_end(cptr, 0);
 }
 
 int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
@@ -340,7 +303,7 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
       authenticate_held_free(cli_connect(cptr));
       return send_reply(cptr, ERR_SASLABORTED);
     }
-    return authenticate_end(cptr, 1, 0);
+    return authenticate_end(cptr, 1);
   }
 
   /* The line that starts an exchange names its mechanism, and anything
@@ -348,9 +311,10 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
    * with the mechanisms on offer and 904, as for one that is not offered.
    * Nothing is counted (SASL_MAX_FAILURES), and no exchange starts.
    * What this catches is a client's response that outlived its exchange
-   * -- credentials pipelined behind a CAP END that aborted it (906) --
-   * which as a "mechanism" would go to IAuth, or to services (to every
-   * server when SASL_SERVER is "*"), in clear.
+   * -- credentials pipelined behind an exchange that already ended (a 904
+   * or 906 the client had not yet read, the SASL timeout) -- which as a
+   * "mechanism" would go to IAuth, or to services (to every server when
+   * SASL_SERVER is "*"), in clear.
    *
    * A client that names an advertised mechanism in lower case ("plain")
    * is taken at its word, and the line goes on in the advertised

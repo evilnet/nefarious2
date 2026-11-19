@@ -672,7 +672,7 @@ MARKREAD_JOIN_CMOCKA_OBJS = markread_join_cmocka.o ../m_markread.o \
 markread_join_cmocka: $(MARKREAD_JOIN_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(MARKREAD_JOIN_CMOCKA_OBJS) $(CMOCKA_LIBS)
 # sasl_turn tests - whose turn a SASL exchange in flight is, which
-# decides whether registering mid-exchange aborts it (sasl_turn.h; pure)
+# decides which side a SASL timeout is charged to (sasl_turn.h; pure)
 SASL_TURN_CMOCKA_OBJS = sasl_turn_cmocka.o
 sasl_turn_cmocka: $(SASL_TURN_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(SASL_TURN_CMOCKA_OBJS) $(CMOCKA_LIBS)

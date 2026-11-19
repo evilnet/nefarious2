@@ -620,27 +620,6 @@ static void auth_do_loc(struct Client *client, struct Client *service)
   }
 }
 
-/** Whether the SASL exchange's hold (#AR_SASL_PENDING) is all that
- * \a auth's registration still waits for: the client has completed
- * registration (CAP END, NICK, USER, ...) with the exchange in flight, so
- * check_auth_finished() aborts the exchange (906) as soon as it is the
- * client's turn.
- * @param[in] auth Authorization request of a client.
- * @return Non-zero when nothing but the exchange holds registration.
- */
-static int auth_waits_only_for_sasl(const struct AuthRequest *auth)
-{
-  enum AuthRequestFlag flag;
-
-  if (!FlagHas(&auth->flags, AR_SASL_PENDING) || !auth->client
-      || !IsUserPort(auth->client))
-    return 0;
-  for (flag = 0; flag <= AR_LAST_SCAN; ++flag)
-    if (flag != AR_SASL_PENDING && FlagHas(&auth->flags, flag))
-      return 0;
-  return 1;
-}
-
 /** Check whether an authorization request is complete.
  * This means that no flags from 0 to #AR_LAST_SCAN are set on \a auth.
  * If #AR_IAUTH_PENDING is set, optionally go into "hurry" state.  If
@@ -669,14 +648,6 @@ static int check_auth_finished(struct AuthRequest *auth)
   if (cptr && cli_connect(cptr) && con_sasl_limited(cli_connect(cptr))
       && !FlagHas(&auth->flags, AR_SASL_PENDING))
     return exit_client(cptr, cptr, &me, "Too many SASL failures");
-
-  /* The client completed registration (CAP END, NICK, USER, ...) while
-   * its SASL exchange waits for it: abort the exchange with 906 and
-   * register it without a login (SASL 3.1), instead of holding
-   * registration until the exchange times out.  An exchange whose request
-   * is with the backend still holds it: the answer comes on its own. */
-  if (auth_waits_only_for_sasl(auth) && sasl_exchange_awaits_client(cptr))
-    return sasl_abort_for_registration(cptr);
 
   /* Check non-iauth registration blocking flags. */
   for (flag = 0; flag <= AR_LAST_SCAN; ++flag)
@@ -1054,22 +1025,6 @@ static void auth_recheck_callback(struct Event *ev)
       check_auth_finished(auth);
   }
   iauth_held_report();
-}
-
-/** The turn of \a cptr's SASL exchange may have passed to the client:
- * owe it a registration check (auth_recheck_later()), so a client that
- * already completed registration has its exchange aborted
- * (sasl_abort_for_registration()).  Always deferred, so it is safe inside
- * a backend callback that runs within another client's line.
- * @param[in] cptr Client whose exchange changed hands.
- */
-void sasl_client_turn_check(struct Client *cptr)
-{
-  struct AuthRequest *auth;
-
-  if (cptr && MyConnect(cptr) && (auth = cli_auth(cptr))
-      && FlagHas(&auth->flags, AR_SASL_PENDING))
-    auth_recheck_later(auth);
 }
 
 /** Owe \a auth a registration check from the event loop.  For a Keycloak

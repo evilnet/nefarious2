@@ -80,7 +80,6 @@ static char logged_id[MAXREC][ACCOUNT_ID_LEN + 1];
 static int logged_live[MAXREC];
 static int nlogins;
 static int sasl_dones;                  /* auth_sasl_done() calls */
-static int turn_checks;                 /* sasl_client_turn_check() calls */
 static int auth_result;                 /* what it returns */
 /* account-notify sends: who the line was about, and whether that user's
  * own connections were among the recipients.  The channel walk with
@@ -247,7 +246,6 @@ static int world_setup(void **state)
   (void)state;
 
   ntold = violations = set_accounts = nmade = nlogins = sasl_dones = 0;
-  turn_checks = 0;
   nnotified = 0;
   msgid_on = 0;
   armed_msgid[0] = notify_msgid[0] = relay_msgid[0] = '\0';
@@ -626,14 +624,6 @@ int auth_sasl_done(struct AuthRequest *auth)
   (void)auth;
   sasl_dones++;
   return 0;
-}
-
-/* s_auth.c: a check owed from the loop when a challenge turns the
- * exchange to the client (it aborts one whose client registered). */
-void sasl_client_turn_check(struct Client *cptr)
-{
-  (void)cptr;
-  turn_checks++;
 }
 
 void auth_sasl_clear(struct AuthRequest *auth)
@@ -1126,16 +1116,12 @@ static void test_sasl_challenge_is_the_clients_turn(void **state)
   assert_false(con_sasl_xflags(cli_connect(c)) & SASLX_CLIENTTURN);
   deliver(ms_sasl, svs, svs, "AB AB!7.813 C +");
   assert_true(con_sasl_xflags(cli_connect(c)) & SASLX_CLIENTTURN);
-  /* ... and owes a registration check (SASL 3.1: a client that
-   * registered meanwhile has the exchange aborted) */
-  assert_int_equal(turn_checks, 1);
 }
 
 /* Pipelined credentials: the client's mechanism and credentials both went
  * to services before their "+"; the "+" answers the mechanism, so it is
- * not the client's turn yet -- no turn, no check (a client that
- * registered meanwhile keeps waiting for services' answer to the
- * credentials, not aborted). */
+ * not the client's turn yet (a timeout from here is services', not the
+ * client's: SASL_MAX_FAILURES). */
 static void test_sasl_challenge_after_pipelined_credentials(void **state)
 {
   struct Client *svs, *c;
@@ -1149,7 +1135,6 @@ static void test_sasl_challenge_after_pipelined_credentials(void **state)
   deliver(ms_sasl, svs, svs, "AB AB!7.814 C +");
   assert_false(con_sasl_xflags(cli_connect(c)) & SASLX_CLIENTTURN);
   assert_int_equal(con_sasl_unanswered(cli_connect(c)), 1);
-  assert_int_equal(turn_checks, 0);
 }
 
 /* A challenge of 400 bytes or more comes in several lines: the turn is
@@ -1170,11 +1155,9 @@ static void test_sasl_chunked_challenge_turns_on_its_last_line(void **state)
   deliver(ms_sasl, svs, svs, "AB AB!7.815 C %s", chunk);
   assert_false(con_sasl_xflags(cli_connect(c)) & SASLX_CLIENTTURN);
   assert_int_equal(con_sasl_unanswered(cli_connect(c)), 1);
-  assert_int_equal(turn_checks, 0);
   deliver(ms_sasl, svs, svs, "AB AB!7.815 C +");
   assert_true(con_sasl_xflags(cli_connect(c)) & SASLX_CLIENTTURN);
   assert_int_equal(con_sasl_unanswered(cli_connect(c)), 0);
-  assert_int_equal(turn_checks, 1);
 }
 
 /* SASL_MAX_FAILURES: a services failure (D F) counts; their abort (D A)

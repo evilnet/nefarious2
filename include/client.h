@@ -1237,10 +1237,6 @@ struct Client {
 #define SASLX_COUNTED     0x02
 /** The backend answered with a challenge: the client's turn. */
 #define SASLX_CLIENTTURN  0x04
-/** The exchange's login is being applied (sasl_login_apply()): no turn
- * is the client's, whatever the exchange's state still says, so the
- * registration check its own steps run must not abort it. */
-#define SASLX_COMPLETING  0x08
 /** Get the auth request for the connection. */
 #define con_auth(con)		((con)->con_auth)
 /** Get the current command label for labeled-response. */

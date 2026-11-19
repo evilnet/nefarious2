@@ -311,16 +311,6 @@ void sasl_failure_count(struct Client *cptr) { counted_failures++; }
 /* ... and an exchange the client abandoned (sasl_auth.c): whom. */
 static struct Client *abandoned;
 void sasl_exchange_abandoned(struct Client *cptr, int timeout) { abandoned = cptr; }
-/* m_authenticate.c (not linked): whether the exchange waits for the
- * client, per case, and its abort for a client that registered mid-way,
- * which drops the hold and resumes registration as the real one does. */
-static int awaits_client, registration_aborts;
-int sasl_exchange_awaits_client(struct Client *cptr) { return awaits_client; }
-int sasl_abort_for_registration(struct Client *cptr)
-{
-  registration_aborts++;
-  return auth_sasl_done(cli_auth(cptr));
-}
 /* m_cap.c: what the sasl capability advertises (none here). */
 const char *cap_sasl_mechanisms(void) { return NULL; }
 void sendrawto_one(struct Client *to, const char *pattern, ...) {}
@@ -373,7 +363,6 @@ static int setup(void **state)
   mechlists = last_reply = 0;
   counted_failures = 0;
   abandoned = NULL;
-  awaits_client = registration_aborts = 0;
   expect_exit_msg = NULL;
   exits = 0;
   dnsbl_checks = dnsbl_cancels = 0;
@@ -753,67 +742,22 @@ static void registration_mid_exchange_is_abandoned(void **state)
   destroy_auth_request(a->auth);
 }
 
-/** SASL 3.1: a client that completes registration while its exchange
- * waits for it has the exchange aborted (906) and is registered without
- * a login, at once -- not when the exchange times out. */
-static void registration_aborts_exchange_awaiting_client(void **state)
+/** A client that completes registration (CAP END) with its exchange in
+ * flight waits for the exchange, whoever's turn it is: it may have
+ * pipelined CAP END behind AUTHENTICATE and still answer the challenge.
+ * The exchange's end -- a login, a failure, the client's "*", the SASL
+ * timeout -- releases the hold, and registration runs then. */
+static void registration_mid_exchange_waits_for_it(void **state)
 {
   struct fake *a = new_client(0, KEEPS);
 
   auth_sasl_start(a->auth);
-  awaits_client = 1;
   assert_int_equal(check_auth_finished(a->auth), 0);   /* CAP END */
-  assert_int_equal(registration_aborts, 1);
-  assert_int_equal(a->registered, 1);
-}
-
-/** An exchange whose request is with the backend still holds
- * registration: its answer comes on its own. */
-static void registration_waits_for_the_backend(void **state)
-{
-  struct fake *a = new_client(0, KEEPS);
-
-  auth_sasl_start(a->auth);
-  assert_int_equal(check_auth_finished(a->auth), 0);
-  assert_int_equal(registration_aborts, 0);
   assert_int_equal(a->registered, 0);
-  auth_sasl_done(a->auth);                             /* the answer */
-  assert_int_equal(a->registered, 1);
-}
-
-/** Registration not complete (no USER yet): nothing is aborted. */
-static void incomplete_registration_aborts_nothing(void **state)
-{
-  struct fake *a = new_client(0, KEEPS);
-
-  auth_sasl_start(a->auth);
-  FlagSet(&a->auth->flags, AR_NEEDS_USER);
-  awaits_client = 1;
-  assert_int_equal(check_auth_finished(a->auth), 0);
-  assert_int_equal(registration_aborts, 0);
+  assert_int_equal(check_auth_finished(a->auth), 0);   /* checked again */
   assert_int_equal(a->registered, 0);
-  destroy_auth_request(a->auth);
-}
-
-/** A challenge that turns the exchange to the client owes a check from
- * the event loop while the hold stands (and nothing without one); that
- * check aborts it when the client registered meanwhile. */
-static void client_turn_owes_a_check(void **state)
-{
-  struct fake *a = new_client(0, KEEPS), *b = new_client(1, KEEPS);
-
-  sasl_client_turn_check(&b->cli);                     /* no hold */
-  assert_false(FlagHas(&b->auth->flags, AR_RECHECK));
-
-  auth_sasl_start(a->auth);
-  assert_int_equal(check_auth_finished(a->auth), 0);   /* backend's turn */
-  awaits_client = 1;                                   /* the challenge */
-  sasl_client_turn_check(&a->cli);
-  assert_int_equal(registration_aborts, 0);            /* not in its stack */
-  timer_run();
-  assert_int_equal(registration_aborts, 1);
+  auth_sasl_done(a->auth);                             /* the exchange ends */
   assert_int_equal(a->registered, 1);
-  destroy_auth_request(b->auth);
 }
 
 /* A WEBIRC password check out (m_webirc.c): registration waits for it --
@@ -1136,10 +1080,7 @@ int main(void)
     cmocka_unit_test_setup(iauth_failed_second_exchange_keeps_the_login, setup),
     cmocka_unit_test_setup(iauth_sasl_failures_and_the_limit, setup),
     cmocka_unit_test_setup(registration_mid_exchange_is_abandoned, setup),
-    cmocka_unit_test_setup(registration_aborts_exchange_awaiting_client, setup),
-    cmocka_unit_test_setup(registration_waits_for_the_backend, setup),
-    cmocka_unit_test_setup(incomplete_registration_aborts_nothing, setup),
-    cmocka_unit_test_setup(client_turn_owes_a_check, setup),
+    cmocka_unit_test_setup(registration_mid_exchange_waits_for_it, setup),
     cmocka_unit_test_setup(webirc_check_holds_registration, setup),
     cmocka_unit_test_setup(webirc_release_without_hold_owes_nothing, setup),
     cmocka_unit_test_setup(webirc_hold_ends_at_the_registration_timeout, setup),

@@ -1199,14 +1199,6 @@ static int sasl_login_apply(struct Client *sptr, const char *account,
   if (by == LOGIN_BY_SASL && cli_auth(sptr))
     auth_sasl_start(cli_auth(sptr));
 
-  /* The exchange is completing: until step 8 ends it, it still looks in
-   * flight (cookie, session), and a local mechanism completes in the
-   * client's own AUTHENTICATE, while its turn.  Step 3's check must not
-   * take that for a client registering mid-exchange and abort the login
-   * it is part of (sasl_exchange_awaits_client()). */
-  if (by == LOGIN_BY_SASL && MyConnect(sptr))
-    con_sasl_xflags(cli_connect(sptr)) |= SASLX_COMPLETING;
-
   /* A logged-in client that passed step 0 refreshes its own login, or --
    * SASL_REAUTH any, a client that may change it -- changes to another
    * account: a switch, a new login in every way but the hidden-host step
@@ -2060,7 +2052,6 @@ static void sasl_oauth_introspect_answer(int result, const struct kc_token_info 
       sendrawto_one(acptr, MSG_AUTHENTICATE " "
                     "eyJzdGF0dXMiOiJpbnZhbGlkX3Rva2VuIn0=");  /* {"status":"invalid_token"} */
       session->state = SASL_STATE_FAILED;
-      sasl_client_turn_check(acptr);   /* the client's turn again */
       return;
     }
 
@@ -2098,7 +2089,6 @@ static void sasl_oauth_introspect_answer(int result, const struct kc_token_info 
     sendrawto_one(acptr, MSG_AUTHENTICATE " "
                   "eyJzdGF0dXMiOiJpbnZhbGlkX3Rva2VuIn0=");  /* {"status":"invalid_token"} */
     session->state = SASL_STATE_FAILED;
-    sasl_client_turn_check(acptr);   /* the client's turn again */
   }
 }
 
@@ -2487,7 +2477,6 @@ static void sasl_scram_creds_answer(int result, const struct kc_user *user, void
 
   /* Now waiting for client-final message */
   session->state = SASL_STATE_SCRAM_SENT;
-  sasl_client_turn_check(acptr);   /* the client's turn again */
 
   log_write(LS_SYSTEM, L_DEBUG, 0,
             "SASL SCRAM: Sent server-first for %s (client %C)",
@@ -2702,7 +2691,6 @@ static int sasl_scram_client_final(struct Client *sptr,
 
   /* Proof verified — wait for client's final ack before completing login */
   session->state = SASL_STATE_SCRAM_VERIFY;
-  sasl_client_turn_check(sptr);   /* the client's turn again */
 
   /* Reset chunk accumulation for the ack */
   if (session->accumulated_data) {
@@ -2799,7 +2787,6 @@ static void sasl_ecdsa_key_answer(int result, const struct kc_user *user, void *
 
   /* Waiting for signed response */
   session->state = SASL_STATE_SCRAM_SENT;  /* Reuse this state for "challenge sent" */
-  sasl_client_turn_check(acptr);   /* the client's turn again */
 
   /* Reset chunk accumulation for the response */
   if (session->accumulated_data) {
