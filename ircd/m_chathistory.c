@@ -10017,9 +10017,13 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       send_fail(sptr, "SEARCH", "INVALID_PARAMS", "in", "No access to target");
       return 0;
     }
-    if (!IsChannelName(in))
-      pm_other = in;
-    else if (!search_fed_line_fits(sptr, lookup_target, before_unix,
+    if (!IsChannelName(in)) {
+      /* Own rows go to the nick as its holder spells it now, as a
+       * CHATHISTORY page's do (replay_name_after_request()). */
+      struct Client *live = FindUser(in);
+
+      pm_other = live ? cli_name(live) : in;
+    } else if (!search_fed_line_fits(sptr, lookup_target, before_unix,
                                    after_unix, limit, &sm,
                                    fed_reqid_counter + 1)) {
       send_fail(sptr, "SEARCH", "INVALID_PARAMS", "text",
