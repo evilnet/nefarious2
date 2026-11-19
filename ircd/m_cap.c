@@ -378,7 +378,7 @@ cap_sasl_offered(void)
  * @param[in] capname Name of the capability (e.g., "sasl").
  * @param[in] available 1 if capability is now available, 0 if removed.
  * @param[in] value Value for CAP NEW (e.g., mechanism list).  NULL or ""
- *   for the capability's stored one, if it has one (cap_new_value()).
+ *   for the capability's stored one, if it has one.
  */
 void send_cap_notify(const char *capname, int available, const char *value)
 {
