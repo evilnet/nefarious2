@@ -1094,11 +1094,20 @@ void replay_continue(struct Client *sptr)
  * an explicit "a:b" request keeps the derived other party. */
 static void replay_name_after_request(struct ReplayState *rs, const char *requested)
 {
+  struct Client *live;
+
   if (!requested || !*requested || !rs->is_pm
       || IsChannelName(requested) || strchr(requested, ':'))
     return;
+  /* The batch is named as the request named it.  The caller's own rows
+   * go to the nick as its holder spells it now, not as the request
+   * happened to be typed ("FOO" for foo): nicks compare without case,
+   * so only the letter case can differ.  With nobody on the nick, as
+   * typed. */
+  live = FindUser(requested);
   ircd_strncpy(rs->target, requested, sizeof(rs->target));
-  ircd_strncpy(rs->other_nick, requested, sizeof(rs->other_nick));
+  ircd_strncpy(rs->other_nick, live ? cli_name(live) : requested,
+               sizeof(rs->other_nick));
 }
 
 /** Start async replay of a single chathistory batch.
