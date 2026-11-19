@@ -7712,12 +7712,6 @@ static int search_row_hook(const struct HistoryMessage *msg, int reverse,
  * few; the remaining channels are searched on this server only. */
 #define SEARCH_FED_PARTS_MAX 8
 
-/** The most a federated search line (start_fed_search) takes besides its
- * target and selectors: "<yy> CH Q " 8, " S " 3, before 19, limit 10,
- * reqid 31, dest 2, after 19, " P<yyxxx>" 7, mask 8, " :" 2, and the
- * separating spaces 5.  With the target and the selectors it has to fit
- * the 510 bytes of a P10 line before its CR LF. */
-#define SEARCH_FED_FIXED 114
 
 static void search_sel_escape(const char *in, char *out, size_t n)
 {
@@ -9977,18 +9971,15 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   if (limit <= 0 || limit > max_limit)
     limit = max_limit;
   /* The selectors also travel S2S in one 512-byte P10 line; refuse an
-   * oversize text here so local and federated behaviour agree.  A search
-   * in a channel federates (start_fed_search), and its line carries the
-   * channel name too: a long name leaves less room for the text, and a
-   * line past the limit would be cut on the way out. */
+   * oversize text here so local and federated behaviour agree.  The
+   * whole line of a search that federates is measured exactly, per
+   * channel (search_fed_line_fits()). */
   {
     char esc[BUFSIZE];
-    size_t n = 0, line = 0;
+    size_t n = 0;
     if (sm.from[0]) { search_sel_escape(sm.from, esc, sizeof(esc)); n += 5 + strlen(esc) + 1; }
     if (sm.text) { search_sel_escape(sm.text, esc, sizeof(esc)); n += 5 + strlen(esc); }
-    if (in[0] && IsChannelName(in))
-      line = SEARCH_FED_FIXED + strlen(in) + n;
-    if (n > SEARCH_SEL_MAX || line > BUFSIZE - 2) {
+    if (n > SEARCH_SEL_MAX) {
       send_fail(sptr, "SEARCH", "INVALID_PARAMS", "text", "Selectors too long");
       return 0;
     }
