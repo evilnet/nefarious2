@@ -19,6 +19,10 @@ struct HLC {
     uint16_t node_id;       /**< Server numeric (tiebreaker) */
 };
 
+/** The largest logical counter a step gives; past it the step carries
+ * into physical_ms.  Bit 15 is never set in a stamp from this clock. */
+#define HLC_LOGICAL_MAX 0x7FFF
+
 /*
  * Core API — operate on caller-provided HLC state
  */

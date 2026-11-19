@@ -683,10 +683,18 @@ All IRC messages sent to clients supporting `message-tags` capability MUST inclu
 
 `generate_msgid()` (send.c) produces a contiguous 14-char HLC-seeded token — no separators, no startup timestamp:
 ```
-<server_numeric:2><hlc_logical_b64:3><counter_b64:9>
+<server_numeric:2><hlc_logical_b64:3><hlc_time_ms_b64:7><counter_b64:2>
 ```
 
-Example: `ABAAAAAAAAAAAB` (2-char `cli_yxx(&me)` + 3-char base64 HLC logical + 9-char base64 `++MsgIdCounter`).
+Example: `ABAAAaHr8hyhOd` (2-char `cli_yxx(&me)` + 3-char base64 HLC logical + 7-char base64 HLC physical time in ms + 2-char base64 `++MsgIdCounter & 0xFFF`). `msgid_decode_time_ms()` (ircd_string.c) reads the mint time back out of any such id.
+
+**Derived msgid: a delayed-join reveal's JOIN (N067).** Every server shows a hidden (+D) member itself, on the event that reveals it (a message, a TOPIC, a MODE giving status, `-D`), and that JOIN is not relayed. Its msgid is not minted: `msgid_derive_join()` makes it from the event's msgid, the channel's name (lower case) and the member's numeric, so every server that has the event's msgid has the same JOIN msgid, with nothing extra on the wire:
+```
+<h bits 26-15:2><logical:3><event_time_ms - 1:7><h bits 38-27:2>
+h = 64-bit FNV-1a of event msgid, NUL, server numeric, NUL, client numeric, NUL, channel, NUL; then h ^= h >> 33, h *= 0xff51afd7ed558ccd, h ^= h >> 33
+logical = 0x8000 | (h & 0x7FFF)
+```
+It decodes like a minted id, 1 ms before the event (the JOIN sorts before the event it precedes). Logical bit 15 keeps it apart from minted ids: `hlc_step()` carries into the physical time at `HLC_LOGICAL_MAX` (0x7FFF), so a minted logical never has it. The hash has 39 bits: two reveals of the same millisecond that differ in event, channel or member share an id with probability 2^-39. The event's msgid is the one the line arrived with (`cli_s2s_msgid` of the inbound link), or, when the event starts here or came untagged and mints after the reveal, the id that mint will return (`generate_msgid_ahead()`, send.c). A server that does not derive (an older build) mints its own JOIN msgid; servers on either side of it still agree with each other.
 
 ### Implementation in m_batch.c
 

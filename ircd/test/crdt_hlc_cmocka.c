@@ -253,6 +253,32 @@ static void test_local_overflow_carries(void **state)
   assert_int_equal(0, r.logical);
 }
 
+/* The counter stops at HLC_LOGICAL_MAX: no stamp from this clock has
+ * bit 15 set (a msgid with it set is a derived one), whether the clock
+ * is pinned for 40000 events or a peer hands in a larger counter. */
+static void test_logical_stops_below_bit_15(void **state)
+{
+  struct HLC local = { UINT64_C(1) << 50, 0, 1 };
+  struct HLC start = local, prev = local, r;
+  struct HLC remote = { (UINT64_C(1) << 50) + 100, 0x9000, 2 };
+  int i, rej = -1;
+  (void)state;
+
+  for (i = 0; i < 40000; i++) {
+    r = hlc_local_event(&local);
+    assert_true(r.logical <= HLC_LOGICAL_MAX);
+    assert_true(hlc_compare(&r, &prev) > 0);
+    prev = r;
+  }
+  assert_true(r.physical_ms == start.physical_ms + 1);   /* one carry */
+
+  r = hlc_receive_bounded(&local, &remote, 1000, 0, &rej);
+  assert_int_equal(0, rej);
+  assert_true(hlc_compare(&r, &remote) > 0);
+  assert_true(r.physical_ms == remote.physical_ms + 1);
+  assert_int_equal(0, r.logical);
+}
+
 static void test_receive_overflow_carries(void **state)
 {
   struct HLC local = { 5000, 3, 1 };
@@ -289,6 +315,7 @@ int main(void)
     cmocka_unit_test(test_receive_follows_peer_time_ok),
     cmocka_unit_test(test_huge_max_remote_behind_unchanged),
     cmocka_unit_test(test_local_overflow_carries),
+    cmocka_unit_test(test_logical_stops_below_bit_15),
     cmocka_unit_test(test_receive_overflow_carries),
     cmocka_unit_test(test_reference_now_follows_pinned_hlc),
     cmocka_unit_test(test_reference_now_wall_ahead),

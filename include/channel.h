@@ -676,7 +676,10 @@ extern void del_invite(struct Client *cptr, struct Channel *chptr);
 extern void list_set_default(void); /* this belongs elsewhere! */
 
 extern void RevealDelayedJoinIfNeeded(struct Client *sptr, struct Channel *chptr);
-extern void RevealDelayedJoin(struct Membership *member);
+/* @a event_msgid: the msgid of the event that shows the member, when the
+ * caller has minted it already; NULL for the line's own or the one the
+ * event is about to mint (see channel.c). */
+extern void RevealDelayedJoin(struct Membership *member, const char *event_msgid);
 extern void CheckDelayedJoins(struct Channel *chan);
 
 extern void modebuf_init(struct ModeBuf *mbuf, struct Client *source,

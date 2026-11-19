@@ -1693,9 +1693,13 @@ process_multiline_batch(struct Client *sptr)
   /* The batch's label stays armed: the whole answer -- the WARN, RPL_AWAY,
    * the echo, the fallback WARN, or an ACK -- goes out under it, at the end
    * (ml_answer), when every line of it is known. */
-  if (is_channel)
-    RevealDelayedJoinIfNeeded(sptr, chptr);
-  else {
+  if (is_channel) {
+    /* Named after the batch's msgid, minted above (it mints no id of
+     * its own, so the time read below is still the batch's mint time). */
+    struct Membership *member = find_member_link(chptr, sptr);
+    if (member && IsDelayedJoin(member))
+      RevealDelayedJoin(member, batch_base_msgid);
+  } else {
     away_reply = !is_notice && cli_user(acptr) && cli_user(acptr)->away;
     if (MyUser(acptr))
       add_target(acptr, sptr);

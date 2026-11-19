@@ -841,6 +841,40 @@ static void test_bxm_start_fit_measures_the_text(void **state)
   assert_false(bxm_fits(ctags, text));
 }
 
+/* N067: an id taken ahead of its event is the id the event's own mint
+ * gets -- in a handler (generate_msgid) or in the tag region of a line
+ * no handler minted for -- once; an id no event took ends with the line. */
+static void test_msgid_ahead_is_the_next_mint(void **state)
+{
+  char ahead[16], id[16], buf[128];
+  (void)state;
+
+  ircd_strncpy(ahead, generate_msgid_ahead(), sizeof(ahead));
+  assert_int_equal(strlen(ahead), 14);
+  assert_string_equal(generate_msgid_ahead(), ahead);   /* asked twice */
+  assert_string_equal(generate_msgid(id, sizeof(id)), ahead);
+  assert_string_not_equal(generate_msgid(id, sizeof(id)), ahead);
+
+  ircd_strncpy(ahead, generate_msgid_ahead(), sizeof(ahead));
+  assert_non_null(format_s2s_tags_with_client(buf, sizeof(buf), NULL, NULL,
+                                              id, sizeof(id)));
+  assert_string_equal(id, ahead);
+  assert_non_null(strstr(buf, ahead));
+  assert_string_not_equal(generate_msgid(id, sizeof(id)), ahead);
+
+  ircd_strncpy(ahead, generate_msgid_ahead(), sizeof(ahead));
+  sendcmdto_reset_s2s_overrides();                      /* the line ends */
+  assert_string_not_equal(generate_msgid(id, sizeof(id)), ahead);
+
+  /* The clock moved on (another event, a peer's stamp): the id is not
+   * the HLC's latest any more, and an event's time is read from the HLC. */
+  ircd_strncpy(ahead, generate_msgid_ahead(), sizeof(ahead));
+  hlc_global_event();
+  assert_string_not_equal(generate_msgid(id, sizeof(id)), ahead);
+  assert_string_not_equal(generate_msgid_ahead(), ahead);
+  generate_msgid(id, sizeof(id));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -875,6 +909,7 @@ int main(void)
     cmocka_unit_test_setup(test_legacy_link_clears_mark, setup),
     cmocka_unit_test_setup(test_tags_off_clears_mark, setup),
     cmocka_unit_test_setup(test_reset_clears_mark, setup),
+    cmocka_unit_test_setup(test_msgid_ahead_is_the_next_mint, setup),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

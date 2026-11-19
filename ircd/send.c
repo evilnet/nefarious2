@@ -187,6 +187,17 @@ int sendcmdto_stash_is_current(struct Client *cptr)
   return cptr && s2s_inbound_link && cli_from(cptr) == s2s_inbound_link;
 }
 
+/** The msgid of the event this line is about to cause, minted before
+ * the event itself asks for it: the next generate_msgid() returns it.
+ * Taken by generate_msgid_ahead() for what is shown before an event but
+ * named after it (a delayed-join reveal, channel.c).  Dropped when no
+ * event took it by the end of the line (sendcmdto_reset_s2s_overrides),
+ * or when the clock has moved on since (msgid_ahead_hlc: an event reads
+ * its time from the HLC right after its mint, and that must still be
+ * this id's). */
+static char msgid_ahead[16] = "";
+static struct HLC msgid_ahead_hlc;
+
 /** Multiline framing (compact-tag ,M segment: flag + batch reference)
  * for the next S2S emit that builds the tag region.  Armed by the ML
  * senders in m_batch.c (audit 0.1), consumed by
@@ -555,6 +566,7 @@ void sendcmdto_reset_s2s_overrides(void)
   s2s_client_tags_override = NULL;
   s2s_raw_tags[0] = '\0';
   s2s_want_tags = 0;
+  msgid_ahead[0] = '\0';
   /* sendcmdto_set_s2s_tags() also armed the client-facing time; with no
    * client msgid armed it would wait for the next event that arms one. */
   if (!client_msgid_override[0])
@@ -805,6 +817,9 @@ static int get_client_tag_flags(struct Client *to, struct Client *from, int incl
 }
 
 
+static char *mint_msgid(char *buf, size_t buflen);
+static int msgid_ahead_pending(void);
+
 /** Generate a unique message ID for IRCv3 message-ids.
  * HLC v1 format: <node_id_2><logical_b64_3><counter_b64_9> = 14 chars.
  * Advances the global HLC clock on each call.
@@ -813,6 +828,40 @@ static int get_client_tag_flags(struct Client *to, struct Client *from, int incl
  * @return Pointer to buf.
  */
 char *generate_msgid(char *buf, size_t buflen)
+{
+  /* The id taken ahead of this event (generate_msgid_ahead) is its id. */
+  if (msgid_ahead_pending()) {
+    ircd_strncpy(buf, msgid_ahead, buflen);
+    msgid_ahead[0] = '\0';
+    return buf;
+  }
+  return mint_msgid(buf, buflen);
+}
+
+/** Whether an id taken ahead is waiting for its event: one is held and
+ * it is still the HLC's latest stamp.  One the clock has passed is
+ * dropped. */
+static int msgid_ahead_pending(void)
+{
+  const struct HLC *now = hlc_global();
+
+  if (msgid_ahead[0] && (now->physical_ms != msgid_ahead_hlc.physical_ms
+                         || now->logical != msgid_ahead_hlc.logical))
+    msgid_ahead[0] = '\0';
+  return msgid_ahead[0] != '\0';
+}
+
+/** See send.h. */
+const char *generate_msgid_ahead(void)
+{
+  if (!msgid_ahead_pending()) {
+    mint_msgid(msgid_ahead, sizeof(msgid_ahead));
+    msgid_ahead_hlc = *hlc_global();
+  }
+  return msgid_ahead;
+}
+
+static char *mint_msgid(char *buf, size_t buflen)
 {
   /* Repacked 2026-09-01: <node_2><logical_3><time_ms_7><counter_2>.
    * The old layout wasted the counter's top chars on zero padding;

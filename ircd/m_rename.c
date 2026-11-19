@@ -3361,7 +3361,7 @@ void relocate_follow(struct Client *cptr, struct Client *sptr,
      * and a MODE for a nick nobody was shown joining would be a MODE for
      * a member that is in no client's view. */
     if (IsDelayedJoin(here) && !IsZombie(here))
-      RevealDelayedJoin(here);
+      RevealDelayedJoin(here, NULL);
 
     /* A member being handed status is no longer "deopped by a server". */
     here->status = (here->status & ~CHFL_DEOPPED) | grant;

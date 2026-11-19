@@ -178,6 +178,14 @@ static __inline__ NTL_HDR_strCasediff { NTL_SRC_strCasediff }
 /** The mint time a msgid carries (ms since epoch), or 0 when the string
  * is not exactly the form generate_msgid() mints (see ircd_string.c). */
 extern uint64_t msgid_decode_time_ms(const char *msgid);
+/** The msgid of the JOIN that event @a event (its msgid) shows in channel
+ * @a chname for the hidden member with numeric @a server_yxx +
+ * @a user_yxx: the same on every server that has the event's msgid, and
+ * 1 ms before it.  0 when @a event is not a minted msgid (see
+ * ircd_string.c). */
+extern int msgid_derive_join(char *out, size_t outlen, const char *event,
+                             const char *chname, const char *server_yxx,
+                             const char *user_yxx);
 /** msgid_decode_time_ms(), also 0 when that time is more than
  * @a max_ahead_ms past @a now_ms (0 = no such bound): for ids clients
  * hand back as CHATHISTORY selectors.  @a now_ms is the later of the

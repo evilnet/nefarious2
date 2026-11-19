@@ -97,6 +97,7 @@ CMOCKA_TESTPROGS = \
 	auth_recheck_cmocka \
 	iauth_held_cmocka \
 	channel_speak_cmocka \
+	reveal_handlers_cmocka \
 	dbuf_find_line_cmocka \
 	input_hold_cmocka \
 	s2s_handlers_cmocka \
@@ -215,6 +216,7 @@ DEP_SRC = \
 	auth_recheck_cmocka.c \
 	iauth_held_cmocka.c \
 	channel_speak_cmocka.c \
+	reveal_handlers_cmocka.c \
 	dbuf_find_line_cmocka.c \
 	input_hold_cmocka.c \
 	s2s_handlers_cmocka.c \
@@ -720,6 +722,26 @@ channel_speak_cmocka.o: ${srcdir}/channel_speak_cmocka.c ../channel.c
 
 channel_speak_cmocka: $(CHANNEL_SPEAK_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(CHANNEL_SPEAK_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# reveal_handlers tests - the JOIN that shows a hidden (+D) member, as a
+# TOPIC and a MODE send it and relay their line: the REAL
+# handlers with the real channel.c and send.c (each compiled here with
+# -ffunction-sections, the program linked with --gc-sections) and the
+# real HLC; the lines are formatted and kept, the rest is stubbed in the
+# test.
+REVEAL_HANDLERS_REAL = rv_channel.o rv_send.o rv_m_topic.o rv_m_mode.o
+rv_channel.o: ../channel.c
+rv_send.o: ../send.c
+rv_m_topic.o: ../m_topic.c
+rv_m_mode.o: ../m_mode.c
+${REVEAL_HANDLERS_REAL}:
+	${CC} ${CFLAGS} -Wno-address -Wno-comment -Wno-unused-function -Wno-format-truncation -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ $<
+
+REVEAL_HANDLERS_CMOCKA_OBJS = reveal_handlers_cmocka.o ${REVEAL_HANDLERS_REAL} \
+	../crdt_hlc.o ../ircd_string.o ../ircd_snprintf.o ../ircd_alloc.o \
+	../match.o ../numnicks.o
+reveal_handlers_cmocka: $(REVEAL_HANDLERS_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(REVEAL_HANDLERS_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # dbuf_find_line tests - a receive queue's first complete line a matcher
 # accepts, found without removing anything (the orphan hold's QUIT scan):

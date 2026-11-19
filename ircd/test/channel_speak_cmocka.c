@@ -57,8 +57,10 @@ int feature_bool(enum Feature feat)
 int feature_int(enum Feature feat) { return 0; }   /* HOST_HIDING_STYLE 0 */
 const char *feature_str(enum Feature feat) { return ""; }
 
-/* A delayed-join reveal is never asked for here: the device paths reveal
- * nothing, and the cases with reveal on are not delayed. */
+/* A delayed-join reveal: the device cases never ask for one (the device
+ * paths reveal nothing, and their cases with reveal on are not delayed);
+ * the reveal cases at the end count its sends and read the msgid and time
+ * it arms for them. */
 static int reveals;
 void sendcmdto_channel_capab_butserv_butone(struct Client *from, const char *cmd,
                                             const char *tok, struct Channel *to,
@@ -75,15 +77,80 @@ void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,
 {
   reveals++;
 }
-void sendcmdto_set_client_event(const char *msgid, uint64_t event_ms) {}
+static char reveal_id[64];
+static uint64_t reveal_ms;
+void sendcmdto_set_client_event(const char *msgid, uint64_t event_ms)
+{
+  ircd_strncpy(reveal_id, msgid ? msgid : "", sizeof(reveal_id));
+  reveal_ms = event_ms;
+}
 void sendcmdto_set_client_msgid(const char *msgid) {}
+/* A MODE the modebuf flushes to the channel: the msgid armed for it and
+ * its parameters, per line. */
+static int mode_lines;
+static char mode_line_id[4][64];
+static char mode_line_args[4][512];
+void sendcmdto_channel_butserv_respond(struct Client *from, const char *cmd,
+                                       const char *tok, struct Channel *to,
+                                       struct Client *one, unsigned int skip,
+                                       const char *pattern, ...)
+{
+  va_list ap;
+  int i;
+
+  if (mode_lines >= 4)
+    return;
+  strcpy(mode_line_id[mode_lines], reveal_id);
+  va_start(ap, pattern);
+  (void)va_arg(ap, struct Channel *);           /* "%H %s%s%s%s%s%s%s%s" */
+  for (i = 0; i < 8; i++) {
+    const char *arg = va_arg(ap, const char *);
+    if (i >= 6)
+      strcat(mode_line_args[mode_lines], arg);
+  }
+  va_end(ap);
+  mode_lines++;
+}
+/* The rest of what a flush reaches: nothing goes to a server here. */
+void sendcmdto_flag_serv_butone(struct Client *from, const char *cmd,
+                                const char *tok, struct Client *one,
+                                int require, int forbid,
+                                const char *pattern, ...) {}
+void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
+                   struct Client *to, const char *pattern, ...) {}
+void sendto_opmask_butone(struct Client *one, unsigned int mask,
+                          const char *pattern, ...) {}
+void sendcmdto_set_s2s_tags(uint64_t time_ms, const char *msgid) {}
+void sendcmdto_want_s2s_tags(int want) {}
+/* send.c's minting, as it is there: an id taken ahead is the next one
+ * generate_msgid() returns.  Minted ids differ in their counter. */
+#define MINT_MS 1763000000123ULL        /* the time in "ABAAAZp6]R57.." */
+static struct Client *inbound_link;
+static char ahead_id[16];
+static int mints;
+struct Client *sendcmdto_inbound_link(void) { return inbound_link; }
+static void mint(char *buf, size_t buflen)
+{
+  char id[16];
+  snprintf(id, sizeof(id), "ABAAAZp6]R57A%c", 'A' + mints++);
+  ircd_strncpy(buf, id, buflen);
+}
 char *generate_msgid(char *buf, size_t buflen)
 {
-  if (buflen)
-    buf[0] = '\0';
+  if (ahead_id[0]) {
+    ircd_strncpy(buf, ahead_id, buflen);
+    ahead_id[0] = '\0';
+  } else
+    mint(buf, buflen);
   return buf;
 }
-uint64_t history_event_time_ms(struct Client *link) { return 0; }
+const char *generate_msgid_ahead(void)
+{
+  if (!ahead_id[0])
+    mint(ahead_id, sizeof(ahead_id));
+  return ahead_id;
+}
+uint64_t history_event_time_ms(struct Client *link) { return MINT_MS; }
 int find_mark_match(struct Client *sptr, const char *mask) { return 0; }
 /* The reveal's history row (store_channel_event(), kept with
  * RevealDelayedJoin()): never reached, the reveal is never asked for. */
@@ -595,6 +662,241 @@ static void promote_forgets_ban_cache(void **state)
   assert_int_equal(member_can_send_to_channel(m, 0), 0);
 }
 
+/* ------------------------------------------------------------------ */
+/* The reveal's msgid (N067)                                           */
+/* ------------------------------------------------------------------ */
+
+static struct Client server_b;          /* numeric AC: the hidden members' */
+
+/** A hidden member of @a ch on server AC, client numeric @a yxx. */
+static struct Membership *hidden(struct Channel *ch, struct fake_client *f,
+                                 const char *nick, const char *yxx)
+{
+  fake_init(f, nick, "h.host", NULL, 0, 0);
+  strcpy(cli_yxx(&server_b), "AC");
+  f->user.server = &server_b;
+  strcpy(cli_yxx(&f->cli), yxx);
+  return join(ch, f, CHFL_DELAYED);
+}
+
+static void reveal_reset(struct Client *link, const char *line_msgid)
+{
+  cli_connect(&uplink) = &uplink_con;
+  inbound_link = link;
+  ircd_strncpy(con_s2s_msgid(&uplink_con), line_msgid ? line_msgid : "",
+               S2S_MSGID_BUFSIZE);
+  ahead_id[0] = reveal_id[0] = '\0';
+  reveal_ms = 0;
+  mints = reveals = 0;
+}
+
+/** A line from another server: the JOIN is named after the line's msgid
+ * and the member's numeric, 1 ms before it, and nothing is minted.  Each
+ * member one line shows (a MODE on two, -D) gets its own id. */
+static void reveal_named_after_the_line(void **state)
+{
+  const char *line = "ADAABZp6]R57Bq";         /* minted at MINT_MS */
+  struct fake_client u, v;
+  struct Channel *ch = chan_new("#rv");
+  struct Membership *mu = hidden(ch, &u, "u", "AAB");
+  struct Membership *mv = hidden(ch, &v, "v", "AAC");
+  char want[16], first[16];
+
+  reveal_reset(&uplink, line);
+  assert_int_equal(client_can_send_to_channel(&u.cli, ch, 1), 1);
+  assert_false(IsDelayedJoin(mu));
+  assert_true(reveals >= 2);                    /* the JOIN's two forms */
+  assert_true(msgid_derive_join(want, sizeof(want), line, "#rv", "AC", "AAB"));
+  assert_string_equal(reveal_id, want);
+  assert_int_equal((unsigned long long)reveal_ms, MINT_MS - 1);
+  strcpy(first, reveal_id);
+
+  RevealDelayedJoin(mv, NULL);                  /* the same line's second */
+  assert_true(msgid_derive_join(want, sizeof(want), line, "#rv", "AC", "AAC"));
+  assert_string_equal(reveal_id, want);
+  assert_string_not_equal(reveal_id, first);
+  assert_int_equal(mints, 0);
+  assert_string_equal(ahead_id, "");
+  reveal_reset(NULL, NULL);
+}
+
+/** An event that starts here (or came untagged) mints its msgid after
+ * the reveal: the JOIN is named after the id that mint then gets, for
+ * every member the event shows. */
+static void reveal_named_after_the_event_to_come(void **state)
+{
+  struct fake_client u, v;
+  struct Channel *ch = chan_new("#rv");
+  struct Membership *mu = hidden(ch, &u, "u", "AAB");
+  struct Membership *mv = hidden(ch, &v, "v", "AAC");
+  char event[16], want[16], id_u[16];
+
+  reveal_reset(NULL, "ADAABZp6]R57Bq");         /* a stale stash: not read */
+  RevealDelayedJoin(mu, NULL);
+  strcpy(id_u, reveal_id);
+  RevealDelayedJoin(mv, NULL);
+  assert_int_equal(mints, 1);                   /* one event, one id */
+  generate_msgid(event, sizeof(event));         /* the event's own mint */
+  assert_int_equal(mints, 1);
+  assert_true(msgid_derive_join(want, sizeof(want), event, "#rv", "AC", "AAB"));
+  assert_string_equal(id_u, want);
+  assert_true(msgid_derive_join(want, sizeof(want), event, "#rv", "AC", "AAC"));
+  assert_string_equal(reveal_id, want);
+
+  /* An untagged line from another server: the same. */
+  mu->status |= CHFL_DELAYED;
+  reveal_reset(&uplink, "");
+  RevealDelayedJoin(mu, NULL);
+  generate_msgid(event, sizeof(event));
+  assert_true(msgid_derive_join(want, sizeof(want), event, "#rv", "AC", "AAB"));
+  assert_string_equal(reveal_id, want);
+  reveal_reset(NULL, NULL);
+}
+
+/** The caller's event id (a multiline batch mints before it reveals) is
+ * the one used: nothing is minted or taken ahead.  An event id that is
+ * not a minted one gives the JOIN an id minted here. */
+static void reveal_named_after_a_given_event(void **state)
+{
+  struct fake_client u;
+  struct Channel *ch = chan_new("#rv");
+  struct Membership *mu = hidden(ch, &u, "u", "AAB");
+  char want[16];
+
+  reveal_reset(&uplink, "ADAABZp6]R57Bq");
+  RevealDelayedJoin(mu, "AEAAAZp6]R57AB");
+  assert_true(msgid_derive_join(want, sizeof(want), "AEAAAZp6]R57AB", "#rv", "AC", "AAB"));
+  assert_string_equal(reveal_id, want);
+  assert_int_equal(mints, 0);
+  assert_string_equal(ahead_id, "");
+
+  mu->status |= CHFL_DELAYED;
+  reveal_reset(&uplink, "1763000000-not-ours");
+  RevealDelayedJoin(mu, NULL);
+  assert_int_equal(mints, 1);
+  assert_string_equal(reveal_id, "ABAAAZp6]R57AA");
+  assert_int_equal((unsigned long long)reveal_ms, MINT_MS);
+  reveal_reset(NULL, NULL);
+}
+
+/** A line whose time parse.c replaced (its sender's clock is further
+ * ahead than HLC_MAX_FORWARD_MS allows; the msgid still carries that
+ * clock's reading): the JOIN's id is the derived one, as on every
+ * server, and its time is still before the line's time here. */
+static void reveal_before_a_line_whose_time_was_replaced(void **state)
+{
+  const char *line = "ADAABZq6]R57Bq";         /* minted 64^5 ms after MINT_MS */
+  struct fake_client u;
+  struct Channel *ch = chan_new("#rv");
+  struct Membership *mu = hidden(ch, &u, "u", "AAB");
+  char want[16];
+
+  reveal_reset(&uplink, line);
+  con_s2s_time_ms(&uplink_con) = MINT_MS;       /* the time the line has here */
+  RevealDelayedJoin(mu, NULL);
+  assert_true(msgid_derive_join(want, sizeof(want), line, "#rv", "AC", "AAB"));
+  assert_string_equal(reveal_id, want);
+  assert_int_equal((unsigned long long)reveal_ms, MINT_MS - 1);
+
+  /* The usual line, its time its msgid's: 1 ms before it, as untimed. */
+  mu->status |= CHFL_DELAYED;
+  reveal_reset(&uplink, "ADAABZp6]R57Bq");
+  con_s2s_time_ms(&uplink_con) = MINT_MS;
+  RevealDelayedJoin(mu, NULL);
+  assert_int_equal((unsigned long long)reveal_ms, MINT_MS - 1);
+  con_s2s_time_ms(&uplink_con) = 0;
+  reveal_reset(NULL, NULL);
+}
+
+/** A line whose msgid is not a minted one gives a JOIN minted here, at
+ * our time.  When the line's time is behind ours, the JOIN still comes
+ * 1 ms before the line. */
+static void reveal_before_a_line_with_a_foreign_msgid(void **state)
+{
+  struct fake_client u;
+  struct Channel *ch = chan_new("#rv");
+  struct Membership *mu = hidden(ch, &u, "u", "AAB");
+
+  reveal_reset(&uplink, "1763000000-not-ours");
+  con_s2s_time_ms(&uplink_con) = MINT_MS - 1000;
+  RevealDelayedJoin(mu, NULL);
+  assert_int_equal(mints, 1);
+  assert_int_equal((unsigned long long)reveal_ms, MINT_MS - 1001);
+  con_s2s_time_ms(&uplink_con) = 0;
+  reveal_reset(NULL, NULL);
+}
+
+/** An event at the decoder's lower bound (2020-01-01 00:00:00.000): the
+ * JOIN's time is 1 ms before it, not unset. */
+static void reveal_before_an_event_at_the_epoch_bound(void **state)
+{
+  const char *event = "ABAABW9eZugAAB";       /* 1577836800000 ms */
+  struct fake_client u;
+  struct Channel *ch = chan_new("#rv");
+  struct Membership *mu = hidden(ch, &u, "u", "AAB");
+  char want[16];
+
+  assert_int_equal((unsigned long long)msgid_decode_time_ms(event),
+                   1577836800000ULL);
+  reveal_reset(NULL, NULL);
+  RevealDelayedJoin(mu, event);
+  assert_true(msgid_derive_join(want, sizeof(want), event, "#rv", "AC", "AAB"));
+  assert_string_equal(reveal_id, want);
+  assert_int_equal((unsigned long long)reveal_ms, 1577836799999ULL);
+  reveal_reset(NULL, NULL);
+}
+
+/** A MODE too long for one line goes out as two, each under its own
+ * msgid.  The member a MODE gives a status is named after the MODE that
+ * carries its status -- the one another server shows it on -- so a status
+ * change is in the first MODE flushed after its reveal, whatever else
+ * has to wait for the second. */
+static void reveal_named_after_the_mode_that_carries_it(void **state)
+{
+  static char ban[3][101];
+  struct fake_client op, u;
+  struct Channel *ch = chan_new("#rv");
+  struct Membership *mu;
+  struct ModeBuf mbuf;
+  char want[16], join_id[16];
+  int i, carrier = -1;
+
+  fake_init(&op, "op", "op.host", NULL, 1, 0);
+  join(ch, &op, CHFL_CHANOP);
+  mu = hidden(ch, &u, "hiddennick", "AAB");
+  reveal_reset(NULL, NULL);
+  mode_lines = 0;
+  memset(mode_line_args, 0, sizeof(mode_line_args));
+
+  /* MODE #rv +bbbv <100 chars> <100 chars> <100 chars> hiddennick */
+  modebuf_init(&mbuf, &op.cli, &op.cli, ch, MODEBUF_DEST_CHANNEL);
+  for (i = 0; i < 3; i++) {
+    memset(ban[i], 'a' + i, 100);
+    memcpy(ban[i] + 90, "!*@*", 4);
+    ban[i][100] = '\0';
+    modebuf_mode_string(&mbuf, MODE_ADD | MODE_BAN, ban[i], 0);
+  }
+  RevealDelayedJoin(mu, NULL);                  /* mode_process_clients() */
+  strcpy(join_id, reveal_id);
+  modebuf_mode_client(&mbuf, MODE_ADD | MODE_VOICE, &u.cli, 0);
+  modebuf_flush(&mbuf);
+
+  assert_int_equal(mode_lines, 2);
+  assert_string_not_equal(mode_line_id[0], mode_line_id[1]);
+  for (i = 0; i < mode_lines; i++)
+    if (strstr(mode_line_args[i], "hiddennick"))
+      carrier = i;
+  assert_true(carrier >= 0);
+  assert_true(msgid_derive_join(want, sizeof(want), mode_line_id[carrier],
+                                "#rv", "AC", "AAB"));
+  assert_string_equal(join_id, want);
+  /* every ban went out, in one MODE or the other */
+  for (i = 0; i < 3; i++)
+    assert_true(strstr(mode_line_args[0], ban[i])
+                || strstr(mode_line_args[1], ban[i]));
+  reveal_reset(NULL, NULL);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -611,6 +913,13 @@ int main(void)
     cmocka_unit_test(zombie_device_membership),
     cmocka_unit_test(remote_apass_manager_divergence),
     cmocka_unit_test(promote_forgets_ban_cache),
+    cmocka_unit_test(reveal_named_after_the_line),
+    cmocka_unit_test(reveal_named_after_the_event_to_come),
+    cmocka_unit_test(reveal_named_after_a_given_event),
+    cmocka_unit_test(reveal_before_a_line_whose_time_was_replaced),
+    cmocka_unit_test(reveal_named_after_the_mode_that_carries_it),
+    cmocka_unit_test(reveal_before_a_line_with_a_foreign_msgid),
+    cmocka_unit_test(reveal_before_an_event_at_the_epoch_bound),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

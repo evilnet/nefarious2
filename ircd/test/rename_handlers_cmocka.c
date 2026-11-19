@@ -1020,7 +1020,7 @@ int joinbuf_flush(struct JoinBuf *jbuf)
 }
 
 /* As the real one: the hidden member is shown to the others. */
-void RevealDelayedJoin(struct Membership *member)
+void RevealDelayedJoin(struct Membership *member, const char *event_msgid)
 {
   struct Membership *m;
   char buf[LINE];
