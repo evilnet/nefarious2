@@ -1602,6 +1602,139 @@ static void test_stamp_newer_longer_seconds_wins(void **state)
   assert_true(history_stamp_newer("1792600200.5001", 15, "1792600200.500", 14));
 }
 
+/* ========== history_iso_to_unix / history_ref_to_unix (real, from
+ * ../history_record.o) ========== */
+
+static void test_iso_to_unix_accepts(void **state)
+{
+    char buf[HISTORY_TIMESTAMP_LEN];
+    (void)state;
+    /* the spec's form only: YYYY-MM-DDThh:mm:ss.sssZ */
+    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.250Z", buf, sizeof(buf)), 0);
+    assert_string_equal(buf, "1794916800.250");
+    assert_int_equal(history_iso_to_unix("2026-11-17T12:00:00.000Z", buf, sizeof(buf)), 0);
+    assert_string_equal(buf, "1794916800.000");
+    /* the leap second server-time's example shows: the next second */
+    assert_int_equal(history_iso_to_unix("2026-11-17T11:59:60.419Z", buf, sizeof(buf)), 0);
+    assert_string_equal(buf, "1794916800.419");
+    assert_int_equal(history_iso_to_unix("2024-02-29T00:00:00.000Z", buf, sizeof(buf)), 0);
+}
+
+static void test_iso_to_unix_refuses(void **state)
+{
+    static const char *const bad[] = {
+        "2026-11-17T12:00:00.250+02:00",  /* an offset */
+        "2026-11-17T12:00:00.250+00:00",  /* even a zero one */
+        "2026-11-17T12:00:00.250z",       /* lowercase z */
+        "2026-11-17t12:00:00.250Z",       /* lowercase t */
+        "2026-11-17T12:00:00.250Zjunk",   /* text after Z */
+        "2026-11-17T12:00:00.250",        /* no Z */
+        "2026-11-17T12:00:00Z",           /* no fraction */
+        "2026-11-17T12:00:00",            /* neither */
+        "2026-11-17T12:00:00.5Z",         /* one fractional digit */
+        "2026-11-17T12:00:00.1234Z",      /* four */
+        "2026-11-17T12:00:00.123456Z",    /* six */
+        "2026-11-17 12:00:00.250Z",       /* no T */
+        "2026-1-17T12:00:00.250Z",        /* a short field */
+        "2026-11-17T+2:00:00.250Z",       /* a sign in a field */
+        "2026-11-17T 2:00:00.250Z",       /* a space in a field */
+        "2026-11-17T12:00:61.250Z",       /* seconds 61 */
+        "2026-11-17T24:00:00.250Z",       /* hour 24 */
+        "2026-13-17T12:00:00.250Z",       /* month 13 */
+        "2026-11-31T12:00:00.250Z",       /* no 31 November */
+        "2026-02-29T12:00:00.250Z",       /* no 29 February in 2026 */
+        "1969-12-31T23:59:59.000Z",       /* before 1970: a negative time */
+        "1969-12-31T23:59:00.000Z",
+        "0000-01-01T00:00:00.000Z",
+        "1794916800.250",                 /* unix form: not this converter's */
+        "",
+    };
+    char buf[HISTORY_TIMESTAMP_LEN];
+    size_t i;
+    (void)state;
+    for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        if (history_iso_to_unix(bad[i], buf, sizeof(buf)) != -1)
+            fail_msg("accepted \"%s\"", bad[i]);
+    }
+}
+
+/* A walk is keyed from an ISO time that converts or a value already in
+ * sec.mmm form, never from ISO text that did not convert (review of
+ * #242: a tip requester's "+00:00" keyed the walk from the text). */
+static void test_ref_to_unix(void **state)
+{
+    char buf[HISTORY_TIMESTAMP_LEN];
+    (void)state;
+    assert_int_equal(history_ref_to_unix("2026-11-17T12:00:00.250Z", buf, sizeof(buf)), 0);
+    assert_string_equal(buf, "1794916800.250");
+    assert_int_equal(history_ref_to_unix("1794916800.250", buf, sizeof(buf)), 0);
+    assert_string_equal(buf, "1794916800.250");
+    assert_int_equal(history_ref_to_unix("1794916800", buf, sizeof(buf)), 0);
+    assert_string_equal(buf, "1794916800");
+    assert_int_equal(history_ref_to_unix("2026-11-17T12:00:00.250+00:00", buf, sizeof(buf)), -1);
+    assert_int_equal(history_ref_to_unix("2026-11-17T12:00:00.250z", buf, sizeof(buf)), -1);
+    assert_int_equal(history_ref_to_unix("", buf, sizeof(buf)), -1);
+    assert_int_equal(history_ref_to_unix("1794916800.", buf, sizeof(buf)), -1);
+    assert_int_equal(history_ref_to_unix(".250", buf, sizeof(buf)), -1);
+    assert_int_equal(history_ref_to_unix("1794916800.250x", buf, sizeof(buf)), -1);
+    assert_int_equal(history_ref_to_unix("123456789012345678901", buf, sizeof(buf)), -1);
+}
+
+/* Between servers an ISO time is read leniently: an origin on an older
+ * build passes on whatever its parser took from the client (no
+ * fraction, a short or long one, no Z), and those worked end to end
+ * before clients were held to the spec.  Only what is ambiguous or not
+ * a time is refused: an offset, a lowercase z, junk, a day that does
+ * not exist, a time before 1970.  history_iso_to_unix() stays strict
+ * (test_iso_to_unix_refuses). */
+static void test_ref_to_unix_lenient_iso(void **state)
+{
+    static const struct { const char *in, *out; } good[] = {
+        { "2026-11-17T12:00:00Z",        "1794916800.000" },
+        { "2026-11-17T12:00:00",         "1794916800.000" },
+        { "2026-11-17T12:00:00.5Z",      "1794916800.500" },
+        { "2026-11-17T12:00:00.12Z",     "1794916800.120" },
+        { "2026-11-17T12:00:00.123456Z", "1794916800.123" },
+        { "2026-11-17T12:00:00.250",     "1794916800.250" },
+        { "2026-11-17T11:59:60.419Z",    "1794916800.419" },
+        { "1970-01-01T00:00:00Z",        "0.000" },
+    };
+    static const char *const bad[] = {
+        "2026-11-17T12:00:00+00:00",
+        "2026-11-17T12:00:00.5+02:00",
+        "2026-11-17T12:00:00.250-05:00",
+        "2026-11-17T12:00:00.Z",          /* a dot and no digit */
+        "2026-11-17T12:00:00.250z",
+        "2026-11-17t12:00:00.250Z",
+        "2026-11-17T12:00:00.250ZZ",
+        "2026-11-17T12:00:00.250Zjunk",
+        "2026-11-17 12:00:00Z",
+        "2026-11-17T+2:00:00Z",
+        "2026-11-31T12:00:00Z",
+        "2026-02-29T12:00:00Z",
+        "2026-11-17T24:00:00Z",
+        "1969-12-31T23:59:59Z",
+        "0000-01-01T00:00:00Z",
+        "2026-11-17T12:00",
+    };
+    char buf[HISTORY_TIMESTAMP_LEN];
+    size_t i;
+    (void)state;
+    for (i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+        if (history_ref_to_unix(good[i].in, buf, sizeof(buf)) != 0)
+            fail_msg("refused \"%s\"", good[i].in);
+        assert_string_equal(buf, good[i].out);
+        /* and a client sending it is still refused */
+        if (strlen(good[i].in) != 24
+            && history_iso_to_unix(good[i].in, buf, sizeof(buf)) != -1)
+            fail_msg("client form accepted \"%s\"", good[i].in);
+    }
+    for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        if (history_ref_to_unix(bad[i], buf, sizeof(buf)) != -1)
+            fail_msg("accepted \"%s\"", bad[i]);
+    }
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -1693,6 +1826,10 @@ int main(void)
         cmocka_unit_test(test_parse_reference_null),
         cmocka_unit_test(test_parse_reference_invalid),
         cmocka_unit_test(test_parse_reference_case_sensitive),
+        cmocka_unit_test(test_iso_to_unix_accepts),
+        cmocka_unit_test(test_iso_to_unix_refuses),
+        cmocka_unit_test(test_ref_to_unix),
+        cmocka_unit_test(test_ref_to_unix_lenient_iso),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

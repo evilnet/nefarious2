@@ -211,9 +211,11 @@ static int parse_timestamp_param(const char *arg, char *unix_ts, size_t tslen)
   if (eq[10] != 'T')
     return 0;
 
-  /* Copy ISO timestamp */
-  ircd_strncpy(iso_ts, eq, sizeof(iso_ts) - 1);
-  iso_ts[sizeof(iso_ts) - 1] = '\0';
+  /* Copy ISO timestamp.  One too long for the copy is refused: cut, it
+   * could lose an offset or junk history_iso_to_unix() would refuse. */
+  if (strlen(eq) >= sizeof(iso_ts))
+    return 0;
+  ircd_strncpy(iso_ts, eq, sizeof(iso_ts));
 
   /* Convert to Unix timestamp for internal use */
   if (history_iso_to_unix(iso_ts, unix_ts, tslen) != 0)

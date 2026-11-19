@@ -829,6 +829,19 @@ extern int history_unix_to_iso(const char *unix_ts, char *iso_buf, size_t iso_bu
  */
 extern int history_iso_to_unix(const char *iso_ts, char *unix_buf, size_t unix_buflen);
 
+/** Convert a TIMESTAMP reference to the store's "sec.mmm" form: an ISO
+ * 8601 UTC time (read more leniently than history_iso_to_unix(), for an
+ * older server passing a client's text on: the fraction may be missing
+ * or of any length, the Z may be missing), or a value already in that
+ * form (digits, optionally a dot and more digits), copied.
+ * @param[in] ref Reference value.
+ * @param[out] unix_buf Buffer for the result.
+ * @param[in] unix_buflen Size of the buffer.
+ * @return 0 on success, -1 for anything else (an ISO time with an
+ * offset or before 1970, junk), which no walk may be keyed from.
+ */
+extern int history_ref_to_unix(const char *ref, char *unix_buf, size_t unix_buflen);
+
 /* Read Marker API moved to metadata.h (metadata_readmarker_get/set) */
 
 /** Lookup a message by ID and verify sender.

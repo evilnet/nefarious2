@@ -322,98 +322,6 @@ const char *msg_type_cmd[] = {
   "PRIVMSG" /* MULTILINE rendered as PRIVMSG */
 };
 
-/** Validate a timestamp value.
- * Valid formats:
- *   - Unix timestamp: digits with optional decimal (e.g., "1234567890.123")
- *   - ISO 8601: "YYYY-MM-DDTHH:MM:SS.sssZ" or similar
- * @param[in] ts Timestamp string to validate.
- * @return 1 if valid, 0 if invalid.
- */
-static int validate_timestamp(const char *ts)
-{
-  const char *p;
-
-  if (!ts || !*ts)
-    return 0;
-
-  /* Check for Unix timestamp format: digits with optional decimal point */
-  if (IsDigit(*ts)) {
-    int has_decimal = 0;
-    for (p = ts; *p; p++) {
-      if (*p == '.') {
-        if (has_decimal)
-          return 0;  /* Multiple decimals */
-        has_decimal = 1;
-      } else if (*p == 'T' || *p == '-' || *p == ':' || *p == 'Z') {
-        /* This looks like ISO 8601 format - validate below */
-        break;
-      } else if (!IsDigit(*p)) {
-        return 0;  /* Invalid character */
-      }
-    }
-    if (!*p)
-      return 1;  /* Valid Unix timestamp */
-  }
-
-  /* Check for ISO 8601 format: YYYY-MM-DDTHH:MM:SS[.sss]Z
-   * Relaxed validation - just check basic structure */
-  if (strlen(ts) >= 19) {  /* Minimum: YYYY-MM-DDTHH:MM:SS */
-    /* Check YYYY-MM-DD pattern at start */
-    if (IsDigit(ts[0]) && IsDigit(ts[1]) && IsDigit(ts[2]) && IsDigit(ts[3]) &&
-        ts[4] == '-' &&
-        IsDigit(ts[5]) && IsDigit(ts[6]) &&
-        ts[7] == '-' &&
-        IsDigit(ts[8]) && IsDigit(ts[9]) &&
-        ts[10] == 'T') {
-      return 1;  /* Valid ISO 8601 */
-    }
-  }
-
-  return 0;  /* Invalid format */
-}
-
-/** Validate a timestamp value in strict ISO 8601 format only.
- * Per IRCv3 chathistory spec, clients should send ISO 8601 timestamps.
- * Valid format: "YYYY-MM-DDTHH:MM:SS[.sss]Z"
- * @param[in] ts Timestamp string to validate.
- * @return 1 if valid ISO 8601, 0 if invalid.
- */
-static int validate_iso_timestamp(const char *ts)
-{
-  if (!ts || !*ts)
-    return 0;
-
-  /* Check for ISO 8601 format: YYYY-MM-DDTHH:MM:SS[.sss]Z
-   * Relaxed validation - just check basic structure */
-  if (strlen(ts) >= 19) {  /* Minimum: YYYY-MM-DDTHH:MM:SS */
-    /* Check YYYY-MM-DD pattern at start */
-    if (IsDigit(ts[0]) && IsDigit(ts[1]) && IsDigit(ts[2]) && IsDigit(ts[3]) &&
-        ts[4] == '-' &&
-        IsDigit(ts[5]) && IsDigit(ts[6]) &&
-        ts[7] == '-' &&
-        IsDigit(ts[8]) && IsDigit(ts[9]) &&
-        ts[10] == 'T') {
-      return 1;  /* Valid ISO 8601 */
-    }
-  }
-
-  return 0;  /* Not ISO 8601 format */
-}
-
-/** Validate a client-facing timestamp value.
- * Respects FEAT_CHATHISTORY_STRICT_TIMESTAMPS:
- *   - If TRUE: only accepts ISO 8601 format (per IRCv3 spec)
- *   - If FALSE: accepts both ISO 8601 and Unix timestamps (permissive)
- * @param[in] ts Timestamp string to validate.
- * @return 1 if valid, 0 if invalid.
- */
-static int validate_client_timestamp(const char *ts)
-{
-  if (feature_bool(FEAT_CHATHISTORY_STRICT_TIMESTAMPS))
-    return validate_iso_timestamp(ts);
-  return validate_timestamp(ts);
-}
-
 /** Parse a message reference (timestamp= or msgid=).
  * @param[in] ref Reference string.
  * @param[out] ref_type Type of reference.
@@ -433,9 +341,11 @@ static int parse_reference(const char *ref, enum HistoryRefType *ref_type, const
 
   if (strncmp(ref, "timestamp=", 10) == 0) {
     const char *ts = ref + 10;
-    /* Validate the timestamp value per IRCv3 spec.
-     * Uses validate_client_timestamp which respects STRICT_TIMESTAMPS config. */
-    if (!validate_client_timestamp(ts))
+    char unix_buf[HISTORY_TIMESTAMP_LEN];
+
+    /* Only the spec's form, YYYY-MM-DDThh:mm:ss.sssZ (history_iso_to_unix(),
+     * strict): no unix time, offset or other spelling. */
+    if (history_iso_to_unix(ts, unix_buf, sizeof(unix_buf)) != 0)
       return -1;
     *ref_type = HISTORY_REF_TIMESTAMP;
     *value = ts;
@@ -7881,6 +7791,7 @@ static int search_row_hook(const struct HistoryMessage *msg, int reverse,
  * few; the remaining channels are searched on this server only. */
 #define SEARCH_FED_PARTS_MAX 8
 
+
 static void search_sel_escape(const char *in, char *out, size_t n)
 {
   size_t o = 0;
@@ -8906,7 +8817,8 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     /* A page selector this store cannot place (review A1b, issue 214):
      * not a row of the target here and not an id of the form this family
      * mints -- a legacy id the origin's target holds and this one does
-     * not.  The walk would come back empty, and a bare "E <reqid> 0" reads
+     * not -- or a timestamp this store cannot read (an origin on an
+     * older build passes a client's "+00:00" or "z" through).  The walk would come back empty, and a bare "E <reqid> 0" reads
      * at the origin as "this store has nothing in the span", which lets
      * the page claim draft/chathistory-end with this store's rows never
      * looked for.  Answer U, "never answered the query" (the flag the
@@ -8921,10 +8833,16 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       enum HistoryRefType t2;
       const char *v2;
       int unplaced = ref_type == HISTORY_REF_MSGID
-                     && history_msgid_ref_timestamp(target, ref_value, ts) < 0;
+                     ? history_msgid_ref_timestamp(target, ref_value, ts) < 0
+                     : ref_type == HISTORY_REF_TIMESTAMP
+                       && history_ref_to_unix(ref_value, ts, sizeof(ts)) != 0;
       if (!unplaced && query_subcmd_char == 'W' && ref2
-          && parse_s2s_reference(ref2, &t2, &v2) == 0 && t2 == HISTORY_REF_MSGID)
-        unplaced = history_msgid_ref_timestamp(target, v2, ts) < 0;
+          && parse_s2s_reference(ref2, &t2, &v2) == 0) {
+        if (t2 == HISTORY_REF_MSGID)
+          unplaced = history_msgid_ref_timestamp(target, v2, ts) < 0;
+        else if (t2 == HISTORY_REF_TIMESTAMP)
+          unplaced = history_ref_to_unix(v2, ts, sizeof(ts)) != 0;
+      }
       if (unplaced) {
         Debug((DEBUG_DEBUG, "CH Q %s %c: a selector this store cannot place: E U",
                reqid, query_subcmd_char));
@@ -9066,17 +8984,31 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
         ircd_strncpy(sj->sel, parv[11], sizeof(sj->sel) - 1);
       {
         char *q = sj->sel, *tok;
+        int bad_from = 0;
         while ((tok = q) && *tok) {
           char *sp = strchr(tok, ' ');
           if (sp) { *sp = '\0'; q = sp + 1; } else q = tok + strlen(tok);
           if (0 == strncmp(tok, "from=", 5)) {
-            ircd_strncpy(ssm->from, tok + 5, sizeof(ssm->from));
-            search_sel_unescape(ssm->from);
+            /* Unescape in place first: the escaped form may be longer
+             * than a nick, and copying it first cut it. */
+            search_sel_unescape(tok + 5);
+            if (strlen(tok + 5) >= sizeof(ssm->from))
+              bad_from = 1;   /* cut, it would match a shorter nick */
+            else
+              ircd_strncpy(ssm->from, tok + 5, sizeof(ssm->from));
           } else if (0 == strncmp(tok, "text=", 5)) {
             search_sel_unescape(tok + 5);
             if (tok[5])
               ssm->text = tok + 5;
           }
+        }
+        /* A nick longer than ours: no row here can match it, as the
+         * requester's own check (m_search) would have said. */
+        if (bad_from) {
+          MyFree(sj);
+          presence_query_filter_close(fed_pf);
+          sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0", reqid);
+          return 0;
         }
       }
       Debug((DEBUG_DEBUG, "CH Q S: target %s before '%s' after %lld limit %d from '%s' text '%s' reftype %d",
@@ -10114,7 +10046,9 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   if (limit <= 0 || limit > max_limit)
     limit = max_limit;
   /* The selectors also travel S2S in one 512-byte P10 line; refuse an
-   * oversize text here so local and federated behaviour agree. */
+   * oversize text here so local and federated behaviour agree.  The
+   * whole line of a search that federates is measured exactly, per
+   * channel (search_fed_line_fits()). */
   {
     char esc[BUFSIZE];
     size_t n = 0;
