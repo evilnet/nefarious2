@@ -751,12 +751,14 @@ static void registration_mid_exchange_waits_for_it(void **state)
 {
   struct fake *a = new_client(0, KEEPS);
 
+  cli_saslcookie(&a->cli) = 77;                        /* an exchange */
   auth_sasl_start(a->auth);
   assert_int_equal(check_auth_finished(a->auth), 0);   /* CAP END */
   assert_int_equal(a->registered, 0);
   assert_int_equal(check_auth_finished(a->auth), 0);   /* checked again */
   assert_int_equal(a->registered, 0);
-  auth_sasl_done(a->auth);                             /* the exchange ends */
+  cli_saslcookie(&a->cli) = 0;                         /* the exchange ends */
+  auth_sasl_done(a->auth);
   assert_int_equal(a->registered, 1);
 }
 

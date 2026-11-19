@@ -4287,7 +4287,7 @@ static void star_abort_services_exchange(void **state)
 }
 
 /** A line that starts an exchange and cannot be a mechanism name --
- * here the base64 PLAIN credentials of an exchange a CAP END aborted --
+ * here the base64 PLAIN credentials of an exchange that already ended --
  * reaches no tier: 908 and 904, nothing counted, no exchange. */
 static void credentials_as_a_mechanism_reach_no_tier(void **state)
 {
@@ -4352,22 +4352,38 @@ static void lower_case_mechanism_goes_out_as_advertised(void **state)
 
 /** Registering mid-exchange never ends the exchange, whoever's turn it
  * is: a client may pipeline CAP END behind AUTHENTICATE PLAIN and send its
- * credentials when the "+" comes.  Here the local tier: CAP END is in
- * (cap_done) while the exchange waits for the client's data; the hold
- * keeps registration waiting, no 906 goes, and the credentials that follow
- * log the client in before it registers. */
+ * credentials when the "+" comes.  Here the local tier, in that order:
+ * AUTHENTICATE PLAIN (the "+" goes; the exchange waits for the client),
+ * then CAP END, then the credentials.  At CAP END the hold keeps
+ * registration waiting on the same exchange, no 906 goes, and the
+ * credentials log the client in (903) before it registers. */
 static void pipelined_cap_end_waits_for_the_credentials(void **state)
 {
   struct Client *c;
   struct fake *f;
+  unsigned int cookie;
+  char data[300];
 
   sasl_init_once();
-  c = new_client(150, "rga", 1, REG_KEEPS);
+  c = new_client(150, "rga", 0, REG_KEEPS);       /* CAP not ended yet */
   f = fake_of(c);
-  plain_pending(c, "rga", "pw");        /* the "+" went, then the credentials */
-  assert_int_equal(registration_check(f), 0);     /* CAP END, read in between */
+  kc_mode = KC_LATER;
+  assert_int_equal(authenticate(c, "PLAIN"), 0);
+  assert_string_equal(f->raw, "AUTHENTICATE +");
+  cookie = cli_saslcookie(c);
+  assert_true(cookie != 0);
+  assert_true(f->hold);
+
+  f->cap_done = 1;                                /* CAP END */
+  assert_int_equal(registration_check(f), 0);
   assert_false(has_numeric(f, ERR_SASLABORTED));
   assert_int_equal(f->registered, 0);
+  assert_int_equal(cli_saslcookie(c), cookie);    /* the same exchange */
+  assert_true(f->hold);
+
+  plain_b64("rga", "pw", data);                   /* then the credentials */
+  assert_int_equal(authenticate(c, data), 0);
+  assert_int_equal(f->registered, 0);             /* Keycloak's turn */
   pend_deliver_kind(P_TOKEN, KC_SUCCESS);
   run_event_loop();
   assert_true(has_numeric(f, RPL_SASLSUCCESS));
