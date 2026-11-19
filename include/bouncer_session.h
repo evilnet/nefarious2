@@ -26,6 +26,36 @@
 #ifndef INCLUDED_bouncer_session_h
 #define INCLUDED_bouncer_session_h
 
+/** The batch type a held session's restored channel state is sent in
+ * (N027): the vendor cap's name, as the persistence draft defines no
+ * batch type.  Builds before it used "draft/persistence", which a
+ * connection without the vendor cap still gets while
+ * PERSISTENCE_DRAFT_EXTRAS is on (persistence_restore_batch_type()). */
+#define PERSISTENCE_RESTORE_BATCH "evilnet.github.io/persistence"
+/** The restore batch type of the builds before N027. */
+#define PERSISTENCE_RESTORE_BATCH_OLD "draft/persistence"
+
+/** The type of the batch a restore is wrapped in, for a connection that
+ * can take a batch at all: the vendor cap's for a connection that
+ * negotiated evilnet.github.io/persistence, the old type for any other
+ * while PERSISTENCE_DRAFT_EXTRAS is on, and none (send it unwrapped)
+ * otherwise.
+ * @param[in] vendor Non-zero if the connection negotiated the vendor cap.
+ * @param[in] draft_extras FEAT_PERSISTENCE_DRAFT_EXTRAS.
+ * @return The batch type, or NULL for no batch. */
+static inline const char *persistence_restore_batch_type(int vendor,
+                                                         int draft_extras)
+{
+  if (vendor)
+    return PERSISTENCE_RESTORE_BATCH;
+  if (draft_extras)
+    return PERSISTENCE_RESTORE_BATCH_OLD;
+  return 0;
+}
+/** The PERSISTENCE extras' CAP 302 value (evilnet.github.io/persistence,
+ * and draft/persistence while PERSISTENCE_DRAFT_EXTRAS is on). */
+#define PERSISTENCE_EXTRAS_VALUE "attach,detach,list,attach-cursor"
+
 #ifndef INCLUDED_ircd_defs_h
 #include "ircd_defs.h"
 #endif

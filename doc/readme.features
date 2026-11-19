@@ -2109,6 +2109,68 @@ capability depends on 'batch' and is a no-op until 'batch' is negotiated
 too, in either order: until then the client is sent the history a client
 without draft/event-playback gets.
 
+CAP_evilnet_persistence
+ * Type: boolean
+ * Default: TRUE
+
+Enables announcement of the 'evilnet.github.io/persistence' client
+capability: it tells a client that this server has the PERSISTENCE extras
+that are not part of the draft/persistence specification (ATTACH, DETACH,
+LIST, PROFILE, REPLAY).  Its value holds tokens a client checks before
+it relies on a behaviour (attach,detach,list,attach-cursor); PROFILE and
+REPLAY have none.  A held session's restored channel
+state is sent in a batch of this type to a connection that negotiated it
+(see PERSISTENCE_DRAFT_EXTRAS for the others).  'draft/persistence' itself
+is the specification's STATUS, GET and SET.
+
+The capability announces the extras; it does not gate them.  Like the
+specification's own subcommands they work on any connection, with or
+without a capability, so a bouncer user on a client that knows neither
+can still adjust the session by hand (/quote PERSISTENCE REPLAY SET OFF).
+Each requires the account and acts on that account's own sessions and
+settings only.  Setting this to FALSE stops the announcement and the
+vendor batch type, not the subcommands.
+
+The account metadata keys keep their names (draft/persistence/hold,
+draft/persistence/auto-replay, draft/persistence/profile/*): renaming them
+would be a migration of the stores and of the server-to-server wire.
+
+CAP_draft_bouncer
+ * Type: boolean
+ * Default: FALSE
+
+Obsolete.  It announced a 'draft/bouncer' capability that nothing read;
+the capability is gone, and the setting is accepted and ignored so
+existing configurations still load.
+
+PERSISTENCE_DRAFT_EXTRAS
+ * Type: boolean
+ * Default: FALSE
+
+Off by default: clients are expected to request the vendor capability.
+Turn it on for a network whose clients still need the old names.  A
+transition for clients written before the PERSISTENCE extras were
+announced by 'evilnet.github.io/persistence'.  While TRUE, such a client
+sees the names it was written against: 'draft/persistence' carries the
+extras' value too (where such clients read attach-cursor), and a
+connection that did not negotiate the vendor capability gets a held
+session's restore in a 'draft/persistence' batch.  Set it to FALSE once
+clients request the vendor capability: 'draft/persistence' then has no
+value, a SET is answered with its STATUS alone (the 'PERSISTENCE SET'
+line before it goes only to a connection with the vendor capability),
+and a restore is wrapped in a batch only for a connection with the
+vendor capability; any other gets the same lines unwrapped, since it
+could not know the batch's type.  The automatic replay's outer
+'evilnet.github.io/bouncer-replay' batch follows the same rule; its
+inner chathistory batches need only 'batch'.  The subcommands themselves
+do not depend on this setting (see CAP_evilnet_persistence).
+
+Changing this setting on a running server sends CAP 302 clients a
+'CAP NEW :draft/persistence' with the new value.  Going to FALSE, that
+NEW is bare: CAP has no way to say a value was removed, so a client may
+keep the old 'attach-cursor' until it reconnects.  A DEL followed by a
+NEW would say it, and would cancel the capability for every client.
+
 UPING_ENABLE
  * Type: boolean
  * Default: TRUE

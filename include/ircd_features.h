@@ -486,7 +486,9 @@ enum Feature {
   FEAT_BOUNCER_PERSIST,
   FEAT_BOUNCER_PERSIST_INTERVAL,
   FEAT_BOUNCER_RESTORE_CRASH_WINDOW,
-  FEAT_CAP_draft_bouncer,
+  FEAT_CAP_evilnet_persistence,
+  FEAT_CAP_draft_bouncer, /* obsolete: nothing reads it */
+  FEAT_PERSISTENCE_DRAFT_EXTRAS,
   FEAT_CAP_draft_persistence,
   FEAT_HISTORY_MAP_SIZE_MB,
 #ifdef USE_SSL

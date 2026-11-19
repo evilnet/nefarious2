@@ -247,6 +247,23 @@ static void value_change_only_to_302(void **state)
   assert_string_equal(sent_to(o, 0), "CAP o NEW :draft/multiline");
 }
 
+/** A CAP NEW given no value carries the capability's stored one, the
+ * one CAP LS 302 lists (cap_set_value()). */
+static void new_without_a_value_carries_the_stored_one(void **state)
+{
+  struct Client *n, *o;
+  (void)state;
+
+  two(&n, &o);
+  cap_set_value(CAP_DRAFT_MULTILINE, "max-lines=7");
+  send_cap_notify("draft/multiline", 0, NULL);
+  nsent = 0;
+  send_cap_notify("draft/multiline", 1, NULL);
+  assert_string_equal(sent_to(n, 0), "CAP n NEW :draft/multiline=max-lines=7");
+  assert_string_equal(sent_to(o, 0), "CAP o NEW :draft/multiline");
+  cap_set_value(CAP_DRAFT_MULTILINE, NULL);
+}
+
 /** The same from the rehash batch: the pre-302 client gets the
  * capability that came back, not the one whose value changed. */
 static void batch_value_change_only_to_302(void **state)
@@ -285,6 +302,7 @@ int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test_setup_teardown(value_change_only_to_302, setup, teardown),
+    cmocka_unit_test_setup_teardown(new_without_a_value_carries_the_stored_one, setup, teardown),
     cmocka_unit_test_setup_teardown(batch_value_change_only_to_302, setup, teardown),
     cmocka_unit_test_setup_teardown(acked_counts_as_known, setup, teardown),
   };

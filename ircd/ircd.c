@@ -1397,10 +1397,17 @@ int main(int argc, char **argv) {
    * The init is cheap (zeroes hash tables). */
   bounce_init();
 
-  /* draft/persistence CAP 302 value: static feature-token inventory
-   * (spec: clients MUST tolerate unknown tokens).  attach-cursor =
-   * ATTACH accepts the optional last-seen-msgid catch-up anchor. */
-  cap_set_value(CAP_DRAFT_PERSISTENCE, "attach,detach,list,attach-cursor");
+  /* The PERSISTENCE extras' CAP 302 value, on their own vendor cap
+   * (N027): draft/persistence is the spec's, which defines no value.  A
+   * static token inventory (clients MUST tolerate unknown tokens);
+   * attach-cursor = ATTACH accepts the optional last-seen-msgid catch-up
+   * anchor. */
+  cap_set_value(CAP_EVILNET_PERSISTENCE, PERSISTENCE_EXTRAS_VALUE);
+  /* While PERSISTENCE_DRAFT_EXTRAS keeps the old names working,
+   * draft/persistence keeps the value too: clients written against them
+   * read attach-cursor there (feature_notify_persistence_draft_extras()). */
+  if (feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS))
+    cap_set_value(CAP_DRAFT_PERSISTENCE, PERSISTENCE_EXTRAS_VALUE);
 
   /* Restore persisted bouncer sessions (ghosts + channels) from MDBX.
    * Must run after bounce_init() and metadata_lmdb_init(), before event_loop().

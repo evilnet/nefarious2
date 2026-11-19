@@ -18505,24 +18505,34 @@ void bounce_send_channel_state(struct Client *cptr)
   if (!cli_user(cptr))
     return;
 
-  /* Wrap the JOIN/TOPIC/NAMES burst in a draft/persistence batch
-   * whenever the client has negotiated `batch` and has at least one
-   * channel to restore.  The cap gate is `batch` only — the batch
-   * envelope is what requires client understanding, and unknown batch
-   * types are tolerated per the batch spec.  Clients that additionally
-   * negotiate `draft/persistence` know to treat the batch contents as
-   * restoration rather than live activity; clients with only `batch`
-   * still benefit from the grouping signal.
+  /* Wrap the JOIN/TOPIC/NAMES burst in a batch when the client has
+   * negotiated `batch`, has at least one channel to restore, and can know
+   * the batch's type: unsolicited output a client may not understand is
+   * cap-gated.  The persistence draft defines no batch type, so:
+   *  - a connection that negotiated evilnet.github.io/persistence gets a
+   *    batch of that type (N027);
+   *  - while PERSISTENCE_DRAFT_EXTRAS keeps the old names working, any
+   *    other gets the old draft/persistence type, as before, so a client
+   *    written against it (Seance before evilnet/seance#327) still
+   *    recognises its restore (unknown batch types are tolerated per the
+   *    batch spec, the grey area of this transition);
+   *  - otherwise the same lines go out unwrapped.
    * Inside another batch open on the answer (a labeled registration
    * line's labeled-response batch) it is nested in it (send.c's nesting
    * model), never left out. */
-  wrap_in_persistence_batch =
-      MyConnect(cptr)
-      && CapRecipientHas(cptr, CAP_BATCH)
-      && cli_user(cptr)->channel != NULL;
+  {
+    const char *batch_type = NULL;
 
-  if (wrap_in_persistence_batch)
-    send_batch_start(cptr, "draft/persistence");
+    if (MyConnect(cptr)
+        && CapRecipientHas(cptr, CAP_BATCH)
+        && cli_user(cptr)->channel != NULL)
+      batch_type = persistence_restore_batch_type(
+          CapOwnHas(cptr, CAP_EVILNET_PERSISTENCE),
+          feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS));
+    wrap_in_persistence_batch = batch_type != NULL;
+    if (wrap_in_persistence_batch)
+      send_batch_start(cptr, batch_type);
+  }
 
   for (member = cli_user(cptr)->channel; member; member = member->next_channel) {
     struct Channel *chptr = member->channel;

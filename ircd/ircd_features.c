@@ -581,8 +581,9 @@ feature_notify_cap_chathistory(void)
   }
 }
 
-/** Notify clients when a simple CAP feature flag changes (no parameters).
- * Helper macro to generate callbacks for caps without parameters.
+/** Notify clients when a simple CAP feature flag changes.
+ * Helper macro to generate callbacks for caps whose value, if any, is the
+ * stored one (send_cap_notify() adds it to CAP NEW).
  * Uses featname for C identifier (function name) and capname for the CAP string.
  */
 #define DEFINE_CAP_NOTIFY(capname, featname) \
@@ -636,9 +637,22 @@ DEFINE_CAP_NOTIFY("draft/read-marker", draft_read_marker)
 DEFINE_CAP_NOTIFY("draft/channel-rename", draft_channel_rename)
 DEFINE_CAP_NOTIFY("evilnet.github.io/channel-relocate", evilnet_channel_relocate)
 DEFINE_CAP_NOTIFY("draft/metadata-2", draft_metadata_2)
-DEFINE_CAP_NOTIFY("draft/bouncer", draft_bouncer)
+DEFINE_CAP_NOTIFY("evilnet.github.io/persistence", evilnet_persistence)
 DEFINE_CAP_NOTIFY("draft/persistence", draft_persistence)
 DEFINE_CAP_NOTIFY("tls", tls)
+
+/** PERSISTENCE_DRAFT_EXTRAS: draft/persistence carries the extras' value
+ * only while the old names are kept working (N027).  While the cap is
+ * offered, cap-notify clients are told its new value (or that it has
+ * none); the caps' own hooks above send the stored value as well. */
+static void feature_notify_persistence_draft_extras(void)
+{
+  cap_set_value(CAP_DRAFT_PERSISTENCE,
+                feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS)
+                ? PERSISTENCE_EXTRAS_VALUE : NULL);
+  if (feature_bool(FEAT_CAP_draft_persistence))
+    send_cap_notify("draft/persistence", 1, NULL);
+}
 
 /** Notify clients when STS feature flag changes.
  * STS has parameters: port, duration, and optionally preload.
@@ -1526,7 +1540,9 @@ static struct FeatureDesc {
   F_B(BOUNCER_PERSIST, 0, 0, 0),             /* persist sessions across restarts */
   F_I(BOUNCER_PERSIST_INTERVAL, 0, 5, feature_notify_bouncer_persist_interval), /* periodic persist interval (seconds) */
   F_I(BOUNCER_RESTORE_CRASH_WINDOW, 0, 600, feature_notify_bouncer_restore_crash_window), /* a start that dies sooner after restoring sessions does not get them back at the next (seconds; 0: off) */
-  F_B(CAP_draft_bouncer, 0, 1, feature_notify_cap_draft_bouncer),
+  F_B(CAP_evilnet_persistence, 0, 1, feature_notify_cap_evilnet_persistence),
+  F_B(CAP_draft_bouncer, 0, 0, 0),   /* obsolete: draft/bouncer is gone (N027); nothing reads it */
+  F_B(PERSISTENCE_DRAFT_EXTRAS, 0, 0, feature_notify_persistence_draft_extras),
   F_B(CAP_draft_persistence, 0, 1, feature_notify_cap_draft_persistence),
   F_I(HISTORY_MAP_SIZE_MB, 0, 1024, 0),
 #ifdef USE_SSL

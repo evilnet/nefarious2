@@ -352,7 +352,8 @@ sasl_server_available(void)
  *
  * @param[in] capname Name of the capability (e.g., "sasl").
  * @param[in] available 1 if capability is now available, 0 if removed.
- * @param[in] value Optional value for CAP NEW (e.g., mechanism list). NULL for no value.
+ * @param[in] value Value for CAP NEW (e.g., mechanism list).  NULL or ""
+ *   for the capability's stored one, if it has one.
  */
 void send_cap_notify(const char *capname, int available, const char *value)
 {
@@ -363,6 +364,11 @@ void send_cap_notify(const char *capname, int available, const char *value)
 
   if (cap && !available)
     CapClr(&cap_announced, cap->cap);
+
+  /* A caller need not know which capabilities have a value: given none,
+   * the stored one that CAP LS 302 lists (cap_set_value()). */
+  if (available && !(value && *value))
+    value = cap ? cap->value : NULL;
 
   /* If batching is active, buffer instead of sending immediately */
   if (cap_batch.active) {
@@ -438,7 +444,7 @@ static struct capabilities capab_list[] = {
   _CAP_V(DRAFT_METADATA2, 0, "draft/metadata-2", FEAT_CAP_draft_metadata_2, "before-connect,max-subs=50,max-keys=20,max-value-bytes=300"),
   _CAP(DRAFT_WEBPUSH, 0, "draft/webpush", FEAT_CAP_draft_webpush),
   _CAP(DRAFT_AUTHTOKEN, 0, "draft/authtoken", FEAT_CAP_draft_authtoken),
-  _CAP(DRAFT_BOUNCER, 0, "draft/bouncer", FEAT_CAP_draft_bouncer),
+  _CAP(EVILNET_PERSISTENCE, 0, "evilnet.github.io/persistence", FEAT_CAP_evilnet_persistence),
   _CAP(DRAFT_PERSISTENCE, 0, "draft/persistence", FEAT_CAP_draft_persistence),
   _CAP(DRAFT_OPERTAG, 0, "draft/oper-tag", FEAT_CAP_oper_tag),
 #ifdef USE_SSL
