@@ -135,6 +135,16 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (IsWebIRC(cptr))
     return 0;
 
+  /* One guess at a WebIRC block's password per connection: a wrong one
+   * handed to IAuth (below) left the connection up, and any later WEBIRC
+   * on it is refused as a wrong password is without IAuth, unchecked. */
+  if (IsWebIRCBadPass(cptr)) {
+    sendto_opmask_butone_global(&me, SNO_WEBIRC,
+                                "WEBIRC Attempt with invalid password from %s [%s]",
+                                cli_sockhost(sptr), cli_sock_ip(sptr));
+    return exit_client(cptr, sptr, &me, "WEBIRC Password invalid for your host");
+  }
+
   /* These shouldn't be empty, but just in case... */
   if (!EmptyString(parv[1]))
     password = parv[1];
@@ -161,8 +171,13 @@ int m_webirc(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (res && cli_auth(cptr))
       ares = auth_set_webirc(cli_auth(cptr), password, username, hostname, ipaddr, options);
 
-  if (!ares)
+  if (!ares) {
+    /* Handed to IAuth.  A wrong password for a block that matches the
+     * host does not get another guess on this connection. */
+    if (res == 1)
+      SetWebIRCBadPass(cptr);
     return 0;
+  }
   else
   {
     switch (res)

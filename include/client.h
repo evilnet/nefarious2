@@ -222,6 +222,9 @@ enum Flag
     FLAG_NOSTORAGE,                 /**< +Y User's messages are not stored in chathistory (IRCv3 branch) */
     FLAG_PM_OPTOUT,                 /**< +y User opted out of PM history storage (IRCv3 branch) */
     FLAG_BNC_HOLDPREF,              /**< +b User prefers bouncer hold mode (IRCv3 branch) */
+    FLAG_WEBIRC_BADPASS,            /**< A WEBIRC from this connection failed a
+                                     *   WebIRC block's password and was handed
+                                     *   to IAuth: no later WEBIRC is checked */
 
     FLAG_LAST_FLAG,                 /**< number of flags */
     FLAG_LOCAL_UMODES = FLAG_LOCOP, /**< First local mode flag */
@@ -740,6 +743,8 @@ struct Client {
 #define IsUHNames(x)            HasFlag(x, FLAG_UHNAMES)
 /** Return non-zero if the client is a WEBIRC client. */
 #define IsWebIRC(x)             HasFlag(x, FLAG_WEBIRC)
+/** Return non-zero if a WEBIRC from the client failed a block's password. */
+#define IsWebIRCBadPass(x)      HasFlag(x, FLAG_WEBIRC_BADPASS)
 /** Return non-zero if the client should use USER username as ident. */
 #define IsWebIRCUserIdent(x)    HasFlag(x, FLAG_WEBIRC_USERIDENT)
 /** Return non-zero if the client has had its IP address or host name changed. */
@@ -861,6 +866,8 @@ struct Client {
 #define SetUHNames(x)           SetFlag(x, FLAG_UHNAMES)
 /** Mark a client as a WEBIRC client. */
 #define SetWebIRC(x)            SetFlag(x, FLAG_WEBIRC)
+/** Mark a client whose WEBIRC failed a block's password (handed to IAuth). */
+#define SetWebIRCBadPass(x)     SetFlag(x, FLAG_WEBIRC_BADPASS)
 /** Mark a client as having to use USER username as ident. */
 #define SetWebIRCUserIdent(x)   SetFlag(x, FLAG_WEBIRC_USERIDENT)
 /** Mark a client as having a spoofed IP or host name. */
