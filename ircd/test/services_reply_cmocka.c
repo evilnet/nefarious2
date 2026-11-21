@@ -99,6 +99,9 @@ static int replies[MAXREC];             /* every numeric sent, in order */
 static int nreplies;
 static char logged_fmt[4][160];         /* log lines at NOTICE or above */
 static int nlogged;
+static char stored_mechs[128];
+static int stored_calls;
+static int relay_calls;
 static int notices_tried, notices_sent; /* rate-limited oper notices */
 static struct Client *session_member;   /* bounce_client_in_session() */
 static struct Client *ban_cleared[MAXREC];  /* member_ban_cache_clear() */
@@ -257,6 +260,8 @@ static int world_setup(void **state)
   nmoved = 0;
   nreplies = 0;
   nlogged = notices_tried = notices_sent = 0;
+  stored_mechs[0] = '\0';
+  stored_calls = relay_calls = 0;
   nban_clears = 0;
   sasl_failures_counted = 0;
   session_member = NULL;
@@ -375,6 +380,13 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
                            const char *pattern, ...)
 {
   (void)from; (void)cmd; (void)tok; (void)one; (void)pattern;
+  relay_calls++;
+}
+
+void set_sasl_mechanisms(const char *m)
+{
+  stored_calls++;
+  ircd_strncpy(stored_mechs, m, sizeof(stored_mechs));
 }
 
 static void record_notify(struct Client *from, int withcap, int self)
@@ -1602,6 +1614,43 @@ static void test_account_r_carries_presence(void **state)
   assert_int_equal(moved_carry[0], 1);
 }
 
+/* The mechanism list services announce, "SASL * * M :<list>", is stored
+ * and relayed unchanged; every other network-wide form is only relayed. */
+static void test_mech_list_broadcast_is_stored_and_relayed(void **state)
+{
+  struct Client *svs = services_link();
+  (void)state;
+
+  deliver(ms_sasl, svs, svs, "* * M :PLAIN,EXTERNAL");
+  assert_int_equal(stored_calls, 1);
+  assert_string_equal(stored_mechs, "PLAIN,EXTERNAL");
+  assert_int_equal(relay_calls, 1);
+}
+
+static void test_empty_mech_list_is_passed_through(void **state)
+{
+  struct Client *svs = services_link();
+  (void)state;
+
+  deliver(ms_sasl, svs, svs, "* * M :");
+  assert_int_equal(stored_calls, 1);
+  assert_string_equal(stored_mechs, "");
+  assert_int_equal(relay_calls, 1);
+}
+
+static void test_other_network_wide_forms_are_only_relayed(void **state)
+{
+  struct Client *svs = services_link();
+  (void)state;
+
+  deliver(ms_sasl, svs, svs, "* * D :F");
+  assert_int_equal(stored_calls, 0);
+  assert_int_equal(relay_calls, 1);
+  deliver(ms_sasl, svs, svs, "* AB!1.2 M :PLAIN");
+  assert_int_equal(stored_calls, 0);
+  assert_int_equal(relay_calls, 2);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1644,6 +1693,9 @@ int main(void)
     T(test_account_r_carries_presence),
     T(test_account_m_switch_of_a_member_is_told),
     T(test_account_change_forgets_cached_bans),
+    T(test_mech_list_broadcast_is_stored_and_relayed),
+    T(test_empty_mech_list_is_passed_through),
+    T(test_other_network_wide_forms_are_only_relayed),
 #undef T
   };
 

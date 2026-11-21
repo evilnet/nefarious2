@@ -157,6 +157,7 @@ SASL <target> <source>!<fd>.<cookie> <subcmd> <data> [ext]
 | `D` | Both | Done (`S`=success, `F`=fail, `A`=abort) | `m_sasl.c:248` | `handle_sasl_input()` |
 | `L` | X3→Nef | Login (account name, timestamp) | `m_sasl.c:243` | Outbound only |
 | `M` | X3→Nef | Mechanisms list (for 908 numeric) | `m_sasl.c:273` | Outbound only |
+| `M` | services→all | `SASL * * M :<list>`: mechanisms services offer; fork servers store it (`set_sasl_mechanisms()`, for the `sasl=` cap value) and every server relays it unchanged | `ms_sasl`, `*` branch | Outbound only |
 
 **Important**: X3 may send `I` (Impersonation) but Nefarious does NOT handle it - silently ignored.
 

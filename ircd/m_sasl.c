@@ -145,10 +145,15 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     ext = parv[5];
 
   if (!strcmp(parv[1], "*")) {
-    /* Network-wide forms are relayed as-is.  (The old "SASL * * M
-     * :<mechanisms>" list broadcast was emitted only by an abandoned X3
-     * branch; the advertised sasl= value is per-node config, see
-     * sasl_local_mechanisms() and the iauth mechanism cache.) */
+    /* Network-wide forms are relayed as-is.  "SASL * * M :<mechanisms>"
+     * is the list services announce (and re-send when servers link); it
+     * is stored here for the sasl= cap value (see cap_sasl_mechanisms())
+     * and relayed like the rest. */
+    if (!strcmp(token, "*") && reply[0] == 'M') {
+      set_sasl_mechanisms(data);
+      log_write(LS_SYSTEM, L_INFO, 0, "SASL mechanisms set to: %s", data);
+    }
+
     if (ext != NULL)
       sendcmdto_serv_butone(sptr, CMD_SASL, cptr, "* %s %s %s :%s",
                                    token, reply, data, ext);
