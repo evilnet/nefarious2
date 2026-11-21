@@ -156,8 +156,8 @@ SASL <target> <source>!<fd>.<cookie> <subcmd> <data> [ext]
 | `C` | Both | Continue (base64 auth data) | `m_sasl.c:240` | `handle_sasl_input()` |
 | `D` | Both | Done (`S`=success, `F`=fail, `A`=abort) | `m_sasl.c:248` | `handle_sasl_input()` |
 | `L` | X3→Nef | Login (account name, timestamp) | `m_sasl.c:243` | Outbound only |
-| `M` | X3→Nef | Mechanisms list (for 908 numeric) | `m_sasl.c:273` | Outbound only |
-| `M` | services→all | `SASL * * M :<list>`: mechanisms services offer; fork servers store it (`set_sasl_mechanisms()`, for the `sasl=` cap value) and every server relays it unchanged | `ms_sasl`, `*` branch | Outbound only |
+| `M` | X3→Nef | Per-session: mechanisms list for one client's exchange (for 908 numeric) | `m_sasl.c:273` | Outbound only |
+| `M` | services→all | Network-wide: `SASL * * M :<list>`, the mechanisms services offer; fork servers store it (`sasl_mechanisms_announced()`, for the `sasl=` cap value; clients get CAP NEW/DEL only when what CAP LS says changes; cleared when a server matching `SASL_SERVER` leaves) and every server relays it unchanged | `ms_sasl`, `*` branch | Outbound only |
 
 **Important**: X3 may send `I` (Impersonation) but Nefarious does NOT handle it - silently ignored.
 

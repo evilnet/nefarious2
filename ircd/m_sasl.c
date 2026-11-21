@@ -124,6 +124,17 @@ static void sasl_relay_end(struct Client *acptr)
     auth_sasl_done(cli_auth(acptr));
 }
 
+/** Is \a list fit for the sasl= cap value: no space, no control
+ * character?  It is the trailing parameter of "SASL * * M", and goes into
+ * every client's CAP LS line as it is. */
+static int sasl_mech_list_clean(const char *list)
+{
+  for (; *list; list++)
+    if ((unsigned char)*list <= ' ' || *list == '\177')
+      return 0;
+  return 1;
+}
+
 int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 {
   struct Client* acptr;
@@ -148,10 +159,20 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     /* Network-wide forms are relayed as-is.  "SASL * * M :<mechanisms>"
      * is the list services announce (and re-send when servers link); it
      * is stored here for the sasl= cap value (see cap_sasl_mechanisms())
-     * and relayed like the rest. */
-    if (!strcmp(token, "*") && reply[0] == 'M') {
-      set_sasl_mechanisms(data);
-      log_write(LS_SYSTEM, L_INFO, 0, "SASL mechanisms set to: %s", data);
+     * and relayed like the rest.  A list with a space or a control
+     * character is relayed only, and logged once until a good list
+     * comes. */
+    if (!strcmp(token, "*") && reply[0] == 'M' && reply[1] == '\0') {
+      static int warned;
+
+      if (sasl_mech_list_clean(data)) {
+        sasl_mechanisms_announced(data);
+        warned = 0;
+      } else if (!warned) {
+        warned = 1;
+        log_write(LS_SYSTEM, L_WARNING, 0, "SASL mechanism list from %C "
+                  "has a space or a control character: not stored", sptr);
+      }
     }
 
     if (ext != NULL)

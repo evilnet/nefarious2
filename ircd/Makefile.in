@@ -333,6 +333,7 @@ IRCD_SRC = \
 	sasl_auth.c \
 	authtoken.c \
 	sasl_conf.c \
+	sasl_mechs.c \
 	sasl_webhook.c \
 	send.c \
 	shun.c \

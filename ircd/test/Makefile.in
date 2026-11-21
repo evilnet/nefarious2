@@ -91,6 +91,7 @@ CMOCKA_TESTPROGS = \
 	account_id_cmocka \
 	cap_version_cmocka \
 	cap_notify_cmocka \
+	sasl_mechs_cmocka \
 	markread_wire_cmocka \
 	markread_join_cmocka \
 	sasl_turn_cmocka \
@@ -215,6 +216,7 @@ DEP_SRC = \
 	account_id_cmocka.c \
 	cap_version_cmocka.c \
 	cap_notify_cmocka.c \
+	sasl_mechs_cmocka.c \
 	markread_wire_cmocka.c \
 	markread_join_cmocka.c \
 	sasl_turn_cmocka.c \
@@ -658,6 +660,15 @@ CAP_NOTIFY_CMOCKA_OBJS = cap_notify_cmocka.o ../m_cap.o \
 	../ircd_snprintf.o ../ircd_string.o
 cap_notify_cmocka: $(CAP_NOTIFY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(CAP_NOTIFY_CMOCKA_OBJS) $(CMOCKA_LIBS)
+# sasl_mechs tests - what clients are told when the stored SASL mechanism
+# list changes (services' SASL * * M list, IAuth's, the clear when a server
+# matching SASL_SERVER leaves): the REAL sasl_mechs.o and m_cap.o against
+# fake clients and servers; the Keycloak tier, IAuth and the features are
+# stubbed in the test.
+SASL_MECHS_CMOCKA_OBJS = sasl_mechs_cmocka.o ../sasl_mechs.o ../m_cap.o \
+	../ircd_snprintf.o ../ircd_string.o ../match.o
+sasl_mechs_cmocka: $(SASL_MECHS_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(SASL_MECHS_CMOCKA_OBJS) $(CMOCKA_LIBS)
 # markread_wire tests - the MARKREAD parameter forms of draft/read-marker
 # (markread_arg_kind(), markread_ts_unknown(), markread_wire.h; pure)
 MARKREAD_WIRE_CMOCKA_OBJS = markread_wire_cmocka.o

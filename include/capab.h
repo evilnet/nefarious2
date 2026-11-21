@@ -176,6 +176,10 @@ extern int cap_lookup(const char **caplist_p, int *neg_p, int *cap_out, unsigned
  * LS advertises, and what RPL_SASLMECHS (908) lists. */
 extern const char *cap_sasl_mechanisms(void);
 
+/* Whether CAP LS offers the sasl capability; non-zero sasl_server_leaving
+ * answers as the moment before a server matching SASL_SERVER left. */
+extern int cap_sasl_offered(int sasl_server_leaving);
+
 /* IRCv3 cap-notify: send CAP NEW/DEL notifications to clients */
 extern void send_cap_notify(const char *capname, int available, const char *value);
 

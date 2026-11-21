@@ -288,7 +288,8 @@ cap_sasl_mechanisms(void)
 {
   /* Local Keycloak mechanisms take priority.
    * This intentionally overrides any P10 SASL M broadcast from X3
-   * (which calls set_sasl_mechanisms() and would conflict). */
+   * (stored by sasl_mechanisms_announced(), which then tells clients
+   * nothing: this value does not change). */
   const char *local_mechs = sasl_local_mechanisms();
   if (local_mechs)
     return local_mechs;
@@ -306,10 +307,13 @@ cap_sasl_mechanisms(void)
 }
 
 /** Check if the SASL server is available.
+ * @param[in] sasl_server_leaving Non-zero: a server matching SASL_SERVER
+ *   that is leaving, and already out of the server table, still counts as
+ *   linked (what was so the moment before it left).
  * @return 1 if SASL server is connected and mechanisms available, 0 otherwise.
  */
 static int
-sasl_server_available(void)
+sasl_server_available_as(int sasl_server_leaving)
 {
   const char *sasl_server;
 
@@ -339,7 +343,31 @@ sasl_server_available(void)
     return (UserStats.servers > 0);
 
   /* Otherwise, check if the specific SASL server is connected */
-  return (find_match_server((char *)sasl_server) != NULL);
+  return sasl_server_leaving
+         || (find_match_server((char *)sasl_server) != NULL);
+}
+
+/** Check if the SASL server is available now. */
+static int
+sasl_server_available(void)
+{
+  return sasl_server_available_as(0);
+}
+
+/** Does CAP LS offer the sasl capability (its feature on, and SASL
+ * available: sasl_server_available())?  With cap_sasl_mechanisms(), what
+ * a client is told of sasl.
+ * @param[in] sasl_server_leaving Non-zero: answer as the moment before a
+ *   server matching SASL_SERVER left (it is already out of the server
+ *   table).
+ * @return Non-zero if sasl is offered.
+ */
+int
+cap_sasl_offered(int sasl_server_leaving)
+{
+  if (!feature_bool(FEAT_CAP_sasl))
+    return 0;
+  return sasl_server_available_as(sasl_server_leaving);
 }
 
 /**

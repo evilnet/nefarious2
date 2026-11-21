@@ -383,7 +383,7 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
   relay_calls++;
 }
 
-void set_sasl_mechanisms(const char *m)
+void sasl_mechanisms_announced(const char *m)
 {
   stored_calls++;
   ircd_strncpy(stored_mechs, m, sizeof(stored_mechs));
@@ -1651,6 +1651,58 @@ static void test_other_network_wide_forms_are_only_relayed(void **state)
   assert_int_equal(relay_calls, 2);
 }
 
+/* The list is the trailing parameter, and goes into every client's CAP LS
+ * value: one with a space or a control character is relayed but not
+ * stored, and logged once (a warning), not at every re-send. */
+static void test_mech_list_with_space_is_only_relayed(void **state)
+{
+  struct Client *svs = services_link();
+  (void)state;
+
+  deliver(ms_sasl, svs, svs, "* * M :PLAIN EXTERNAL");
+  assert_int_equal(stored_calls, 0);
+  assert_int_equal(relay_calls, 1);
+  assert_int_equal(nlogged, 1);
+
+  deliver(ms_sasl, svs, svs, "* * M :PLAIN EXTERNAL");
+  assert_int_equal(stored_calls, 0);
+  assert_int_equal(relay_calls, 2);
+  assert_int_equal(nlogged, 1);
+}
+
+static void test_mech_list_with_control_is_only_relayed(void **state)
+{
+  struct Client *svs = services_link();
+  (void)state;
+
+  deliver(ms_sasl, svs, svs, "* * M :PLAIN,\001EXTERNAL");
+  assert_int_equal(stored_calls, 0);
+  assert_int_equal(relay_calls, 1);
+  deliver(ms_sasl, svs, svs, "* * M :PLAIN\177");
+  assert_int_equal(stored_calls, 0);
+  assert_int_equal(relay_calls, 2);
+
+  /* A good list is stored; a bad one after it is logged again. */
+  deliver(ms_sasl, svs, svs, "* * M :PLAIN");
+  assert_int_equal(stored_calls, 1);
+  assert_string_equal(stored_mechs, "PLAIN");
+  nlogged = 0;
+  deliver(ms_sasl, svs, svs, "* * M :PLAIN\tX");
+  assert_int_equal(stored_calls, 1);
+  assert_int_equal(nlogged, 1);
+}
+
+/* The reply is "M" exactly: "MX" is relayed only. */
+static void test_mech_reply_must_be_exactly_m(void **state)
+{
+  struct Client *svs = services_link();
+  (void)state;
+
+  deliver(ms_sasl, svs, svs, "* * MX :PLAIN");
+  assert_int_equal(stored_calls, 0);
+  assert_int_equal(relay_calls, 1);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1696,6 +1748,9 @@ int main(void)
     T(test_mech_list_broadcast_is_stored_and_relayed),
     T(test_empty_mech_list_is_passed_through),
     T(test_other_network_wide_forms_are_only_relayed),
+    T(test_mech_list_with_space_is_only_relayed),
+    T(test_mech_list_with_control_is_only_relayed),
+    T(test_mech_reply_must_be_exactly_m),
 #undef T
   };
 

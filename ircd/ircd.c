@@ -207,50 +207,8 @@ int server_boot_complete = 0;
 /** Counter for generating unique message IDs. */
 unsigned long MsgIdCounter = 0;
 
-/** SASL mechanism list received from services. Empty means use default. */
-char SaslMechanisms[SASL_MECHS_LEN] = "";
-
-/** Set the SASL mechanism list (called when services announces mechanisms).
- * Sends CAP NEW :sasl when SASL becomes available, CAP DEL :sasl when removed.
- * @param[in] mechs Comma-separated list of mechanism names.
- */
-void set_sasl_mechanisms(const char *mechs)
-{
-  int was_available = (SaslMechanisms[0] != '\0');
-  char was[SASL_MECHS_LEN];
-
-  ircd_strncpy(was, SaslMechanisms, sizeof(was));
-  if (mechs && *mechs) {
-    ircd_strncpy(SaslMechanisms, mechs, SASL_MECHS_LEN - 1);
-    SaslMechanisms[SASL_MECHS_LEN - 1] = '\0';
-
-    /* Send CAP NEW if SASL just became available */
-    if (!was_available)
-      send_cap_notify("sasl", 1, SaslMechanisms);
-    /* ... and when its list changed, if it is the list the capability
-     * advertises (the local Keycloak tier's takes priority): CAP NEW
-     * "can also update the value of an existing capability". */
-    else if (strcmp(was, SaslMechanisms) != 0) {
-      const char *adv = cap_sasl_mechanisms();
-      if (adv && strcmp(adv, SaslMechanisms) == 0)
-        send_cap_notify("sasl", 1, SaslMechanisms);
-    }
-  } else {
-    /* Send CAP DEL if SASL was available and is now removed */
-    if (was_available)
-      send_cap_notify("sasl", 0, NULL);
-
-    SaslMechanisms[0] = '\0';
-  }
-}
-
-/** Get the SASL mechanism list for CAP LS.
- * @return Mechanism list, or NULL if none set.
- */
-const char* get_sasl_mechanisms(void)
-{
-  return SaslMechanisms[0] ? SaslMechanisms : NULL;
-}
+/* The stored SASL mechanism list (SaslMechanisms, set_sasl_mechanisms(),
+ * get_sasl_mechanisms()) lives in sasl_mechs.c. */
 
 /** VAPID public key received from services. Empty means webpush unavailable. */
 char VapidPublicKey[VAPID_KEY_LEN] = "";

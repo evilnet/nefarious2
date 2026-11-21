@@ -530,51 +530,12 @@ void free_client(struct Client* cptr)
     cli_saslagentref(cptr) = 0;
   }
 
-  /* If a server is disconnecting and it matches the SASL server pattern,
-   * clear the services-provided SASL mechanism list.
-   * However, don't send CAP DEL if IAUTH is also providing SASL -
-   * clients can still authenticate via IAUTH even without services.
-   * WEBPUSH/VAPID is NOT cleared here - it is managed locally by Nefarious
-   * (keypair generated and persisted in webpush LMDB store), not by services.
-   */
-  if (IsServer(cptr)) {
-    const char *sasl_server = feature_str(FEAT_SASL_SERVER);
-    int is_services = (!strcmp(sasl_server, "*") || match(sasl_server, cli_name(cptr)) == 0);
-
-    if (is_services) {
-      /* Check if SASL was available (either dynamic or default mechanisms) */
-      const char *default_mechs = feature_str(FEAT_SASL_DEFAULT_MECHANISMS);
-      int had_dynamic = (get_sasl_mechanisms() != NULL);
-      int had_default = (default_mechs && *default_mechs);
-
-      if (had_dynamic || had_default) {
-        if (auth_iauth_handles_sasl()) {
-          /* IAUTH still provides SASL - clear the services mechanism list
-           * and fall back to IAUTH's advertised mechanisms for CAP LS. */
-          const char *iauth_mechs = auth_iauth_sasl_mechs();
-          log_write(LS_SYSTEM, L_INFO, 0,
-                    "Services disconnect: falling back to IAUTH SASL%s%s (%C)",
-                    iauth_mechs ? ", mechanisms: " : "",
-                    iauth_mechs ? iauth_mechs : "", cptr);
-          if (had_dynamic)
-            set_sasl_mechanisms(NULL);  /* Triggers CAP DEL */
-          else
-            send_cap_notify("sasl", 0, NULL);  /* CAP DEL for default-only */
-          if (iauth_mechs)
-            set_sasl_mechanisms(iauth_mechs);  /* Triggers CAP NEW :sasl=PLAIN */
-          else
-            send_cap_notify("sasl", 1, NULL);  /* Re-advertise without mechanism list */
-        } else {
-          log_write(LS_SYSTEM, L_INFO, 0,
-                    "Services disconnect: clearing SASL (%C)", cptr);
-          if (had_dynamic)
-            set_sasl_mechanisms(NULL);  /* Triggers CAP DEL */
-          else
-            send_cap_notify("sasl", 0, NULL);  /* CAP DEL for default-only */
-        }
-      }
-    }
-  }
+  /* A server leaving can take the stored SASL mechanism list with it
+   * (sasl_mechs.c).  WEBPUSH/VAPID is NOT cleared here - it is managed
+   * locally by Nefarious (keypair generated and persisted in the webpush
+   * store), not by services. */
+  if (IsServer(cptr))
+    sasl_mechanisms_server_gone(cptr);
 
   if (cli_from(cptr) == cptr) { /* in other words, we're local */
     /* F-DS1 backstop: never pool a LOCAL client that is still registered

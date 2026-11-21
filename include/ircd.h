@@ -68,6 +68,10 @@ extern char           SaslMechanisms[SASL_MECHS_LEN];
 extern void set_sasl_mechanisms(const char *mechs);
 /** Get the SASL mechanism list (for CAP LS value) */
 extern const char* get_sasl_mechanisms(void);
+/** Store the list services announced ("SASL * * M :<list>") */
+extern void sasl_mechanisms_announced(const char *mechs);
+/** A server left: the stored list may go with it (free_client()) */
+extern void sasl_mechanisms_server_gone(struct Client *cptr);
 
 /** VAPID public key received from services (for webpush ISUPPORT) */
 #define VAPID_KEY_LEN 128
