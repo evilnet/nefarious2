@@ -6,19 +6,44 @@
 #include "kc/kc_keycloak.h"
 #include "kc/kc_error_classify.h"
 
-static void check(const char *body, int expect) {
-    json_t *j = body ? json_loads(body, 0, NULL) : NULL;
-    assert_int_equal(kc_classify_grant_error(j), expect);
-    if (j) json_decref(j);
+static void check(long status, const char *body, int expect) {
+    json_t *j = json_loads(body, 0, NULL);
+    assert_non_null(j);
+    assert_int_equal(kc_classify_grant_error(status, j), expect);
+    json_decref(j);
 }
 
+/* A body that is not JSON at all (an HTML error page, an empty body):
+ * the HTTP layer hands the classifier no json. */
+static void check_null_json(long status, int expect) {
+    assert_int_equal(kc_classify_grant_error(status, NULL), expect);
+}
+
+/* A password grant's refusal, as Keycloak's token endpoint answers it:
+ * {"error": ..., "error_description": ...}.  The bodies are the ones
+ * Keycloak 26 sends (wrong password, disabled account, pending required
+ * action, a wrong client secret were observed on the test bed). */
 static void test_classify(void **state) {
-    check("{\"error\":\"invalid_grant\",\"error_description\":\"Account is not fully set up\"}", KC_UNVERIFIED);
-    check("{\"error\":\"invalid_grant\",\"error_description\":\"Invalid user credentials\"}", KC_FORBIDDEN);
-    check("{\"error\":\"invalid_grant\"}", KC_FORBIDDEN);      /* no description */
-    check("{\"error_description\":\"ACCOUNT IS NOT FULLY SET UP\"}", KC_UNVERIFIED); /* case-insensitive */
-    check(NULL, KC_FORBIDDEN);
-    check("[1,2]", KC_FORBIDDEN);                              /* non-object */
+    (void)state;
+    check(401, "{\"error\":\"invalid_grant\",\"error_description\":\"Invalid user credentials\"}", KC_FORBIDDEN);
+    check(400, "{\"error\":\"invalid_grant\",\"error_description\":\"Account disabled\"}", KC_DISABLED);
+    check(400, "{\"error\":\"invalid_grant\",\"error_description\":\"Account is not fully set up\"}", KC_UNVERIFIED);
+    check(401, "{\"error\":\"invalid_client\",\"error_description\":\"Invalid client or Invalid client credentials\"}", KC_CLIENT_REFUSED);
+    check(400, "{\"error\":\"unauthorized_client\",\"error_description\":\"Client not allowed for direct access grants\"}", KC_CLIENT_REFUSED);
+    check(401, "{\"error\":\"unauthorized_client\",\"error_description\":\"Invalid client or Invalid client credentials\"}", KC_CLIENT_REFUSED);  /* wrong client secret, Keycloak 26.4 */
+    check(400, "{\"error\":\"invalid_grant\"}", KC_FORBIDDEN);            /* no description */
+    check(400, "{\"error\":\"invalid_grant\",\"error_description\":42}", KC_FORBIDDEN);
+    check(401, "{\"message\":\"nope\"}", KC_ERROR);                      /* not a Keycloak error object */
+    check_null_json(400, KC_ERROR);                                      /* HTML or empty body */
+
+    /* the descriptions are matched case-insensitively */
+    check(400, "{\"error\":\"invalid_grant\",\"error_description\":\"ACCOUNT IS NOT FULLY SET UP\"}", KC_UNVERIFIED);
+    check(400, "{\"error\":\"invalid_grant\",\"error_description\":\"Account DISABLED\"}", KC_DISABLED);
+    /* a description with no "error" is not a Keycloak error object */
+    check(400, "{\"error_description\":\"ACCOUNT IS NOT FULLY SET UP\"}", KC_ERROR);
+    check(400, "[1,2]", KC_ERROR);                                     /* non-object */
+    /* an error object under a status that is no refusal of the credentials */
+    check(503, "{\"error\":\"temporarily_unavailable\"}", KC_ERROR);
 }
 
 static void create(long status, const char *body, int expect) {

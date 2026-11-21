@@ -33,7 +33,10 @@ enum kc_error {
     KC_BAD_USERNAME     = -13,  /* create: Keycloak refused the username (HTTP 400) */
     KC_BAD_EMAIL        = -14,  /* create: Keycloak refused the email (HTTP 400) */
     KC_BAD_PASSWORD     = -15,  /* create: Keycloak refused the credential (HTTP 400) */
-    KC_REJECTED         = -16   /* create: refused (HTTP 400), for no reason above */
+    KC_REJECTED         = -16,  /* create: refused (HTTP 400), for no reason above */
+    KC_DISABLED         = -17,  /* password grant: the account is disabled */
+    KC_CLIENT_REFUSED   = -18   /* password grant: Keycloak refused the caller's own client
+                                 * (bad client secret, or the client may not use the grant) */
 };
 
 /* Keycloak configuration */
@@ -131,6 +134,12 @@ struct kc_group {
  * Callback types
  */
 typedef void (*kc_token_cb)(int result, const struct kc_access_token *token, void *data);
+/* A password grant's answer.  On KC_SUCCESS, token is the user's token
+ * (borrowed, valid during the call); NULL on any other result.  reason is
+ * Keycloak's error_description exactly as sent, or NULL when the answer
+ * had none (always NULL on KC_SUCCESS); borrowed, valid during the call. */
+typedef void (*kc_grant_cb)(int result, const struct kc_access_token *token,
+                            const char *reason, void *data);
 typedef void (*kc_user_cb)(int result, const struct kc_user *user, void *data);
 typedef void (*kc_users_cb)(int result, const struct kc_user *users, int count, void *data);
 typedef void (*kc_result_cb)(int result, void *data);
@@ -240,9 +249,16 @@ int kc_user_update(const char *id, json_t *repr, kc_result_cb cb, void *data);
 int kc_user_set_password(const char *id, const char *password,
                          kc_result_cb cb, void *data);
 
-/* Verify password via resource owner password grant */
+/* Verify password via resource owner password grant.  Returns 0 when the
+ * callback will fire exactly once (possibly before this returns), -1 when
+ * it never will.  The result: KC_SUCCESS; on a 400/401 refusal what
+ * kc_classify_grant_error() makes of it (KC_FORBIDDEN wrong credentials,
+ * KC_DISABLED, KC_UNVERIFIED account not fully set up, KC_CLIENT_REFUSED,
+ * KC_ERROR for a body that is no Keycloak error object);
+ * KC_INVALID_RESPONSE for a 200 without a usable token; KC_ERROR for no
+ * answer or any other status. */
 int kc_user_verify_password(const char *username, const char *password,
-                            kc_token_cb cb, void *data);
+                            kc_grant_cb cb, void *data);
 
 /* Trigger Keycloak's built-in "verify email" flow for user id (PUT
  * .../send-verify-email; no body). */

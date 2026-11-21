@@ -555,6 +555,7 @@ struct kc_op_ctx {
         kc_users_cb users;
         kc_result_cb result;
         kc_token_cb token;
+        kc_grant_cb grant;
         kc_groups_cb groups;
         kc_introspect_cb introspect;
         kc_create_cb create;
@@ -802,26 +803,34 @@ static void op_response_handler(struct kc_http_response *resp, void *data)
 
     case OP_VERIFY_PASSWORD: {
         if (!resp || resp->status_code == 0) {
-            ctx->cb.token(KC_ERROR, NULL, ctx->cb_data);
+            ctx->cb.grant(KC_ERROR, NULL, NULL, ctx->cb_data);
             break;
         }
         if (resp->status_code == 200 && resp->json) {
             struct kc_access_token *tok = parse_access_token(resp->json);
             if (tok) {
-                ctx->cb.token(KC_SUCCESS, tok, ctx->cb_data);
+                ctx->cb.grant(KC_SUCCESS, tok, NULL, ctx->cb_data);
                 kc_access_token_free(tok);
             } else {
-                ctx->cb.token(KC_INVALID_RESPONSE, NULL, ctx->cb_data);
+                ctx->cb.grant(KC_INVALID_RESPONSE, NULL, NULL, ctx->cb_data);
             }
         } else if (resp->status_code == 401 || resp->status_code == 400) {
             /* resp->json is populated for any status code whenever the body
              * parses as JSON (see kc_http.c's completion handler — parsing
              * isn't gated on 2xx), so no local re-parse is needed here.
-             * Distinguish "bad credentials" from "account not fully set up"
-             * (pending a required action) via the error_description body. */
-            ctx->cb.token(kc_classify_grant_error(resp->json), NULL, ctx->cb_data);
+             * The body tells a wrong password, a disabled account, one not
+             * fully set up (a pending required action) and a refusal of our
+             * own client apart (kc_classify_grant_error()); Keycloak's
+             * error_description goes up as the reason.  It lives in
+             * resp->json, which outlives the call. */
+            json_t *desc = json_is_object(resp->json)
+                ? json_object_get(resp->json, "error_description") : NULL;
+            const char *reason = json_is_string(desc) ? json_string_value(desc) : NULL;
+
+            ctx->cb.grant(kc_classify_grant_error(resp->status_code, resp->json),
+                          NULL, reason, ctx->cb_data);
         } else {
-            ctx->cb.token(KC_ERROR, NULL, ctx->cb_data);
+            ctx->cb.grant(KC_ERROR, NULL, NULL, ctx->cb_data);
         }
         break;
     }
@@ -931,7 +940,7 @@ static void op_token_ready(int result, const struct kc_access_token *token, void
             ctx->cb.users(KC_TOKEN_ERROR, NULL, 0, ctx->cb_data);
             break;
         case OP_VERIFY_PASSWORD:
-            ctx->cb.token(KC_TOKEN_ERROR, NULL, ctx->cb_data);
+            ctx->cb.grant(KC_TOKEN_ERROR, NULL, NULL, ctx->cb_data);
             break;
         case OP_GET_GROUPS:
             ctx->cb.groups(KC_TOKEN_ERROR, NULL, 0, ctx->cb_data);
@@ -971,7 +980,7 @@ static void op_token_ready(int result, const struct kc_access_token *token, void
             ctx->cb.users(KC_ERROR, NULL, 0, ctx->cb_data);
             break;
         case OP_VERIFY_PASSWORD:
-            ctx->cb.token(KC_ERROR, NULL, ctx->cb_data);
+            ctx->cb.grant(KC_ERROR, NULL, NULL, ctx->cb_data);
             break;
         case OP_GET_GROUPS:
             ctx->cb.groups(KC_ERROR, NULL, 0, ctx->cb_data);
@@ -1361,7 +1370,7 @@ int kc_user_send_verify_email(const char *id, kc_result_cb cb, void *data)
 }
 
 int kc_user_verify_password(const char *username, const char *password,
-                            kc_token_cb cb, void *data)
+                            kc_grant_cb cb, void *data)
 {
     if (!username || !password || !cb)
         return -1;
@@ -1404,7 +1413,7 @@ int kc_user_verify_password(const char *username, const char *password,
     }
 
     ctx->op = OP_VERIFY_PASSWORD;
-    ctx->cb.token = cb;
+    ctx->cb.grant = cb;
     ctx->cb_data = data;
 
     struct kc_http_request req;

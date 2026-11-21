@@ -19,11 +19,19 @@
 
 #include <jansson.h>
 
-/* Classify a 400/401 password-grant error body. Returns KC_UNVERIFIED when
- * error_description matches Keycloak's "Account is not fully set up"
- * (substring "not fully set up", case-insensitive), else KC_FORBIDDEN.
- * NULL json => KC_FORBIDDEN. */
-int kc_classify_grant_error(json_t *json);
+/* Classify a password grant's refusal by its HTTP status and JSON body
+ * (NULL when the body is not JSON).  First match wins:
+ *   - not a JSON object, or no string "error"      -> KC_ERROR
+ *     (not a Keycloak error object: a proxy's page, an empty body)
+ *   - "error" is invalid_client / unauthorized_client -> KC_CLIENT_REFUSED
+ *     (Keycloak refused the caller's own client)
+ *   - error_description contains "disabled"        -> KC_DISABLED
+ *   - error_description contains "not fully set up" -> KC_UNVERIFIED
+ *   - anything else with status 400 or 401         -> KC_FORBIDDEN
+ *   - anything else                                -> KC_ERROR
+ * Descriptions are matched case-insensitively; a description that is not
+ * a string is ignored. */
+int kc_classify_grant_error(long status, json_t *json);
 
 /* Classify a user create's refusal (the admin API's POST .../users) by its
  * HTTP status and JSON body.  409 (a user exists): KC_CONFLICT_EMAIL when

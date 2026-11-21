@@ -1651,16 +1651,22 @@ static void sasl_plain_answer(int result, const struct kc_access_token *token, v
     } else {
       /* Distinguish auth failures from connectivity errors.
        * KC_FORBIDDEN = wrong password (HTTP 401/400) — Keycloak is working fine.
+       * KC_DISABLED = the account is disabled — Keycloak is working fine.
        * KC_NOT_FOUND = user doesn't exist — Keycloak is working fine.
        * Everything else (KC_ERROR, KC_UNAVAILABLE, KC_TIMEOUT, KC_TOKEN_ERROR,
-       * KC_INVALID_RESPONSE) indicates a connectivity or service problem.
+       * KC_INVALID_RESPONSE) indicates a connectivity or service problem --
+       * and so do KC_CLIENT_REFUSED (Keycloak refused the ircd's own client:
+       * its secret, or the password grant not enabled for it) and a 400/401
+       * whose body is no Keycloak error object (KC_ERROR): no answer about
+       * the user's credentials.
        */
-      if (result != KC_FORBIDDEN && result != KC_NOT_FOUND) {
+      if (result != KC_FORBIDDEN && result != KC_DISABLED && result != KC_NOT_FOUND) {
         sasl_mark_unhealthy(result);
       }
 
       /* Update auth caches — only for actual auth failures, not connectivity errors */
-      if ((result == KC_FORBIDDEN || result == KC_NOT_FOUND) && session->cred_hash_valid) {
+      if ((result == KC_FORBIDDEN || result == KC_DISABLED || result == KC_NOT_FOUND)
+          && session->cred_hash_valid) {
         negcache_insert(session->authcid, session->cred_hash);
         poscache_remove(session->cred_hash);
       }
@@ -1672,7 +1678,8 @@ static void sasl_plain_answer(int result, const struct kc_access_token *token, v
     /* Send failure and clean up.  Counted when the credentials failed
      * (or policy refused the account), not when Keycloak could not be
      * asked (SASL_MAX_FAILURES). */
-    if (result == KC_FORBIDDEN || result == KC_NOT_FOUND || result == KC_UNVERIFIED)
+    if (result == KC_FORBIDDEN || result == KC_DISABLED || result == KC_NOT_FOUND
+        || result == KC_UNVERIFIED)
       sasl_failure_count(acptr);
     send_reply(acptr, ERR_SASLFAIL, "");
     session->state = SASL_STATE_FAILED;
@@ -1686,9 +1693,12 @@ static void sasl_plain_answer(int result, const struct kc_access_token *token, v
 
 /** sasl_plain_answer()'s answer, set apart from a later line it may come inside
  * (sasl_kc_answer_begin()). */
-static void sasl_plain_cb(int result, const struct kc_access_token *token, void *data)
+static void sasl_plain_cb(int result, const struct kc_access_token *token,
+                          const char *reason, void *data)
 {
   struct sasl_kc_answer st;
+
+  (void)reason;                    /* Keycloak's reason text: not used yet */
 
   sasl_kc_answer_begin(data, &st);
   sasl_plain_answer(result, token, data);

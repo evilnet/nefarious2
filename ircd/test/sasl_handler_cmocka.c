@@ -656,7 +656,14 @@ void sendto_opmask_butone_ratelimited(struct Client *one, unsigned int mask,
   *rate = CurrentTime;
   fx.oper_notices++;
 }
-void send_cap_notify(const char *capname, int available, const char *value) {}
+/** How many times sasl was withdrawn (CAP DEL sasl): Keycloak marked
+ * unreachable while it was reachable. */
+static int sasl_cap_dels;
+void send_cap_notify(const char *capname, int available, const char *value)
+{
+  if (!strcmp(capname, "sasl") && !available)
+    sasl_cap_dels++;
+}
 void cap_set_value(enum Capab cap, const char *value) {}
 int need_more_params(struct Client *cptr, const char *cmd) { touch(cptr); return 0; }
 int exit_client(struct Client *cptr, struct Client *victim,
@@ -1022,9 +1029,10 @@ static void pend_deliver_at(int i, int res)
   info.sub = intro_sub;
 
   switch (p.kind) {
-  case P_TOKEN:
-    ((kc_token_cb)p.cb)(ok ? KC_SUCCESS : res == KC_ERROR ? KC_FORBIDDEN : res,
-                        ok ? &tok : NULL, p.data);
+  case P_TOKEN:                    /* a refusal carries Keycloak's reason */
+    ((kc_grant_cb)p.cb)(ok ? KC_SUCCESS : res == KC_ERROR ? KC_FORBIDDEN : res,
+                        ok ? &tok : NULL, ok ? NULL : "Invalid user credentials",
+                        p.data);
     break;
   case P_USER:
     ((kc_user_cb)p.cb)(ok ? KC_SUCCESS : res == KC_ERROR ? KC_NOT_FOUND : res,
@@ -1094,7 +1102,7 @@ static int kc_request(enum pend_kind kind, void *cb, void *data)
 }
 
 int kc_user_verify_password(const char *username, const char *password,
-                            kc_token_cb cb, void *data)
+                            kc_grant_cb cb, void *data)
 {
   ircd_strncpy(next_user, username, sizeof(next_user));
   return kc_request(P_TOKEN, (void *)cb, data);
@@ -6117,6 +6125,77 @@ static void max_failures_mark_is_final(void **state)
   assert_non_null(strstr(f->saslfail, "too many failed attempts"));
 }
 
+/** A disabled account (KC_DISABLED) is a refusal of the credentials, as a
+ * wrong password is: 904, the credentials go into the negative cache (the
+ * same pair again is answered without asking Keycloak), the failure is
+ * counted, and Keycloak stays usable. */
+static void test_plain_disabled_account_is_a_credential_failure(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  int requests;
+
+  sasl_init_once();
+  assert_true(sasl_local_available());
+  sasl_cap_dels = 0;
+  c = new_client(202, "da", 0, REG_KEEPS);
+  f = fake_of(c);
+  plain_pending(c, "dana", "disabledpw");
+  pend_deliver_kind(P_TOKEN, KC_DISABLED);
+  run_event_loop();
+  assert_true(has_numeric(f, ERR_SASLFAIL));
+  assert_false(has_numeric(f, RPL_SASLSUCCESS));
+  assert_null(cli_saslsession(c));
+  assert_int_equal(cli_sasl_failures(c), 1);
+  assert_true(sasl_local_available());          /* not marked unhealthy */
+  assert_int_equal(sasl_cap_dels, 0);
+
+  c = new_client(203, "db", 0, REG_KEEPS);       /* the same pair again */
+  f = fake_of(c);
+  requests = kc_requests;
+  plain_pending(c, "dana", "disabledpw");
+  assert_int_equal(kc_requests, requests);       /* the negative cache */
+  assert_true(has_numeric(f, ERR_SASLFAIL));
+  assert_null(cli_saslsession(c));
+}
+
+/** Keycloak refused the ircd's own client (KC_CLIENT_REFUSED: a wrong
+ * client secret, or a client the password grant is not enabled for): no
+ * fault of the user's.  904, Keycloak is marked unusable (sasl withdrawn
+ * once), nothing goes into the negative cache, and the failure is not
+ * counted. */
+static void test_plain_client_refused_marks_keycloak_unusable(void **state)
+{
+  struct Client *c;
+  struct fake *f;
+  int requests;
+
+  sasl_init_once();
+  assert_true(sasl_local_available());
+  sasl_cap_dels = 0;
+  c = new_client(204, "cr", 0, REG_KEEPS);
+  f = fake_of(c);
+  plain_pending(c, "rhea", "refusedpw");
+  pend_deliver_kind(P_TOKEN, KC_CLIENT_REFUSED);
+  run_event_loop();
+  assert_true(has_numeric(f, ERR_SASLFAIL));
+  assert_false(has_numeric(f, RPL_SASLSUCCESS));
+  assert_null(cli_saslsession(c));
+  assert_int_equal(cli_sasl_failures(c), 0);     /* not counted */
+  assert_false(sasl_local_available());          /* marked unhealthy ... */
+  assert_int_equal(sasl_cap_dels, 1);            /* ... once */
+  kc_healthy_again();
+
+  c = new_client(205, "cs", 0, REG_KEEPS);       /* the same pair again */
+  f = fake_of(c);
+  requests = kc_requests;
+  plain_pending(c, "rhea", "refusedpw");
+  assert_int_equal(kc_requests, requests + 1);   /* asked: no negative cache */
+  pend_deliver_kind(P_TOKEN, KC_SUCCESS);
+  run_event_loop();
+  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+}
+
 /** Keycloak could not be asked: the client gets an error challenge, and
  * nothing it does next -- silence until the SASL timeout, an abort, the
  * acknowledgement -- counts: the server's own unavailability.  A real
@@ -6313,6 +6392,8 @@ int main(void)
     cmocka_unit_test_setup(max_failures_refusal_known_and_timeouts, setup),
     cmocka_unit_test_setup(max_failures_mark_is_final, setup),
     cmocka_unit_test_setup(max_failures_unavailable_never_counts, setup),
+    cmocka_unit_test_setup(test_plain_disabled_account_is_a_credential_failure, setup),
+    cmocka_unit_test_setup(test_plain_client_refused_marks_keycloak_unusable, setup),
     cmocka_unit_test_setup(toolong_ends_local_exchange, setup),
     cmocka_unit_test_setup(toolong_local_registration_exits, setup),
     cmocka_unit_test_setup(toolong_local_registration_keeps, setup),

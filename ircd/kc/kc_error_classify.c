@@ -14,19 +14,29 @@ static int contains_ci(const char *haystack, const char *needle) {
     return 0;
 }
 
-int kc_classify_grant_error(json_t *json)
+int kc_classify_grant_error(long status, json_t *json)
 {
-    json_t *desc;
-    const char *s;
+    json_t *err, *desc;
+    const char *e, *s = NULL;
+
     if (!json || !json_is_object(json))
-        return KC_FORBIDDEN;
+        return KC_ERROR;
+    err = json_object_get(json, "error");
+    if (!json_is_string(err))
+        return KC_ERROR;
+    e = json_string_value(err);
+    if (!strcmp(e, "invalid_client") || !strcmp(e, "unauthorized_client"))
+        return KC_CLIENT_REFUSED;
     desc = json_object_get(json, "error_description");
-    if (!desc || !json_is_string(desc))
-        return KC_FORBIDDEN;
-    s = json_string_value(desc);
+    if (json_is_string(desc))
+        s = json_string_value(desc);
+    if (s && contains_ci(s, "disabled"))
+        return KC_DISABLED;
     if (s && contains_ci(s, "not fully set up"))
         return KC_UNVERIFIED;
-    return KC_FORBIDDEN;
+    if (status == 400 || status == 401)
+        return KC_FORBIDDEN;
+    return KC_ERROR;
 }
 
 /* What one error object of a create's refusal names: 3 username, 2 email,

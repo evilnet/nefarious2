@@ -122,9 +122,25 @@ static void fake_reset(void)
 
 /* ---- Callbacks ---- */
 
-static void grant_cb(int result, const struct kc_access_token *token, void *data)
+/* The password grant's answer: the result, a copy of the reason ("" for
+ * NULL; the pointer is only valid during the call), and how many answers
+ * came. */
+static int last_result;
+static char last_reason[256];
+static int grant_calls;
+
+static void grant_cb(int result, const struct kc_access_token *token,
+                     const char *reason, void *data)
 {
-    (void)result; (void)token; (void)data;
+    (void)data;
+    grant_calls++;
+    last_result = result;
+    assert_true(!reason || strlen(reason) < sizeof(last_reason));
+    strcpy(last_reason, reason ? reason : "");
+    if (result == KC_SUCCESS)
+        assert_non_null(token);
+    else
+        assert_null(token);
 }
 
 static void user_cb(int result, const struct kc_user *user, void *data)
@@ -138,6 +154,9 @@ static int setup(void **state)
 {
     (void)state;
     fake_reset();
+    last_result = 999;
+    strcpy(last_reason, "(no answer)");
+    grant_calls = 0;
     return 0;
 }
 
@@ -182,12 +201,123 @@ static void test_timeout_setting_reaches_every_request(void **state)
     assert_int_equal(fake_reqs[2].timeout_ms, 2500);      /* the admin request itself */
 }
 
+/* ---- The password grant's outcomes ---- */
+
+/* init, then a password grant for u/p: request 0. */
+static void start_grant(void)
+{
+    struct kc_config cfg = { "http://kc", "r", "cid", "sec", 0 };
+    assert_int_equal(kc_keycloak_init(&cfg), 0);
+    assert_int_equal(kc_user_verify_password("u", "p", grant_cb, NULL), 0);
+    assert_int_equal(fake_req_count, 1);
+    assert_int_equal(grant_calls, 0);
+}
+
+static void test_grant_disabled_carries_reason(void **state)
+{
+    (void)state;
+    start_grant();
+    fake_answer(0, 400, "{\"error\":\"invalid_grant\",\"error_description\":\"Account disabled\"}");
+    assert_int_equal(grant_calls, 1);
+    assert_int_equal(last_result, KC_DISABLED);
+    assert_string_equal(last_reason, "Account disabled");
+}
+
+static void test_grant_wrong_password_carries_reason(void **state)
+{
+    (void)state;
+    start_grant();
+    fake_answer(0, 401, "{\"error\":\"invalid_grant\",\"error_description\":\"Invalid user credentials\"}");
+    assert_int_equal(grant_calls, 1);
+    assert_int_equal(last_result, KC_FORBIDDEN);
+    assert_string_equal(last_reason, "Invalid user credentials");
+}
+
+static void test_grant_not_set_up_carries_reason(void **state)
+{
+    (void)state;
+    start_grant();
+    fake_answer(0, 400, "{\"error\":\"invalid_grant\",\"error_description\":\"Account is not fully set up\"}");
+    assert_int_equal(grant_calls, 1);
+    assert_int_equal(last_result, KC_UNVERIFIED);
+    assert_string_equal(last_reason, "Account is not fully set up");
+}
+
+static void test_grant_success_has_no_reason(void **state)
+{
+    (void)state;
+    start_grant();
+    fake_answer(0, 200, "{\"access_token\":\"t\",\"expires_in\":300}");
+    assert_int_equal(grant_calls, 1);
+    assert_int_equal(last_result, KC_SUCCESS);
+    assert_string_equal(last_reason, "");
+}
+
+static void test_grant_client_refused(void **state)
+{
+    (void)state;
+    start_grant();
+    fake_answer(0, 401, "{\"error\":\"invalid_client\",\"error_description\":\"Invalid client or Invalid client credentials\"}");
+    assert_int_equal(grant_calls, 1);
+    assert_int_equal(last_result, KC_CLIENT_REFUSED);
+    assert_string_equal(last_reason, "Invalid client or Invalid client credentials");
+}
+
+static void test_grant_no_description_has_no_reason(void **state)
+{
+    (void)state;
+    start_grant();
+    fake_answer(0, 400, "{\"error\":\"invalid_grant\",\"error_description\":42}");
+    assert_int_equal(grant_calls, 1);
+    assert_int_equal(last_result, KC_FORBIDDEN);
+    assert_string_equal(last_reason, "");
+}
+
+static void test_grant_html_400_is_transport_error(void **state)
+{
+    (void)state;
+    start_grant();
+    fake_answer(0, 400, "<html>");
+    assert_int_equal(grant_calls, 1);
+    assert_int_equal(last_result, KC_ERROR);
+    assert_string_equal(last_reason, "");
+}
+
+static void test_grant_502_is_transport_error(void **state)
+{
+    (void)state;
+    start_grant();
+    fake_answer(0, 502, "<html>");
+    assert_int_equal(grant_calls, 1);
+    assert_int_equal(last_result, KC_ERROR);
+    assert_string_equal(last_reason, "");
+}
+
+static void test_grant_no_answer_is_transport_error(void **state)
+{
+    (void)state;
+    start_grant();
+    fake_answer(0, 0, NULL);
+    assert_int_equal(grant_calls, 1);
+    assert_int_equal(last_result, KC_ERROR);
+    assert_string_equal(last_reason, "");
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test_setup_teardown(test_timeout_defaults_to_10s, setup, teardown),
         cmocka_unit_test_setup_teardown(test_timeout_negative_is_default, setup, teardown),
         cmocka_unit_test_setup_teardown(test_timeout_setting_reaches_every_request, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_grant_disabled_carries_reason, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_grant_wrong_password_carries_reason, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_grant_not_set_up_carries_reason, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_grant_success_has_no_reason, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_grant_client_refused, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_grant_no_description_has_no_reason, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_grant_html_400_is_transport_error, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_grant_502_is_transport_error, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_grant_no_answer_is_transport_error, setup, teardown),
     };
 
     return cmocka_run_group_tests_name("kc_keycloak", tests, NULL, NULL);
