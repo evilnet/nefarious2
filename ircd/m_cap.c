@@ -308,13 +308,11 @@ cap_sasl_mechanisms(void)
 
 /** Check if the SASL server is available.
  * @param[in] moment Which moment to answer for (enum sasl_server_moment):
- *   now, or the moment before a server matching SASL_SERVER left or linked.
- * @param[in] server The server linking (SASL_SERVER_LINKING only).
+ *   now, or the moment before a server matching SASL_SERVER left.
  * @return 1 if SASL server is connected and mechanisms available, 0 otherwise.
  */
 static int
-sasl_server_available_as(enum sasl_server_moment moment,
-                         struct Client *server)
+sasl_server_available_as(enum sasl_server_moment moment)
 {
   const char *sasl_server;
 
@@ -340,28 +338,22 @@ sasl_server_available_as(enum sasl_server_moment moment,
   sasl_server = feature_str(FEAT_SASL_SERVER);
 
   /* If set to "*", SASL is broadcast to all servers - check if any exist
-   * (this server itself counts, so a server leaving or linking changes
-   * nothing here) */
+   * (this server itself counts, so a server leaving changes nothing
+   * here) */
   if (!strcmp(sasl_server, "*"))
     return (UserStats.servers > 0);
 
-  /* Otherwise, check if the specific SASL server is connected */
-  switch (moment) {
-  case SASL_SERVER_LEAVING:   /* it was, the moment before it left */
-    return 1;
-  case SASL_SERVER_LINKING:   /* another one, the moment before it linked */
-    return find_match_server_except((char *)sasl_server, server) != NULL;
-  case SASL_SERVER_NOW:
-  default:
-    return find_match_server((char *)sasl_server) != NULL;
-  }
+  /* Otherwise, check if the specific SASL server is connected (or was,
+   * the moment before it left) */
+  return moment == SASL_SERVER_LEAVING
+         || (find_match_server((char *)sasl_server) != NULL);
 }
 
 /** Check if the SASL server is available now. */
 static int
 sasl_server_available(void)
 {
-  return sasl_server_available_as(SASL_SERVER_NOW, NULL);
+  return sasl_server_available_as(SASL_SERVER_NOW);
 }
 
 /** Does CAP LS offer the sasl capability (its feature on, and SASL
@@ -369,17 +361,15 @@ sasl_server_available(void)
  * a client is told of sasl.
  * @param[in] moment SASL_SERVER_NOW, or answer as the moment before a
  *   server matching SASL_SERVER left (SASL_SERVER_LEAVING: it is already
- *   out of the server table) or linked (SASL_SERVER_LINKING: it is already
- *   in it).
- * @param[in] server The server linking (SASL_SERVER_LINKING only).
+ *   out of the server table).
  * @return Non-zero if sasl is offered.
  */
 int
-cap_sasl_offered(enum sasl_server_moment moment, struct Client *server)
+cap_sasl_offered(enum sasl_server_moment moment)
 {
   if (!feature_bool(FEAT_CAP_sasl))
     return 0;
-  return sasl_server_available_as(moment, server);
+  return sasl_server_available_as(moment);
 }
 
 /**

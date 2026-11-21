@@ -657,7 +657,7 @@ void sendto_opmask_butone_ratelimited(struct Client *one, unsigned int mask,
   fx.oper_notices++;
 }
 /* sasl notifications sent straight from the code under test (the health
- * changes tell theirs through sasl_tell_change() only). */
+ * changes tell theirs through sasl_tell_now() only). */
 static int sasl_notifies;
 void send_cap_notify(const char *capname, int available, const char *value)
 {
@@ -665,32 +665,23 @@ void send_cap_notify(const char *capname, int available, const char *value)
     sasl_notifies++;
 }
 /** How many times sasl was withdrawn: Keycloak marked unreachable while it
- * was reachable.  The health change tells through sasl_tell_change(), so a
+ * was reachable.  The health change tells through sasl_tell_now(), so a
  * withdrawal is a tell made while the tier is unavailable. */
 static int sasl_cap_dels;
-/* sasl_mechs.c's snapshot and difference, as the local tier's health
- * changes call them: each snapshot is marked with the tier's availability
- * at that moment (offered = 100 + sasl_local_available()), and each tell
- * records the mark of the snapshot it was handed and the availability
- * then. */
+/* sasl_mechs.c's telling, as the local tier's health changes call it:
+ * each call records the tier's availability at that moment (after the
+ * health flag flipped, it is the new one). */
 #define NTOLD 8
 static int told_tells;
-static int told_before[NTOLD], told_after[NTOLD];
-void sasl_told_snapshot(struct sasl_told *before)
+static int told_after[NTOLD];
+int sasl_tell_now(void)
 {
-  const char *m = sasl_local_mechanisms();
-  before->offered = 100 + sasl_local_available();
-  ircd_strncpy(before->value, m ? m : "", sizeof(before->value));
-}
-void sasl_tell_change(const struct sasl_told *before)
-{
-  if (told_tells < NTOLD) {
-    told_before[told_tells] = before->offered;
+  if (told_tells < NTOLD)
     told_after[told_tells] = sasl_local_available();
-  }
   if (!sasl_local_available())
     sasl_cap_dels++;
   told_tells++;
+  return 0;
 }
 void cap_set_value(enum Capab cap, const char *value) {}
 int need_more_params(struct Client *cptr, const char *cmd) { touch(cptr); return 0; }
@@ -6372,11 +6363,11 @@ static void max_failures_unavailable_never_counts(void **state)
 }
 
 /** The local tier's health changes (sasl_mark_unhealthy(),
- * sasl_mark_healthy()) tell clients the difference in what CAP LS says --
- * sasl_mechs_cmocka's health_* cases, against the real CAP LS, say what
- * that is in each state -- and send nothing of their own: what CAP LS says
- * is taken while the tier still has its old health and told after it
- * flipped, once per change; a call that changes nothing tells nothing. */
+ * sasl_mark_healthy()) tell clients what CAP LS now says, from what they
+ * were last told (sasl_tell_now(); sasl_mechs_cmocka's health_* cases say
+ * what that is in each state), and send nothing of their own: the telling
+ * runs once per change, after the flag flipped (it sees the new health); a
+ * call that changes nothing tells nothing. */
 static void health_change_tells_the_difference(void **state)
 {
   (void)state;
@@ -6390,8 +6381,7 @@ static void health_change_tells_the_difference(void **state)
   assert_false(sasl_local_available());
   assert_int_equal(sasl_notifies, 0);   /* no CAP DEL of its own */
   assert_int_equal(told_tells, 1);
-  assert_int_equal(told_before[0], 100 + 1);   /* taken while healthy */
-  assert_int_equal(told_after[0], 0);           /* told once unhealthy */
+  assert_int_equal(told_after[0], 0);   /* told once unhealthy */
 
   /* Unreachable again: no change, nothing told. */
   sasl_health_check();
@@ -6404,8 +6394,7 @@ static void health_change_tells_the_difference(void **state)
   assert_true(sasl_local_available());
   assert_int_equal(sasl_notifies, 0);   /* no CAP NEW of its own */
   assert_int_equal(told_tells, 2);
-  assert_int_equal(told_before[1], 100 + 0);   /* taken while unhealthy */
-  assert_int_equal(told_after[1], 1);           /* told once healthy */
+  assert_int_equal(told_after[1], 1);   /* told once healthy */
 
   /* Reachable again: no change, nothing told. */
   kc_healthy_again();

@@ -121,8 +121,6 @@ const char *get_sasl_mechanisms(void) { return NULL; }
 int auth_iauth_handles_sasl(void) { return 0; }
 const char *auth_iauth_sasl_mechs(void) { return NULL; }
 struct Client *find_match_server(char *mask) { (void)mask; return NULL; }
-struct Client *find_match_server_except(char *mask, struct Client *except)
-{ (void)mask; (void)except; return NULL; }
 int authtoken_service_count(void) { return 0; }
 const char *get_vapid_pubkey(void) { return vapid_key; }
 

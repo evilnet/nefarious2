@@ -1548,6 +1548,12 @@ int read_configuration_file(void)
   sasl_conf_apply(); /* push pending Webhook{}/Keycloak{} into libkc */
   authtoken_conf_apply(); /* diff Authtoken{} services: TOKEN NEW/DEL */
   auth_conf_apply();      /* spawn (or keep) the last IAuth{} block's program */
+  /* A rehash can change what CAP LS says of sasl (its features; the
+   * Keycloak tier armed for the first time): tell the difference.  The
+   * first read at boot tells nobody; start-up sets what clients start
+   * from (main()). */
+  if (server_boot_complete)
+    sasl_tell_now();
   conf_already_read = 1;
   return 1;
 }

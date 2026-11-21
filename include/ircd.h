@@ -76,16 +76,11 @@ extern void sasl_mechanisms_server_gone(struct Client *cptr);
  * (ms_end_of_burst()) */
 extern void sasl_mechanisms_server_linked(struct Client *sptr);
 
-/** What CAP LS says of sasl: whether it is offered, and its value
- * (cap_sasl_mechanisms(); empty for none). */
-struct sasl_told {
-  int offered;
-  char value[512];
-};
-/** What CAP LS says of sasl now, before a change it depends on */
-extern void sasl_told_snapshot(struct sasl_told *before);
-/** Tell clients what changed in what CAP LS says of sasl since @a before */
-extern void sasl_tell_change(const struct sasl_told *before);
+/** Tell cap-notify clients what changed in what CAP LS says of sasl since
+ * they were last told (1: CAP NEW, -1: CAP DEL, 0: nothing) */
+extern int sasl_tell_now(void);
+/** Remember what CAP LS says of sasl as told, telling nobody (start-up) */
+extern void sasl_told_set_now(void);
 
 /** VAPID public key received from services (for webpush ISUPPORT) */
 #define VAPID_KEY_LEN 128

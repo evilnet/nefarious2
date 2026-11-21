@@ -124,6 +124,9 @@ static struct Client *made[MAXOBJ];
 static int nmade;
 static struct Connection me_con;
 static struct Server me_serv;
+/* sasl_mechanisms_server_linked() calls, and the server of the last. */
+static int nsasl_linked;
+static struct Client *sasl_linked_by;
 
 static struct Client *fake_client(const char *name, int status)
 {
@@ -361,6 +364,8 @@ static int world_setup(void **state)
   ban_invalidations = except_invalidations = 0;
   fake_modes = "";
   feat_excepts = 0;
+  nsasl_linked = 0;
+  sasl_linked_by = NULL;
 
   memset(&me, 0, sizeof(me));
   memset(&me_con, 0, sizeof(me_con));
@@ -1113,10 +1118,11 @@ void sasl_webhook_link_catchup(struct Client *cptr)
 }
 
 /* What the services server linking tells clients (sasl_mechs.c; tested in
- * sasl_mechs_cmocka). */
+ * sasl_mechs_cmocka): here, which server's end of burst asked, how often. */
 void sasl_mechanisms_server_linked(struct Client *sptr)
 {
-  (void)sptr;
+  nsasl_linked++;
+  sasl_linked_by = sptr;
 }
 
 int destruct_channel(struct Channel *chptr)
@@ -1798,6 +1804,9 @@ static void test_end_of_burst_from_a_server(void **state)
   assert_string_equal(sent_to(ac, 0), "AB EA ");
   assert_int_equal(nopnotices, 1);
   assert_int_equal(nviolations, 0);
+  /* what clients are told of sasl: asked once, about the sender */
+  assert_int_equal(nsasl_linked, 1);
+  assert_ptr_equal(sasl_linked_by, ac);
 }
 
 /* "ACAAA EB" was relayed and announced as "Completed net.burst from

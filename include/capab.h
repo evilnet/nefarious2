@@ -176,21 +176,18 @@ extern int cap_lookup(const char **caplist_p, int *neg_p, int *cap_out, unsigned
  * LS advertises, and what RPL_SASLMECHS (908) lists. */
 extern const char *cap_sasl_mechanisms(void);
 
-/* The moment cap_sasl_offered() answers for.  With SASL_SERVER "*" all
- * three answer alike: this server itself counts. */
+/* The moment cap_sasl_offered() answers for.  With SASL_SERVER "*" both
+ * answer alike: this server itself counts. */
 enum sasl_server_moment {
   SASL_SERVER_NOW,      /* the server table as it is */
-  SASL_SERVER_LEAVING,  /* before a server matching SASL_SERVER left: it
-                         * is out of the table, and still counts */
-  SASL_SERVER_LINKING   /* before a server matching SASL_SERVER linked: it
-                         * is in the table, and does not count yet */
+  SASL_SERVER_LEAVING   /* before a server matching SASL_SERVER left: it
+                         * is out of the table, and still counts (the
+                         * clear's IAuth branch) */
 };
 
-/* Whether CAP LS offers the sasl capability, now or at a moment before a
- * server matching SASL_SERVER left or linked (the linking server is
- * \a server; NULL otherwise). */
-extern int cap_sasl_offered(enum sasl_server_moment moment,
-                            struct Client *server);
+/* Whether CAP LS offers the sasl capability, now or the moment before a
+ * server matching SASL_SERVER left. */
+extern int cap_sasl_offered(enum sasl_server_moment moment);
 
 /* IRCv3 cap-notify: send CAP NEW/DEL notifications to clients */
 extern void send_cap_notify(const char *capname, int available, const char *value);

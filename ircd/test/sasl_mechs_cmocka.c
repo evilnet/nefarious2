@@ -15,8 +15,10 @@
  * server that never receives the line (IAuth's list, or none) is told
  * what it was told before.
  *
- * A change in the local tier's health is told the same way: the
- * difference in what CAP LS says before and after (health_* cases).
+ * The ircd remembers what clients were last told (set at the end of
+ * start-up), and after a list change, a health change of the local tier
+ * (health_* cases), any server leaving or any server's end of burst, tells
+ * the difference from what CAP LS now says.
  */
 #include "config.h"
 
@@ -135,18 +137,13 @@ const char *get_vapid_pubkey(void) { return NULL; }
 #define MAXSRV 4
 static struct Client *linked[MAXSRV];
 
-struct Client *find_match_server_except(char *mask, struct Client *except)
+struct Client *find_match_server(char *mask)
 {
   int i;
   for (i = 0; i < MAXSRV; i++)
-    if (linked[i] && linked[i] != except
-        && match(mask, cli_name(linked[i])) == 0)
+    if (linked[i] && match(mask, cli_name(linked[i])) == 0)
       return linked[i];
   return NULL;
-}
-struct Client *find_match_server(char *mask)
-{
-  return find_match_server_except(mask, NULL);
 }
 
 int auth_cap_start(struct AuthRequest *auth) { (void)auth; return 0; }
@@ -165,9 +162,15 @@ const char *batch_current_id(struct Client *cli) { (void)cli; return ""; }
 int send_reply(struct Client *to, int reply, ...)
 { (void)to; (void)reply; return 0; }
 void debug(int level, const char *form, ...) { (void)level; (void)form; }
+/* "SASL server linked ..., enabling SASL ..." lines logged. */
+static int nlog_linked;
 void log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
                const char *fmt, ...)
-{ (void)subsys; (void)severity; (void)flags; (void)fmt; }
+{
+  (void)subsys; (void)severity; (void)flags;
+  if (strstr(fmt, "SASL server linked"))
+    nlog_linked++;
+}
 
 /* ====================================================================
  * Fake clients and servers
@@ -189,13 +192,30 @@ static struct Client *fake(const char *name, unsigned int status)
   return c;
 }
 
+/* The end of start-up has run (sasl_told_set_now()). */
+static int started;
+
+/** The end of start-up, before any client: what CAP LS says is what
+ * clients start from.  A case sets its facts before its first client, so
+ * that client's arrival stands for it. */
+static void start_up(void)
+{
+  if (!started) {
+    started = 1;
+    sasl_told_set_now();
+  }
+}
+
 /** A registered local user that did CAP LS 302 (cap-notify implied);
  * its CAP LS reply stays in the sent record. */
 static struct Client *user302_ls(const char *nick)
 {
-  struct Client *c = fake(nick, STAT_USER);
+  struct Client *c;
   char sub[] = "LS", ver[] = "302";
   char *parv[4] = { "CAP", sub, ver, NULL };
+
+  start_up();
+  c = fake(nick, STAT_USER);
 
   cli_connect(c) = calloc(1, sizeof(struct Connection));
   assert_non_null(cli_connect(c));
@@ -217,11 +237,15 @@ static struct Client *user302(const char *nick)
   return c;
 }
 
-/** A linked server. */
-static struct Client *server(const char *name)
+/** A linked server behind @a uplink (&me: linked to this server). */
+static struct Client *server_via(const char *name, struct Client *uplink)
 {
   struct Client *c = fake(name, STAT_SERVER);
   int i;
+
+  cli_serv(c) = calloc(1, sizeof(struct Server));
+  assert_non_null(cli_serv(c));
+  cli_serv(c)->up = uplink;
 
   for (i = 0; i < MAXSRV && linked[i]; i++)
     ;
@@ -229,6 +253,12 @@ static struct Client *server(const char *name)
   linked[i] = c;
   UserStats.servers++;
   return c;
+}
+
+/** A server linked to this one. */
+static struct Client *server(const char *name)
+{
+  return server_via(name, &me);
 }
 
 /** @a srv leaves: out of the table, then what free_client() does. */
@@ -288,6 +318,8 @@ static int setup(void **state)
   iauth_sasl = 0;
   iauth_mechs = NULL;
   cap_sasl_off = 0;
+  nlog_linked = 0;
+  started = 0;
   memset(linked, 0, sizeof(linked));
   GlobalClientList = NULL;
   UserStats.servers = 1;               /* me */
@@ -305,6 +337,7 @@ static int teardown(void **state)
   while (nmade > 0) {
     struct Client *c = made[--nmade];
     free(cli_connect(c));
+    free(cli_serv(c));
     free(c);
   }
   GlobalClientList = NULL;
@@ -694,18 +727,14 @@ static void iauth_replacing_announced_list_is_a_change(void **state)
 #define L_MECHS "PLAIN,OAUTHBEARER"     /* the tier's value */
 
 /** The tier's health changes as sasl_mark_unhealthy() / sasl_mark_healthy()
- * change it: what CAP LS says is taken before the flag flips and the
- * difference told after (sasl_handler_cmocka's
- * health_change_tells_the_difference pins that the real functions do
- * these steps, in this order, once per change).
+ * change it: the flag flips, then clients are told what CAP LS now says
+ * (sasl_handler_cmocka's health_change_tells_the_difference pins that the
+ * real functions tell once per change, after the flip).
  * @param[in] mechs The tier's list after: NULL = unhealthy. */
 static void tier_health(const char *mechs)
 {
-  struct sasl_told before;
-
-  sasl_told_snapshot(&before);
   local_mechs = mechs;
-  sasl_tell_change(&before);
+  sasl_tell_now();
 }
 
 /** 1. Services linked with a different list S: the tier going down moves
@@ -873,9 +902,11 @@ static void health_down_then_services_list_changes(void **state)
   assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
 }
 
-/** IAuth handling SASL with its list I: the tier going down moves the
- * value to I; recovery moves it back. */
-static void health_iauth_list_is_new_value(void **state)
+/** IAuth handling SASL with its list I: IAuth's own store told clients
+ * sasl=I (raw, as it always was), so the tier going down -- CAP LS now
+ * says I -- tells nothing more; recovery moves the value back.  (Task 6
+ * pinned a second CAP NEW :sasl=PLAIN at the tier going down.) */
+static void health_iauth_list_already_told_tells_nothing(void **state)
 {
   (void)state;
   local_mechs = L_MECHS;
@@ -883,12 +914,13 @@ static void health_iauth_list_is_new_value(void **state)
   iauth_mechs = "PLAIN";
   user302("n");
   set_sasl_mechanisms("PLAIN");        /* told as it always was */
-  nsent = 0;
-
-  tier_health(NULL);
   assert_int_equal(nsent, 1);
   assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
   nsent = 0;
+
+  tier_health(NULL);
+  assert_int_equal(nsent, 0);
+  assert_string_equal(ls_sasl(), "sasl=PLAIN");
 
   tier_health(L_MECHS);
   assert_int_equal(nsent, 1);
@@ -931,6 +963,7 @@ static void services_link_healthy_tier_default_tells_nothing(void **state)
 
   server_links("x3.test");
   assert_int_equal(nsent, 0);
+  assert_int_equal(nlog_linked, 0);     /* nothing enabled, nothing logged */
   assert_string_equal(ls_sasl(), "sasl=" L_MECHS);
 }
 
@@ -949,6 +982,7 @@ static void services_no_tier_default_link_new_leave_del(void **state)
   x3 = server_links("x3.test");
   assert_int_equal(nsent, 1);
   assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_int_equal(nlog_linked, 1);
   assert_string_equal(ls_sasl(), "sasl=PLAIN");
   nsent = 0;
 
@@ -959,7 +993,7 @@ static void services_no_tier_default_link_new_leave_del(void **state)
 }
 
 /** 4. No tier, a default: a server not matching SASL_SERVER linking or
- * leaving tells nothing, with X3 linked or not. */
+ * leaving tells nothing, with X3 linked (its burst over) or not. */
 static void other_server_no_tier_default_tells_nothing(void **state)
 {
   struct Client *leaf;
@@ -973,11 +1007,38 @@ static void other_server_no_tier_default_tells_nothing(void **state)
   server_leaves(leaf);
   assert_int_equal(nsent, 0);
 
-  server("x3.test");
+  server_links("x3.test");
+  assert_int_equal(nsent, 1);           /* X3's CAP NEW :sasl=PLAIN */
+  nsent = 0;
   leaf = server_links("leaf.test");
   server_leaves(leaf);
   assert_int_equal(nsent, 0);
   assert_string_equal(ls_sasl(), "sasl=PLAIN");
+}
+
+/** No tier, a default: X3 is in the server table, its burst not over,
+ * when another server's end of burst comes: CAP LS offers sasl, clients
+ * were not told -- one CAP NEW with the default then (no "SASL server
+ * linked" log: that server is not X3); X3's own end of burst afterwards
+ * tells nothing. */
+static void services_mid_burst_other_eob_tells_once(void **state)
+{
+  struct Client *x3;
+  (void)state;
+
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  user302("n");
+
+  x3 = server("x3.test");
+  server_links("leaf.test");
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_int_equal(nlog_linked, 0);
+  nsent = 0;
+
+  sasl_mechanisms_server_linked(x3);
+  assert_int_equal(nsent, 0);
 }
 
 /** 5. A configured tier gone unhealthy, a default: X3 leaving is CAP DEL
@@ -1028,6 +1089,7 @@ static void services_pattern_two_matches(void **state)
 
   b = server_links("services.b");
   assert_int_equal(nsent, 0);
+  assert_int_equal(nlog_linked, 1);     /* a's only */
 
   server_leaves(a);
   assert_int_equal(nsent, 0);
@@ -1053,6 +1115,7 @@ static void iauth_services_link_told_as_before(void **state)
   server_links("x3.test");
   assert_int_equal(nsent, 1);
   assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_int_equal(nlog_linked, 1);     /* logged as it always was */
 }
 
 /** ... and X3 leaving: CAP DEL, then CAP NEW without a value (IAuth has
@@ -1091,6 +1154,322 @@ static void health_cap_sasl_off_tells_nothing(void **state)
   assert_int_equal(nsent, 0);
 }
 
+/* ====================================================================
+ * A net burst: the servers behind the linking one came with it
+ * ==================================================================== */
+
+/** (a) A SASL_SERVER pattern matches A and B, B behind A; no tier, a
+ * default.  A's net burst put both in the server table, and only A sends
+ * an end of burst: clients were not told sasl and CAP LS now offers it,
+ * so one CAP NEW with the default (and its log line); an end of burst of
+ * B's own afterwards tells nothing. */
+static void net_burst_brings_services_told_once(void **state)
+{
+  struct Client *a, *b;
+  (void)state;
+
+  sasl_server = "services.*";
+  default_mechs = "PLAIN";
+  user302("n");
+
+  a = server("services.a");
+  b = server_via("services.b", a);
+  sasl_mechanisms_server_linked(a);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_int_equal(nlog_linked, 1);
+  nsent = 0;
+
+  sasl_mechanisms_server_linked(b);     /* if b sends one of its own */
+  assert_int_equal(nsent, 0);
+}
+
+/** (b) A linked alone and was told; B, behind A and matching, sends its
+ * own end of burst later: clients already hold sasl=<default> -- nothing,
+ * and no log line. */
+static void server_behind_linked_services_tells_nothing(void **state)
+{
+  struct Client *a, *b;
+  (void)state;
+
+  sasl_server = "services.*";
+  default_mechs = "PLAIN";
+  user302("n");
+  a = server_links("services.a");
+  assert_int_equal(nsent, 1);
+  nsent = 0;
+  nlog_linked = 0;
+
+  b = server_via("services.b", a);
+  sasl_mechanisms_server_linked(b);
+  assert_int_equal(nsent, 0);
+  assert_int_equal(nlog_linked, 0);
+}
+
+/** (c) A matching server C already linked elsewhere, and told; A and B
+ * (behind A) arrive: A's end of burst tells nothing. */
+static void net_burst_with_services_elsewhere_tells_nothing(void **state)
+{
+  struct Client *a;
+  (void)state;
+
+  sasl_server = "services.*";
+  default_mechs = "PLAIN";
+  user302("n");
+  server_links("services.c");
+  assert_int_equal(nsent, 1);
+  nsent = 0;
+  nlog_linked = 0;
+
+  a = server("services.a");
+  server_via("services.b", a);
+  sasl_mechanisms_server_linked(a);
+  assert_int_equal(nsent, 0);
+  assert_int_equal(nlog_linked, 0);
+}
+
+/** (d) Under SASL_SERVER "*" a net burst changes nothing either: this
+ * server itself counts. */
+static void any_server_net_burst_tells_nothing(void **state)
+{
+  struct Client *hub2;
+  (void)state;
+
+  default_mechs = "PLAIN";
+  user302("n");
+
+  hub2 = server("hub2.test");
+  server_via("x3.test", hub2);
+  sasl_mechanisms_server_linked(hub2);
+  assert_int_equal(nsent, 0);
+  assert_string_equal(ls_sasl(), "sasl=PLAIN");
+}
+
+/* ====================================================================
+ * The sasl capability's feature off
+ * ==================================================================== */
+
+/** CAP LS never offers sasl: the services server linking tells
+ * nothing.  (309aed9b: CAP NEW :sasl=<default>.) */
+static void cap_sasl_off_services_link_tells_nothing(void **state)
+{
+  (void)state;
+
+  cap_sasl_off = 1;
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  user302("n");
+
+  server_links("x3.test");
+  assert_int_equal(nsent, 0);
+  assert_int_equal(nlog_linked, 0);
+}
+
+/** ... nor its leaving.  (309aed9b: CAP DEL :sasl.) */
+static void cap_sasl_off_services_leave_tells_nothing(void **state)
+{
+  struct Client *x3;
+  (void)state;
+
+  cap_sasl_off = 1;
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  x3 = server("x3.test");
+  user302("n");
+
+  server_leaves(x3);
+  assert_int_equal(nsent, 0);
+}
+
+/* ====================================================================
+ * What clients were last told: splits, net joins, bursts
+ * ==================================================================== */
+
+/** X3 behind hub H links to this server: H's end of burst comes, X3's
+ * too (a fresh link). */
+static struct Client *x3_behind(struct Client **hub)
+{
+  struct Client *x3;
+
+  *hub = server("hub2.test");
+  x3 = server_via("x3.test", *hub);
+  return x3;
+}
+
+/** The known issue: no tier, SASL_SERVER naming X3, a default; X3 is
+ * behind hub H.  The split takes both: one CAP DEL.  The net join brings
+ * both back already burst, and only H's end of burst comes: one CAP NEW
+ * with the default (309aed9b..e7774bb2: none, until clients reconnected). */
+static void services_behind_hub_split_and_join(void **state)
+{
+  struct Client *hub, *x3;
+  (void)state;
+
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  user302("n");
+  x3 = x3_behind(&hub);
+  sasl_mechanisms_server_linked(x3);
+  sasl_mechanisms_server_linked(hub);
+  assert_int_equal(nsent, 1);           /* the first link: NEW */
+  nsent = 0;
+
+  server_leaves(x3);                    /* the split: downlink first */
+  server_leaves(hub);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  nsent = 0;
+
+  x3 = x3_behind(&hub);                 /* the net join */
+  sasl_mechanisms_server_linked(hub);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(ls_sasl(), "sasl=PLAIN");
+}
+
+/** ... and with X3 still bursting, its own end of burst after H's: still
+ * one CAP NEW in all. */
+static void services_behind_hub_join_then_own_eob(void **state)
+{
+  struct Client *hub, *x3;
+  (void)state;
+
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  user302("n");
+
+  x3 = x3_behind(&hub);
+  sasl_mechanisms_server_linked(hub);
+  sasl_mechanisms_server_linked(x3);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+}
+
+/** No tier, a default D: X3 announces S after its burst -- CAP NEW with
+ * S once. */
+static void services_list_after_burst_is_new(void **state)
+{
+  (void)state;
+
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  user302("n");
+  server_links("x3.test");
+  assert_int_equal(nsent, 1);
+  nsent = 0;
+
+  sasl_mechanisms_announced("PLAIN,EXTERNAL");
+  sasl_mechanisms_announced("PLAIN,EXTERNAL");
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN,EXTERNAL");
+}
+
+/** ... with S equal to D: nothing after the CAP NEW the link sent. */
+static void services_list_after_burst_same_as_default(void **state)
+{
+  (void)state;
+
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  user302("n");
+  server_links("x3.test");
+  assert_int_equal(nsent, 1);
+  nsent = 0;
+
+  sasl_mechanisms_announced("PLAIN");
+  assert_int_equal(nsent, 0);
+}
+
+/** No tier: X3 announces S during its burst, before any end of burst --
+ * clients are told sasl=S exactly once in all, with a default other than
+ * S, the same as S, or none. */
+static void services_list_during_burst_told_once(void **state)
+{
+  static const char *const defaults[] = { "PLAIN", "PLAIN,EXTERNAL", "" };
+  struct Client *x3;
+  int i;
+  (void)state;
+
+  sasl_server = "x3.test";
+  user302("n");
+  for (i = 0; i < 3; i++) {
+    default_mechs = defaults[i];
+    nsent = 0;
+
+    x3 = server("x3.test");
+    sasl_mechanisms_announced("PLAIN,EXTERNAL");
+    sasl_mechanisms_server_linked(x3);
+    assert_int_equal(nsent, 1);
+    assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN,EXTERNAL");
+
+    server_leaves(x3);                  /* clears the list: DEL */
+    assert_int_equal(nsent, 2);
+    assert_string_equal(sent_text(1), "CAP n DEL :sasl");
+  }
+}
+
+/** A health flip while X3 is bursting: the flip tells the default (X3 is
+ * in the table); X3's end of burst repeats nothing. */
+static void health_flip_during_burst_no_repeat(void **state)
+{
+  struct Client *x3;
+  (void)state;
+
+  local_mechs = L_MECHS;
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  user302("n");
+
+  x3 = server("x3.test");
+  tier_health(NULL);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  sasl_mechanisms_server_linked(x3);
+  assert_int_equal(nsent, 1);
+}
+
+/** Start-up with a healthy tier: what clients start from is the tier's
+ * list, so the first later event (any end of burst, X3's included) tells
+ * nothing. */
+static void boot_healthy_tier_first_eob_tells_nothing(void **state)
+{
+  (void)state;
+
+  local_mechs = L_MECHS;
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  start_up();
+  user302("n");
+
+  server_links("leaf.test");
+  server_links("x3.test");
+  assert_int_equal(nsent, 0);
+}
+
+/** A raw IAuth send, then an event outside IAuth: the comparison starts
+ * from what the raw send told.  With the tier healthy (CAP LS: the tier's
+ * list), IAuth's store tells sasl=PLAIN as it always did; IAuth then goes
+ * and a server's end of burst tells the tier's list -- which it would not
+ * if the raw CAP NEW had not been remembered. */
+static void iauth_raw_send_then_other_event(void **state)
+{
+  (void)state;
+
+  local_mechs = L_MECHS;
+  iauth_sasl = 1;
+  iauth_mechs = "PLAIN";
+  user302("n");
+  set_sasl_mechanisms("PLAIN");
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  nsent = 0;
+
+  iauth_sasl = 0;
+  server_links("leaf.test");
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1122,7 +1501,7 @@ int main(void)
     T(health_no_fallback_any_server_del_then_new),
     T(health_no_change_tells_nothing),
     T(health_down_then_services_list_changes),
-    T(health_iauth_list_is_new_value),
+    T(health_iauth_list_already_told_tells_nothing),
     T(services_leave_healthy_tier_default_tells_nothing),
     T(services_link_healthy_tier_default_tells_nothing),
     T(services_no_tier_default_link_new_leave_del),
@@ -1132,6 +1511,21 @@ int main(void)
     T(iauth_services_link_told_as_before),
     T(iauth_services_leave_told_as_before),
     T(health_cap_sasl_off_tells_nothing),
+    T(net_burst_brings_services_told_once),
+    T(server_behind_linked_services_tells_nothing),
+    T(net_burst_with_services_elsewhere_tells_nothing),
+    T(any_server_net_burst_tells_nothing),
+    T(cap_sasl_off_services_link_tells_nothing),
+    T(cap_sasl_off_services_leave_tells_nothing),
+    T(services_mid_burst_other_eob_tells_once),
+    T(services_behind_hub_split_and_join),
+    T(services_behind_hub_join_then_own_eob),
+    T(services_list_after_burst_is_new),
+    T(services_list_after_burst_same_as_default),
+    T(services_list_during_burst_told_once),
+    T(health_flip_during_burst_no_repeat),
+    T(boot_healthy_tier_first_eob_tells_nothing),
+    T(iauth_raw_send_then_other_event),
 #undef T
   };
 

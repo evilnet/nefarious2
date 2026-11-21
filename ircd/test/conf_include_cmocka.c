@@ -133,6 +133,8 @@ void feature_mark(void) { }
 void clear_nameservers(void) { }
 void sasl_conf_reset_pending(void) { }
 void sasl_conf_apply(void) { }
+int server_boot_complete;          /* the first read: nothing told */
+int sasl_tell_now(void) { return 0; }
 void authtoken_conf_begin(void) { }
 void authtoken_conf_apply(void) { }
 void auth_conf_begin(void) { }

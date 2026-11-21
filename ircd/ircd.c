@@ -1455,6 +1455,10 @@ int main(int argc, char **argv) {
                 "engine; finished tasks wait for the next timer or packet");
   }
 
+  /* What CAP LS says of sasl from here is what cap-notify clients start
+   * from: later changes are told as the difference (sasl_mechs.c). */
+  sasl_told_set_now();
+
   server_boot_complete = 1;
   start_all_listeners();
 
