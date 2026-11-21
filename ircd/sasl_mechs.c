@@ -44,13 +44,6 @@ char SaslMechanisms[SASL_MECHS_LEN] = "";
  * line, keeps the notifications it always had (sasl_store_legacy()). */
 static int sasl_list_announced;
 
-/** What CAP LS says of sasl: whether it is offered, and its value
- * (cap_sasl_mechanisms(); empty for none). */
-struct sasl_told {
-  int offered;
-  char value[512];
-};
-
 /** What CAP LS says of sasl now.
  * @param[out] told Filled in.
  * @param[in] sasl_server_leaving Non-zero: as the moment before a server
@@ -64,6 +57,34 @@ static void sasl_told_now(struct sasl_told *told, int sasl_server_leaving)
   ircd_strncpy(told->value, value ? value : "", sizeof(told->value));
 }
 
+/** What CAP LS says of sasl now, before something it depends on changes
+ * (the local Keycloak tier's health: sasl_mark_unhealthy() /
+ * sasl_mark_healthy()); sasl_tell_change() tells the difference after.
+ * @param[out] before Filled in.
+ */
+void sasl_told_snapshot(struct sasl_told *before)
+{
+  sasl_told_now(before, 0);
+}
+
+/** Tell clients what changed in what CAP LS says of sasl since @a before,
+ * nothing when nothing did: CAP NEW with the value CAP LS now gives when
+ * sasl became offered or its value changed, CAP DEL when it stopped being
+ * offered.
+ * @param[in] before What CAP LS said before the change.
+ */
+void sasl_tell_change(const struct sasl_told *before)
+{
+  struct sasl_told after;
+
+  sasl_told_now(&after, 0);
+  if (!after.offered) {
+    if (before->offered)
+      send_cap_notify("sasl", 0, NULL);
+  } else if (!before->offered || strcmp(before->value, after.value) != 0)
+    send_cap_notify("sasl", 1, after.value[0] ? after.value : NULL);
+}
+
 /** Copy a list into SaslMechanisms (NULL or empty clears it). */
 static void sasl_store(const char *mechs)
 {
@@ -75,10 +96,8 @@ static void sasl_store(const char *mechs)
 }
 
 /** Store a list and tell clients what changed in what CAP LS says of
- * sasl, nothing when nothing did: CAP NEW with the value CAP LS now gives
- * when sasl became offered or its value changed, CAP DEL when it stopped
- * being offered.  Never the stored list itself: the server's own Keycloak
- * mechanisms come before it (cap_sasl_mechanisms()).
+ * sasl (sasl_tell_change()).  Never the stored list itself: the server's
+ * own Keycloak mechanisms come before it (cap_sasl_mechanisms()).
  * @param[in] mechs List to store; NULL or empty clears.
  * @param[in] announced Non-zero: it is the list services announced.
  * @param[in] sasl_server_leaving Non-zero: the change is a server matching
@@ -87,18 +106,12 @@ static void sasl_store(const char *mechs)
 static void sasl_store_told(const char *mechs, int announced,
                             int sasl_server_leaving)
 {
-  struct sasl_told before, after;
+  struct sasl_told before;
 
   sasl_told_now(&before, sasl_server_leaving);
   sasl_store(mechs);
   sasl_list_announced = announced && SaslMechanisms[0];
-  sasl_told_now(&after, 0);
-
-  if (!after.offered) {
-    if (before.offered)
-      send_cap_notify("sasl", 0, NULL);
-  } else if (!before.offered || strcmp(before.value, after.value) != 0)
-    send_cap_notify("sasl", 1, after.value[0] ? after.value : NULL);
+  sasl_tell_change(&before);
 }
 
 /** Store IAuth's list (or clear it) with the notifications it has always

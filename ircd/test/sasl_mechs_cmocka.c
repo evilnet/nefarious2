@@ -14,6 +14,9 @@
  * the tier's list whatever services announce, so nothing is sent.  A
  * server that never receives the line (IAuth's list, or none) is told
  * what it was told before.
+ *
+ * A change in the local tier's health is told the same way: the
+ * difference in what CAP LS says before and after (health_* cases).
  */
 #include "config.h"
 
@@ -648,6 +651,214 @@ static void iauth_replacing_announced_list_is_a_change(void **state)
   assert_string_equal(ls_sasl(), "sasl=PLAIN,OAUTHBEARER");
 }
 
+/* ====================================================================
+ * The local Keycloak tier's health changes
+ * ==================================================================== */
+
+#define L_MECHS "PLAIN,OAUTHBEARER"     /* the tier's value */
+
+/** The tier's health changes as sasl_mark_unhealthy() / sasl_mark_healthy()
+ * change it: what CAP LS says is taken before the flag flips and the
+ * difference told after (sasl_handler_cmocka's
+ * health_change_tells_the_difference pins that the real functions do
+ * these steps, in this order, once per change).
+ * @param[in] mechs The tier's list after: NULL = unhealthy. */
+static void tier_health(const char *mechs)
+{
+  struct sasl_told before;
+
+  sasl_told_snapshot(&before);
+  local_mechs = mechs;
+  sasl_tell_change(&before);
+}
+
+/** 1. Services linked with a different list S: the tier going down moves
+ * the value to S (one CAP NEW, no CAP DEL); recovery moves it back. */
+static void health_services_list_differs_is_new_value(void **state)
+{
+  (void)state;
+  local_mechs = L_MECHS;
+  sasl_server = "x3.test";
+  server("x3.test");
+  user302("n");
+  sasl_mechanisms_announced("PLAIN,EXTERNAL");
+  assert_int_equal(nsent, 0);
+
+  tier_health(NULL);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN,EXTERNAL");
+  assert_string_equal(ls_sasl(), "sasl=PLAIN,EXTERNAL");
+  nsent = 0;
+
+  tier_health(L_MECHS);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
+  assert_string_equal(ls_sasl(), "sasl=" L_MECHS);
+}
+
+/** 2. ... the same list as the tier's: nothing either way. */
+static void health_services_list_same_tells_nothing(void **state)
+{
+  (void)state;
+  local_mechs = L_MECHS;
+  sasl_server = "x3.test";
+  server("x3.test");
+  user302("n");
+  sasl_mechanisms_announced(L_MECHS);
+
+  tier_health(NULL);
+  assert_int_equal(nsent, 0);
+  assert_string_equal(ls_sasl(), "sasl=" L_MECHS);
+
+  tier_health(L_MECHS);
+  assert_int_equal(nsent, 0);
+  assert_string_equal(ls_sasl(), "sasl=" L_MECHS);
+}
+
+/** 3. Services linked, no list stored, a default D: the tier going down
+ * moves the value to D; recovery moves it back. */
+static void health_services_default_is_new_value(void **state)
+{
+  (void)state;
+  local_mechs = L_MECHS;
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  server("x3.test");
+  user302("n");
+
+  tier_health(NULL);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(ls_sasl(), "sasl=PLAIN");
+  nsent = 0;
+
+  tier_health(L_MECHS);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
+}
+
+/** 3. ... a default equal to the tier's list: nothing either way. */
+static void health_services_default_same_tells_nothing(void **state)
+{
+  (void)state;
+  local_mechs = L_MECHS;
+  sasl_server = "x3.test";
+  default_mechs = L_MECHS;
+  server("x3.test");
+  user302("n");
+
+  tier_health(NULL);
+  assert_int_equal(nsent, 0);
+  tier_health(L_MECHS);
+  assert_int_equal(nsent, 0);
+  assert_string_equal(ls_sasl(), "sasl=" L_MECHS);
+}
+
+/** 4. No fallback (no services server linked, no list, no default, no
+ * IAuth): CAP DEL when the tier goes down, CAP NEW with its list when it
+ * recovers -- what the server always sent. */
+static void health_no_fallback_del_then_new(void **state)
+{
+  (void)state;
+  local_mechs = L_MECHS;
+  sasl_server = "x3.test";
+  user302("n");
+
+  tier_health(NULL);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  assert_string_equal(ls_sasl(), "");
+  nsent = 0;
+
+  tier_health(L_MECHS);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
+}
+
+/** 4. ... with SASL_SERVER "*" (the default) and only this server: the
+ * same. */
+static void health_no_fallback_any_server_del_then_new(void **state)
+{
+  (void)state;
+  local_mechs = L_MECHS;
+  user302("n");
+
+  tier_health(NULL);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  nsent = 0;
+
+  tier_health(L_MECHS);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
+}
+
+/** 5. A step that changes nothing CAP LS says tells nothing (the real
+ * functions do not even tell a call that is no change: sasl_handler). */
+static void health_no_change_tells_nothing(void **state)
+{
+  (void)state;
+  local_mechs = L_MECHS;
+  user302("n");
+  tier_health(L_MECHS);
+  assert_int_equal(nsent, 0);
+
+  tier_health(NULL);
+  nsent = 0;
+  tier_health(NULL);
+  assert_int_equal(nsent, 0);
+}
+
+/** 6. With the tier down and services' list S what clients were told: S
+ * again tells nothing, S2 tells CAP NEW with S2. */
+static void health_down_then_services_list_changes(void **state)
+{
+  (void)state;
+  local_mechs = L_MECHS;
+  sasl_server = "x3.test";
+  server("x3.test");
+  user302("n");
+  sasl_mechanisms_announced("PLAIN,EXTERNAL");
+  tier_health(NULL);
+  assert_int_equal(nsent, 1);
+  nsent = 0;
+
+  sasl_mechanisms_announced("PLAIN,EXTERNAL");
+  assert_int_equal(nsent, 0);
+
+  sasl_mechanisms_announced("PLAIN,EXTERNAL,SCRAM-SHA-256");
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN,EXTERNAL,SCRAM-SHA-256");
+
+  /* Recovery: back to the tier's value, once. */
+  nsent = 0;
+  tier_health(L_MECHS);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
+}
+
+/** IAuth handling SASL with its list I: the tier going down moves the
+ * value to I; recovery moves it back. */
+static void health_iauth_list_is_new_value(void **state)
+{
+  (void)state;
+  local_mechs = L_MECHS;
+  iauth_sasl = 1;
+  iauth_mechs = "PLAIN";
+  user302("n");
+  set_sasl_mechanisms("PLAIN");        /* told as it always was */
+  nsent = 0;
+
+  tier_health(NULL);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  nsent = 0;
+
+  tier_health(L_MECHS);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -670,6 +881,15 @@ int main(void)
     T(services_leave_falls_back_to_iauth_once),
     T(services_leave_falls_back_to_iauth_local_tier),
     T(iauth_replacing_announced_list_is_a_change),
+    T(health_services_list_differs_is_new_value),
+    T(health_services_list_same_tells_nothing),
+    T(health_services_default_is_new_value),
+    T(health_services_default_same_tells_nothing),
+    T(health_no_fallback_del_then_new),
+    T(health_no_fallback_any_server_del_then_new),
+    T(health_no_change_tells_nothing),
+    T(health_down_then_services_list_changes),
+    T(health_iauth_list_is_new_value),
 #undef T
   };
 

@@ -656,13 +656,42 @@ void sendto_opmask_butone_ratelimited(struct Client *one, unsigned int mask,
   *rate = CurrentTime;
   fx.oper_notices++;
 }
-/** How many times sasl was withdrawn (CAP DEL sasl): Keycloak marked
- * unreachable while it was reachable. */
-static int sasl_cap_dels;
+/* sasl notifications sent straight from the code under test (the health
+ * changes tell theirs through sasl_tell_change() only). */
+static int sasl_notifies;
 void send_cap_notify(const char *capname, int available, const char *value)
 {
-  if (!strcmp(capname, "sasl") && !available)
+  if (!strcmp(capname, "sasl"))
+    sasl_notifies++;
+}
+/** How many times sasl was withdrawn: Keycloak marked unreachable while it
+ * was reachable.  The health change tells through sasl_tell_change(), so a
+ * withdrawal is a tell made while the tier is unavailable. */
+static int sasl_cap_dels;
+/* sasl_mechs.c's snapshot and difference, as the local tier's health
+ * changes call them: each snapshot is marked with the tier's availability
+ * at that moment (offered = 100 + sasl_local_available()), and each tell
+ * records the mark of the snapshot it was handed and the availability
+ * then. */
+#define NTOLD 8
+static int told_snapshots, told_tells;
+static int told_before[NTOLD], told_after[NTOLD];
+void sasl_told_snapshot(struct sasl_told *before)
+{
+  const char *m = sasl_local_mechanisms();
+  before->offered = 100 + sasl_local_available();
+  ircd_strncpy(before->value, m ? m : "", sizeof(before->value));
+  told_snapshots++;
+}
+void sasl_tell_change(const struct sasl_told *before)
+{
+  if (told_tells < NTOLD) {
+    told_before[told_tells] = before->offered;
+    told_after[told_tells] = sasl_local_available();
+  }
+  if (!sasl_local_available())
     sasl_cap_dels++;
+  told_tells++;
 }
 void cap_set_value(enum Capab cap, const char *value) {}
 int need_more_params(struct Client *cptr, const char *cmd) { touch(cptr); return 0; }
@@ -1131,10 +1160,13 @@ int kc_user_send_verify_email(const char *id, kc_result_cb cb, void *data)
 /* The health check's token: answered at once, as the case says (a case
  * that made Keycloak "unreachable" makes it reachable again with it). */
 static int token_ensure_ok;
+static int token_ensure_fail;   /**< non-zero: answered with this result */
 int kc_token_ensure(kc_token_cb cb, void *data)
 {
   if (token_ensure_ok)
     cb(KC_SUCCESS, NULL, data);
+  else if (token_ensure_fail)
+    cb(token_ensure_fail, NULL, data);
   return 0;
 }
 
@@ -1340,6 +1372,7 @@ static int setup(void **state)
   jwt_local_forbidden = 0;
   in_session_too = NULL;
   ntlog = 0;
+  sasl_notifies = told_snapshots = told_tells = 0;
 #ifdef USE_LIBKC
   kc_mode = KC_LATER;
   reap_ok = 0;
@@ -6337,6 +6370,48 @@ static void max_failures_unavailable_never_counts(void **state)
       kc_healthy_again();
   }
 }
+
+/** The local tier's health changes (sasl_mark_unhealthy(),
+ * sasl_mark_healthy()) tell clients the difference in what CAP LS says --
+ * sasl_mechs_cmocka's health_* cases, against the real CAP LS, say what
+ * that is in each state -- and send nothing of their own: what CAP LS says
+ * is taken while the tier still has its old health and told after it
+ * flipped, once per change; a call that changes nothing tells nothing. */
+static void health_change_tells_the_difference(void **state)
+{
+  (void)state;
+  sasl_init_once();
+  kc_healthy_again();                   /* healthy, whatever came before */
+  sasl_notifies = told_snapshots = told_tells = 0;
+
+  /* Keycloak becomes unreachable. */
+  token_ensure_fail = KC_UNAVAILABLE;
+  sasl_health_check();
+  assert_false(sasl_local_available());
+  assert_int_equal(sasl_notifies, 0);   /* no CAP DEL of its own */
+  assert_int_equal(told_tells, 1);
+  assert_int_equal(told_before[0], 100 + 1);   /* taken while healthy */
+  assert_int_equal(told_after[0], 0);           /* told once unhealthy */
+
+  /* Unreachable again: no change, nothing told. */
+  sasl_health_check();
+  assert_int_equal(sasl_notifies, 0);
+  assert_int_equal(told_tells, 1);
+  token_ensure_fail = 0;
+
+  /* Reachable again. */
+  kc_healthy_again();
+  assert_true(sasl_local_available());
+  assert_int_equal(sasl_notifies, 0);   /* no CAP NEW of its own */
+  assert_int_equal(told_tells, 2);
+  assert_int_equal(told_before[1], 100 + 0);   /* taken while unhealthy */
+  assert_int_equal(told_after[1], 1);           /* told once healthy */
+
+  /* Reachable again: no change, nothing told. */
+  kc_healthy_again();
+  assert_int_equal(sasl_notifies, 0);
+  assert_int_equal(told_tells, 2);
+}
 #endif /* USE_LIBKC */
 
 /* ------------------------------------------------------------------ */
@@ -6510,6 +6585,7 @@ int main(void)
     cmocka_unit_test_setup(pipelined_credentials_stay_with_services, setup),
     cmocka_unit_test_setup(chunked_response_answered_once, setup),
     cmocka_unit_test_setup(toolong_ends_iauth_exchange, setup),
+    cmocka_unit_test_setup(health_change_tells_the_difference, setup),
 #endif
     cmocka_unit_test_setup(held_during_webirc_check_then_replayed, setup),
     cmocka_unit_test_setup(abort_during_webirc_check_drops_held_lines, setup),

@@ -12,7 +12,7 @@ Reference for Nefarious's local SASL path (direct Keycloak auth via libkc) and i
 - `ircd/sasl_auth.c` / `include/sasl_auth.h` — local SASL PLAIN via a Keycloak ROPC grant through libkc.
 - Three-tier dispatch in `m_authenticate.c`: **local Keycloak → IAuth → P10 relay**.
 - `sasl_local_available()` checks `sasl_local_initialized && FEAT_SASL_LOCAL && kc_sasl_healthy` (always 0 in a build without libkc).
-- Health tracking via `sasl_health_cb` — toggles CAP NEW/DEL for the `sasl` capability.
+- Health tracking via `sasl_health_cb` — a health change (`sasl_mark_unhealthy()` / `sasl_mark_healthy()`) tells clients the difference in what `CAP LS` says of `sasl` (`sasl_told_snapshot()` before the flag flips, `sasl_tell_change()` after, `ircd/sasl_mechs.c`): `CAP NEW` with a fallback's value (services' list, `SASL_DEFAULT_MECHANISMS`, IAuth's list) or nothing when equal; `CAP DEL` only when no fallback offers `sasl`.
 - libkc HTTP detail (libkc is vendored in `ircd/kc/`): `CURLOPT_POSTFIELDSIZE` must be set **before** `CURLOPT_COPYPOSTFIELDS` (per curl docs); `kc_http.c` does so. `kc_http_sync.c` uses plain `CURLOPT_POSTFIELDS` (no copy), where the order does not matter.
 
 ## Mechanism Support

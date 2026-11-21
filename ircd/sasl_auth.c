@@ -3456,7 +3456,7 @@ static void sasl_health_retry_timer_cb(struct Event *ev)
 }
 
 /** Mark Keycloak as unhealthy and start retry timer.
- *  Sends CAP DEL if transitioning from healthy to unhealthy.
+ *  Tells clients what that changes in CAP LS if transitioning from healthy.
  */
 static void sasl_mark_unhealthy(int result)
 {
@@ -3469,7 +3469,9 @@ static void sasl_mark_unhealthy_why(int result, const char *reason)
 {
   int was_healthy = kc_sasl_healthy;
   char shown[200];
+  struct sasl_told before;
 
+  sasl_told_snapshot(&before);
   kc_sasl_healthy = 0;
   if (was_healthy && sasl_local_initialized) {
     if (reason)
@@ -3479,23 +3481,25 @@ static void sasl_mark_unhealthy_why(int result, const char *reason)
     else
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "SASL LOCAL: Keycloak became unreachable (result %d) — removing SASL", result);
-    send_cap_notify("sasl", 0, NULL);
+    sasl_tell_change(&before);
   }
   sasl_start_health_retry();
 }
 
 /** Mark Keycloak as healthy and stop retry timer.
- *  Sends CAP NEW if transitioning from unhealthy to healthy.
+ *  Tells clients what that changes in CAP LS if transitioning from unhealthy.
  */
 static void sasl_mark_healthy(void)
 {
   int was_healthy = kc_sasl_healthy;
+  struct sasl_told before;
 
+  sasl_told_snapshot(&before);
   kc_sasl_healthy = 1;
   if (!was_healthy && sasl_local_initialized) {
     log_write(LS_SYSTEM, L_NOTICE, 0,
               "SASL LOCAL: Keycloak is now reachable — advertising SASL");
-    send_cap_notify("sasl", 1, sasl_local_mechanisms());
+    sasl_tell_change(&before);
   }
   sasl_stop_health_retry();
 }
