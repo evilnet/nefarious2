@@ -68,4 +68,16 @@ long kc_jwt_extract_created_at(const char *token);
  */
 int kc_jwt_extract_sub(const char *token, char *out, size_t out_size);
 
+/**
+ * Extract the named top-level string claim (e.g. "email") from a JWT's
+ * payload without validation -- the same contract as kc_jwt_extract_sub(),
+ * which is this call with "sub".
+ * @return 1 and the claim in out; 0 with out empty (when out is usable)
+ *         when the token is malformed, an argument is NULL, the claim is
+ *         absent, empty or not a string, or it does not fit in out_size
+ *         (value plus NUL).
+ */
+int kc_jwt_extract_claim(const char *token, const char *claim,
+                         char *out, size_t out_size);
+
 #endif /* KC_JWT_H */

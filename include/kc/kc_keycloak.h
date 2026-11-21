@@ -149,6 +149,13 @@ typedef void (*kc_introspect_cb)(int result, const struct kc_token_info *info, v
  * as the answer's Location header names it (borrowed, valid during the
  * call), or NULL when the answer named none; NULL on any other result. */
 typedef void (*kc_create_cb)(int result, const char *id, void *data);
+/* A group lookup's answer.  On KC_SUCCESS, group is the group (borrowed,
+ * valid during the call); NULL on any other result. */
+typedef void (*kc_group_cb)(int result, const struct kc_group *group, void *data);
+/* A user representation's answer.  On KC_SUCCESS, repr is the user's full
+ * JSON representation as Keycloak sent it (borrowed, valid during the call;
+ * json_incref() it to keep it); NULL on any other result. */
+typedef void (*kc_user_repr_cb)(int result, json_t *repr, void *data);
 
 /*
  * Initialize Keycloak subsystem. Called after kc_init().
@@ -241,6 +248,14 @@ int kc_user_delete(const char *id, kc_result_cb cb, void *data);
 /* Update user (full representation PUT) */
 int kc_user_update(const char *id, json_t *repr, kc_result_cb cb, void *data);
 
+/* Read a user's full representation by Keycloak user ID (GET of the user):
+ * the base for a read-change-write through kc_user_update(), since a user
+ * PUT replaces what it is sent.  The result: KC_SUCCESS with the JSON
+ * object (see kc_user_repr_cb); KC_NOT_FOUND on 404; KC_TOKEN_ERROR when
+ * no admin token could be had; KC_ERROR for no answer, any other status,
+ * or a 200 that is not a JSON object. */
+int kc_user_get_repr(const char *id, kc_user_repr_cb cb, void *data);
+
 /*
  * Password operations
  */
@@ -278,6 +293,14 @@ int kc_user_add_group(const char *user_id, const char *group_id,
 /* Remove user from group */
 int kc_user_remove_group(const char *user_id, const char *group_id,
                          kc_result_cb cb, void *data);
+
+/* Look a group up by its path ("/parent/child"; it must start with '/').
+ * The result: KC_SUCCESS with the group (see kc_group_cb); KC_NOT_FOUND on
+ * 404; KC_TOKEN_ERROR when no admin token could be had; KC_ERROR for no
+ * answer, any other status, or a 200 that is not a JSON object.  Returns
+ * -1 without calling back when the URL cannot be built (a NULL path, or
+ * one without the leading '/'). */
+int kc_group_get_by_path(const char *path, kc_group_cb cb, void *data);
 
 /*
  * Token introspection (for SASL)

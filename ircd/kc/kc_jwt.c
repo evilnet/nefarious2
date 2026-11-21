@@ -766,18 +766,19 @@ kc_jwt_extract_created_at(const char *token)
 }
 
 int
-kc_jwt_extract_sub(const char *token, char *out, size_t out_size)
+kc_jwt_extract_claim(const char *token, const char *claim,
+                     char *out, size_t out_size)
 {
-    const char *dot1, *dot2, *sub;
+    const char *dot1, *dot2, *value;
     char *payload_b64, *payload;
     size_t payload_b64_len, payload_len = 0;
     json_error_t error;
-    json_t *root, *claim;
+    json_t *root, *node;
     int ok = 0;
 
     if (out && out_size)
         out[0] = '\0';
-    if (!token || !out || !out_size)
+    if (!token || !claim || !out || !out_size)
         return 0;
 
     /* Payload sits between the first and second '.' */
@@ -797,12 +798,18 @@ kc_jwt_extract_sub(const char *token, char *out, size_t out_size)
     if (!root)
         return 0;
 
-    claim = json_object_get(root, "sub");
-    if (json_is_string(claim) && (sub = json_string_value(claim)) && *sub
-        && strlen(sub) < out_size) {
-        strcpy(out, sub);
+    node = json_object_get(root, claim);
+    if (json_is_string(node) && (value = json_string_value(node)) && *value
+        && strlen(value) < out_size) {
+        strcpy(out, value);
         ok = 1;
     }
     json_decref(root);
     return ok;
+}
+
+int
+kc_jwt_extract_sub(const char *token, char *out, size_t out_size)
+{
+    return kc_jwt_extract_claim(token, "sub", out, out_size);
 }

@@ -163,6 +163,68 @@ static void test_extract_sub_absent_or_malformed(void **state) {
     assert_int_equal(kc_jwt_extract_sub("h.p", NULL, 0), 0);
 }
 
+#define CLAIMS_PAYLOAD "{\"sub\":\"u-1\",\"email\":\"a@example.org\",\"n\":42,\"e\":\"\"}"
+
+static void test_extract_claim_string(void **state) {
+    char out[64] = "x";
+    char *tok = jwt_with_payload(CLAIMS_PAYLOAD);
+    (void)state;
+    assert_int_equal(kc_jwt_extract_claim(tok, "email", out, sizeof(out)), 1);
+    assert_string_equal(out, "a@example.org");
+    strcpy(out, "x");
+    assert_int_equal(kc_jwt_extract_claim(tok, "sub", out, sizeof(out)), 1);
+    assert_string_equal(out, "u-1");
+    free(tok);
+}
+
+static void test_extract_claim_absent_empty_or_not_a_string(void **state) {
+    static const char *const names[] = { "missing", "e", "n" };
+    char out[64];
+    char *tok = jwt_with_payload(CLAIMS_PAYLOAD);
+    size_t i;
+    (void)state;
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        strcpy(out, "x");
+        assert_int_equal(kc_jwt_extract_claim(tok, names[i], out, sizeof(out)), 0);
+        assert_string_equal(out, "");
+    }
+    free(tok);
+}
+
+static void test_extract_claim_does_not_fit(void **state) {
+    char out[64] = "x";
+    char *tok = jwt_with_payload(CLAIMS_PAYLOAD);
+    (void)state;
+    assert_int_equal(kc_jwt_extract_claim(tok, "email", out, 5), 0);
+    assert_string_equal(out, "");
+    /* exactly the value's length leaves no room for the NUL: still 0 */
+    strcpy(out, "x");
+    assert_int_equal(kc_jwt_extract_claim(tok, "email", out, strlen("a@example.org")), 0);
+    assert_string_equal(out, "");
+    /* one more fits */
+    assert_int_equal(kc_jwt_extract_claim(tok, "email", out, strlen("a@example.org") + 1), 1);
+    assert_string_equal(out, "a@example.org");
+    free(tok);
+}
+
+static void test_extract_claim_bad_arguments(void **state) {
+    char out[64];
+    char *tok = jwt_with_payload(CLAIMS_PAYLOAD);
+    (void)state;
+    strcpy(out, "x");
+    assert_int_equal(kc_jwt_extract_claim(NULL, "email", out, sizeof(out)), 0);
+    assert_string_equal(out, "");
+    strcpy(out, "x");
+    assert_int_equal(kc_jwt_extract_claim(tok, NULL, out, sizeof(out)), 0);
+    assert_string_equal(out, "");
+    assert_int_equal(kc_jwt_extract_claim(tok, "email", NULL, 0), 0);
+    assert_int_equal(kc_jwt_extract_claim(tok, "email", NULL, sizeof(out)), 0);
+    strcpy(out, "x");
+    assert_int_equal(kc_jwt_extract_claim("not.a.jwt", "email", out, sizeof(out)), 0);
+    assert_string_equal(out, "");
+    free(tok);
+}
+
 /*
  * =============================================================================
  * RS256 signature path (OpenSSL 3.0+ only — same floor as the code under
@@ -375,6 +437,10 @@ int main(void) {
         cmocka_unit_test(test_extract_created_at_handles_malformed),
         cmocka_unit_test(test_extract_sub_present),
         cmocka_unit_test(test_extract_sub_absent_or_malformed),
+        cmocka_unit_test(test_extract_claim_string),
+        cmocka_unit_test(test_extract_claim_absent_empty_or_not_a_string),
+        cmocka_unit_test(test_extract_claim_does_not_fit),
+        cmocka_unit_test(test_extract_claim_bad_arguments),
     };
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
     const struct CMUnitTest sig_tests[] = {

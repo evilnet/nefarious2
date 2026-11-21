@@ -559,6 +559,8 @@ struct kc_op_ctx {
         kc_groups_cb groups;
         kc_introspect_cb introspect;
         kc_create_cb create;
+        kc_group_cb group;
+        kc_user_repr_cb repr;
     } cb;
     void *cb_data;
 
@@ -582,7 +584,9 @@ struct kc_op_ctx {
         OP_REMOVE_GROUP,
         OP_SEARCH_USERS,
         OP_INTROSPECT,
-        OP_JWKS_REFRESH
+        OP_JWKS_REFRESH,
+        OP_GET_GROUP_BY_PATH,
+        OP_GET_USER_REPR
     } op;
 
     /* Extra context for specific operations */
@@ -915,6 +919,45 @@ static void op_response_handler(struct kc_http_response *resp, void *data)
         break;
     }
 
+    case OP_GET_GROUP_BY_PATH: {
+        if (!resp || resp->status_code == 0) {
+            ctx->cb.group(KC_ERROR, NULL, ctx->cb_data);
+            break;
+        }
+        if (resp->status_code == 404) {
+            ctx->cb.group(KC_NOT_FOUND, NULL, ctx->cb_data);
+            break;
+        }
+        struct kc_group group;
+        if (resp->status_code != 200
+            || parse_group(resp->json, &group) != 0) {   /* NULL or not an object */
+            ctx->cb.group(KC_ERROR, NULL, ctx->cb_data);
+            break;
+        }
+        ctx->cb.group(KC_SUCCESS, &group, ctx->cb_data);
+        kc_group_free(&group);
+        break;
+    }
+
+    case OP_GET_USER_REPR: {
+        if (!resp || resp->status_code == 0) {
+            ctx->cb.repr(KC_ERROR, NULL, ctx->cb_data);
+            break;
+        }
+        if (resp->status_code == 404) {
+            ctx->cb.repr(KC_NOT_FOUND, NULL, ctx->cb_data);
+            break;
+        }
+        if (resp->status_code != 200 || !json_is_object(resp->json)) {
+            ctx->cb.repr(KC_ERROR, NULL, ctx->cb_data);
+            break;
+        }
+        /* Borrowed: resp->json belongs to the HTTP layer, which releases it
+         * after this handler returns; a caller keeps it with json_incref(). */
+        ctx->cb.repr(KC_SUCCESS, resp->json, ctx->cb_data);
+        break;
+    }
+
     } /* switch */
 
     op_ctx_free(ctx);
@@ -947,6 +990,12 @@ static void op_token_ready(int result, const struct kc_access_token *token, void
             break;
         case OP_INTROSPECT:
             ctx->cb.introspect(KC_TOKEN_ERROR, NULL, ctx->cb_data);
+            break;
+        case OP_GET_GROUP_BY_PATH:
+            ctx->cb.group(KC_TOKEN_ERROR, NULL, ctx->cb_data);
+            break;
+        case OP_GET_USER_REPR:
+            ctx->cb.repr(KC_TOKEN_ERROR, NULL, ctx->cb_data);
             break;
         default:
             ctx->cb.result(KC_TOKEN_ERROR, ctx->cb_data);
@@ -987,6 +1036,12 @@ static void op_token_ready(int result, const struct kc_access_token *token, void
             break;
         case OP_INTROSPECT:
             ctx->cb.introspect(KC_ERROR, NULL, ctx->cb_data);
+            break;
+        case OP_GET_GROUP_BY_PATH:
+            ctx->cb.group(KC_ERROR, NULL, ctx->cb_data);
+            break;
+        case OP_GET_USER_REPR:
+            ctx->cb.repr(KC_ERROR, NULL, ctx->cb_data);
             break;
         default:
             ctx->cb.result(KC_ERROR, ctx->cb_data);
@@ -1312,6 +1367,30 @@ int kc_user_update(const char *id, json_t *repr, kc_result_cb cb, void *data)
     return start_op(ctx);
 }
 
+int kc_user_get_repr(const char *id, kc_user_repr_cb cb, void *data)
+{
+    if (!id || !cb)
+        return -1;
+
+    char *url = kc_url_user(get_realm(), id);
+    if (!url)
+        return -1;
+
+    struct kc_op_ctx *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        free(url);
+        return -1;
+    }
+
+    ctx->op = OP_GET_USER_REPR;
+    ctx->cb.repr = cb;
+    ctx->cb_data = data;
+    ctx->url = url;
+    ctx->method = "GET";
+
+    return start_op(ctx);
+}
+
 /* ================================================================
  * Public API: Password operations
  * ================================================================ */
@@ -1495,6 +1574,30 @@ int kc_user_remove_group(const char *user_id, const char *group_id,
     ctx->cb_data = data;
     ctx->url = kc_url_user_group(get_realm(), user_id, group_id);
     ctx->method = "DELETE";
+
+    return start_op(ctx);
+}
+
+int kc_group_get_by_path(const char *path, kc_group_cb cb, void *data)
+{
+    if (!path || path[0] != '/' || !cb)
+        return -1;
+
+    char *url = kc_url_group_by_path(get_realm(), path);
+    if (!url)
+        return -1;
+
+    struct kc_op_ctx *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        free(url);
+        return -1;
+    }
+
+    ctx->op = OP_GET_GROUP_BY_PATH;
+    ctx->cb.group = cb;
+    ctx->cb_data = data;
+    ctx->url = url;
+    ctx->method = "GET";
 
     return start_op(ctx);
 }

@@ -148,6 +148,54 @@ static void user_cb(int result, const struct kc_user *user, void *data)
     (void)result; (void)user; (void)data;
 }
 
+/* A group lookup's answer: the result, a copy of the group's id ("" when
+ * there is no group; the group is only valid during the call), and how
+ * many answers came. */
+static char last_group_id[64];
+static int group_calls;
+
+static void group_cb(int result, const struct kc_group *group, void *data)
+{
+    (void)data;
+    group_calls++;
+    last_result = result;
+    if (result == KC_SUCCESS) {
+        assert_non_null(group);
+        assert_non_null(group->id);
+        assert_true(strlen(group->id) < sizeof(last_group_id));
+        strcpy(last_group_id, group->id);
+    } else {
+        assert_null(group);
+        strcpy(last_group_id, "");
+    }
+}
+
+/* A user representation's answer: the result, a copy of its "username"
+ * ("" when there is no representation or no such string; the JSON is
+ * borrowed, valid during the call), and how many answers came. */
+static char last_repr_username[64];
+static int repr_calls;
+
+static void repr_cb(int result, json_t *repr, void *data)
+{
+    (void)data;
+    repr_calls++;
+    last_result = result;
+    strcpy(last_repr_username, "");
+    if (result == KC_SUCCESS) {
+        json_t *name;
+        assert_non_null(repr);
+        assert_true(json_is_object(repr));
+        name = json_object_get(repr, "username");
+        if (json_is_string(name)) {
+            assert_true(strlen(json_string_value(name)) < sizeof(last_repr_username));
+            strcpy(last_repr_username, json_string_value(name));
+        }
+    } else {
+        assert_null(repr);
+    }
+}
+
 /* ---- Setup / teardown ---- */
 
 static int setup(void **state)
@@ -157,7 +205,19 @@ static int setup(void **state)
     last_result = 999;
     strcpy(last_reason, "(no answer)");
     grant_calls = 0;
+    strcpy(last_group_id, "(no answer)");
+    group_calls = 0;
+    strcpy(last_repr_username, "(no answer)");
+    repr_calls = 0;
     return 0;
+}
+
+/* init with a valid config, nothing sent yet. */
+static void start(void)
+{
+    struct kc_config cfg = { "http://kc", "r", "cid", "sec", 0 };
+    assert_int_equal(kc_keycloak_init(&cfg), 0);
+    assert_int_equal(fake_req_count, 0);
 }
 
 static int teardown(void **state)
@@ -303,6 +363,124 @@ static void test_grant_no_answer_is_transport_error(void **state)
     assert_string_equal(last_reason, "");
 }
 
+/* ---- A group looked up by its path ---- */
+
+static void test_group_by_path_found(void **state)
+{
+    (void)state;
+    start();
+    assert_int_equal(kc_group_get_by_path("/staff/opers", group_cb, NULL), 0);
+    assert_int_equal(fake_req_count, 1);                  /* the client-credentials token */
+    fake_answer_token(0);
+    assert_int_equal(fake_req_count, 2);
+    assert_string_equal(fake_reqs[1].method, "GET");
+    assert_non_null(strstr(fake_reqs[1].url, "/admin/realms/r/group-by-path/staff/opers"));
+    assert_int_equal(group_calls, 0);
+    fake_answer(1, 200, "{\"id\":\"g-1\",\"name\":\"opers\",\"path\":\"/staff/opers\"}");
+    assert_int_equal(group_calls, 1);
+    assert_int_equal(last_result, KC_SUCCESS);
+    assert_string_equal(last_group_id, "g-1");
+}
+
+static void test_group_by_path_missing(void **state)
+{
+    (void)state;
+    start();
+    assert_int_equal(kc_group_get_by_path("/staff/opers", group_cb, NULL), 0);
+    fake_answer_token(0);
+    fake_answer(1, 404, "{\"error\":\"Group path does not exist\"}");
+    assert_int_equal(group_calls, 1);
+    assert_int_equal(last_result, KC_NOT_FOUND);
+    assert_string_equal(last_group_id, "");
+}
+
+static void test_group_by_path_not_an_object_is_error(void **state)
+{
+    (void)state;
+    start();
+    assert_int_equal(kc_group_get_by_path("/staff/opers", group_cb, NULL), 0);
+    fake_answer_token(0);
+    fake_answer(1, 200, "[]");
+    assert_int_equal(group_calls, 1);
+    assert_int_equal(last_result, KC_ERROR);
+}
+
+static void test_group_by_path_needs_leading_slash(void **state)
+{
+    (void)state;
+    start();
+    assert_int_equal(kc_group_get_by_path("opers", group_cb, NULL), -1);
+    assert_int_equal(group_calls, 0);
+    assert_int_equal(fake_req_count, 0);
+}
+
+static void test_group_by_path_token_failure(void **state)
+{
+    (void)state;
+    start();
+    assert_int_equal(kc_group_get_by_path("/staff/opers", group_cb, NULL), 0);
+    fake_answer(0, 401, "{}");
+    assert_int_equal(group_calls, 1);
+    assert_int_equal(last_result, KC_TOKEN_ERROR);
+    assert_int_equal(fake_req_count, 1);                  /* the lookup itself never went out */
+}
+
+/* ---- A user's full representation ---- */
+
+static void test_user_repr_found(void **state)
+{
+    (void)state;
+    start();
+    assert_int_equal(kc_user_get_repr("u-1", repr_cb, NULL), 0);
+    fake_answer_token(0);
+    assert_int_equal(fake_req_count, 2);
+    assert_string_equal(fake_reqs[1].method, "GET");
+    {
+        const char *tail = "/admin/realms/r/users/u-1";
+        size_t ul = strlen(fake_reqs[1].url), tl = strlen(tail);
+        assert_true(ul >= tl);
+        assert_string_equal(fake_reqs[1].url + ul - tl, tail);
+    }
+    assert_int_equal(repr_calls, 0);
+    fake_answer(1, 200, "{\"id\":\"u-1\",\"username\":\"alice\",\"attributes\":{\"x\":[\"1\"]}}");
+    assert_int_equal(repr_calls, 1);
+    assert_int_equal(last_result, KC_SUCCESS);
+    assert_string_equal(last_repr_username, "alice");
+}
+
+static void test_user_repr_missing(void **state)
+{
+    (void)state;
+    start();
+    assert_int_equal(kc_user_get_repr("u-1", repr_cb, NULL), 0);
+    fake_answer_token(0);
+    fake_answer(1, 404, "{\"error\":\"User not found\"}");
+    assert_int_equal(repr_calls, 1);
+    assert_int_equal(last_result, KC_NOT_FOUND);
+}
+
+static void test_user_repr_token_failure(void **state)
+{
+    (void)state;
+    start();
+    assert_int_equal(kc_user_get_repr("u-1", repr_cb, NULL), 0);
+    fake_answer(0, 401, "{}");
+    assert_int_equal(repr_calls, 1);
+    assert_int_equal(last_result, KC_TOKEN_ERROR);
+    assert_int_equal(fake_req_count, 1);
+}
+
+static void test_user_repr_other_status_is_error(void **state)
+{
+    (void)state;
+    start();
+    assert_int_equal(kc_user_get_repr("u-1", repr_cb, NULL), 0);
+    fake_answer_token(0);
+    fake_answer(1, 500, "{}");
+    assert_int_equal(repr_calls, 1);
+    assert_int_equal(last_result, KC_ERROR);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
@@ -318,6 +496,15 @@ int main(void)
         cmocka_unit_test_setup_teardown(test_grant_html_400_is_transport_error, setup, teardown),
         cmocka_unit_test_setup_teardown(test_grant_502_is_transport_error, setup, teardown),
         cmocka_unit_test_setup_teardown(test_grant_no_answer_is_transport_error, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_group_by_path_found, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_group_by_path_missing, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_group_by_path_not_an_object_is_error, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_group_by_path_needs_leading_slash, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_group_by_path_token_failure, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_user_repr_found, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_user_repr_missing, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_user_repr_token_failure, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_user_repr_other_status_is_error, setup, teardown),
     };
 
     return cmocka_run_group_tests_name("kc_keycloak", tests, NULL, NULL);
