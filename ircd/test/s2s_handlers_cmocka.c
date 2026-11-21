@@ -1112,14 +1112,11 @@ void sasl_webhook_link_catchup(struct Client *cptr)
   (void)cptr;
 }
 
-const char *get_sasl_mechanisms(void)
+/* What the services server linking tells clients (sasl_mechs.c; tested in
+ * sasl_mechs_cmocka). */
+void sasl_mechanisms_server_linked(struct Client *sptr)
 {
-  return "PLAIN";
-}
-
-void send_cap_notify(const char *capname, int available, const char *value)
-{
-  (void)capname; (void)available; (void)value;
+  (void)sptr;
 }
 
 int destruct_channel(struct Channel *chptr)

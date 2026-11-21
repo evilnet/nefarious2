@@ -83,6 +83,8 @@ extern void SetYXXServerName(struct Client* myself, unsigned int numeric);
 
 extern int            markMatchexServer(const char* cmask, int minlen);
 extern struct Client* find_match_server(char* mask);
+extern struct Client* find_match_server_except(char* mask,
+                                               struct Client* except);
 extern struct Client* findNUser(const char* yxx);
 extern struct Client* FindNServer(const char* numeric);
 extern int            ValidUserNumNick(const char* yxx);

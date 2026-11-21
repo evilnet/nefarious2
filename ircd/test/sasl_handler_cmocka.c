@@ -674,14 +674,13 @@ static int sasl_cap_dels;
  * records the mark of the snapshot it was handed and the availability
  * then. */
 #define NTOLD 8
-static int told_snapshots, told_tells;
+static int told_tells;
 static int told_before[NTOLD], told_after[NTOLD];
 void sasl_told_snapshot(struct sasl_told *before)
 {
   const char *m = sasl_local_mechanisms();
   before->offered = 100 + sasl_local_available();
   ircd_strncpy(before->value, m ? m : "", sizeof(before->value));
-  told_snapshots++;
 }
 void sasl_tell_change(const struct sasl_told *before)
 {
@@ -1372,8 +1371,9 @@ static int setup(void **state)
   jwt_local_forbidden = 0;
   in_session_too = NULL;
   ntlog = 0;
-  sasl_notifies = told_snapshots = told_tells = 0;
+  sasl_notifies = told_tells = 0;
 #ifdef USE_LIBKC
+  token_ensure_fail = 0;
   kc_mode = KC_LATER;
   reap_ok = 0;
   kc_requests = 0;
@@ -6382,7 +6382,7 @@ static void health_change_tells_the_difference(void **state)
   (void)state;
   sasl_init_once();
   kc_healthy_again();                   /* healthy, whatever came before */
-  sasl_notifies = told_snapshots = told_tells = 0;
+  sasl_notifies = told_tells = 0;
 
   /* Keycloak becomes unreachable. */
   token_ensure_fail = KC_UNAVAILABLE;

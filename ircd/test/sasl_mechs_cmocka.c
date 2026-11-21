@@ -61,6 +61,7 @@ static const char *sasl_server;        /* FEAT_SASL_SERVER */
 static const char *default_mechs;      /* FEAT_SASL_DEFAULT_MECHANISMS */
 static int iauth_sasl;                 /* auth_iauth_handles_sasl() */
 static const char *iauth_mechs;        /* auth_iauth_sasl_mechs() */
+static int cap_sasl_off;               /* FEAT_CAP_sasl off */
 
 /* ====================================================================
  * What the code under test sent
@@ -104,6 +105,8 @@ int feature_bool(enum Feature feat)
 {
   if (feat == FEAT_CAP_labeled_response)
     return 0;                          /* unlabeled replies */
+  if (feat == FEAT_CAP_sasl)
+    return !cap_sasl_off;
   return 1;
 }
 int feature_int(enum Feature feat) { (void)feat; return 100; }
@@ -132,13 +135,18 @@ const char *get_vapid_pubkey(void) { return NULL; }
 #define MAXSRV 4
 static struct Client *linked[MAXSRV];
 
-struct Client *find_match_server(char *mask)
+struct Client *find_match_server_except(char *mask, struct Client *except)
 {
   int i;
   for (i = 0; i < MAXSRV; i++)
-    if (linked[i] && match(mask, cli_name(linked[i])) == 0)
+    if (linked[i] && linked[i] != except
+        && match(mask, cli_name(linked[i])) == 0)
       return linked[i];
   return NULL;
+}
+struct Client *find_match_server(char *mask)
+{
+  return find_match_server_except(mask, NULL);
 }
 
 int auth_cap_start(struct AuthRequest *auth) { (void)auth; return 0; }
@@ -235,6 +243,16 @@ static void server_leaves(struct Client *srv)
   sasl_mechanisms_server_gone(srv);
 }
 
+/** A server links: into the table (its SERVER line), then its end of
+ * burst (what ms_end_of_burst() does). */
+static struct Client *server_links(const char *name)
+{
+  struct Client *c = server(name);
+
+  sasl_mechanisms_server_linked(c);
+  return c;
+}
+
 /** What CAP LS 302 says of sasl to a new client: "sasl=<value>", "sasl",
  * or "" when it is not listed.  Leaves nothing in the sent record. */
 static const char *ls_sasl(void)
@@ -269,6 +287,7 @@ static int setup(void **state)
   default_mechs = "";
   iauth_sasl = 0;
   iauth_mechs = NULL;
+  cap_sasl_off = 0;
   memset(linked, 0, sizeof(linked));
   GlobalClientList = NULL;
   UserStats.servers = 1;               /* me */
@@ -576,9 +595,11 @@ static void iauth_list_told_as_before(void **state)
   assert_string_equal(sent_text(1), "CAP n NEW :sasl=PLAIN");
 }
 
-/** A server with only SASL_DEFAULT_MECHANISMS: any server leaving under
- * SASL_SERVER "*" sends CAP DEL, as it always did. */
-static void default_only_split_told_as_before(void **state)
+/** A server with only SASL_DEFAULT_MECHANISMS under SASL_SERVER "*": CAP
+ * LS offers sasl=<default> whatever is linked (this server itself
+ * counts), so a server leaving tells nothing.  (309aed9b sent CAP DEL on
+ * every split here.) */
+static void default_only_any_split_tells_nothing(void **state)
 {
   struct Client *hub;
   (void)state;
@@ -586,10 +607,25 @@ static void default_only_split_told_as_before(void **state)
   default_mechs = "PLAIN";
   hub = server("hub.test");
   user302("n");
+  assert_string_equal(ls_sasl(), "sasl=PLAIN");
 
   server_leaves(hub);
-  assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  assert_int_equal(nsent, 0);
+  assert_string_equal(ls_sasl(), "sasl=PLAIN");
+}
+
+/** ... and a server linking tells nothing either (309aed9b: nothing). */
+static void default_only_any_link_tells_nothing(void **state)
+{
+  (void)state;
+
+  default_mechs = "PLAIN";
+  user302("n");
+  assert_string_equal(ls_sasl(), "sasl=PLAIN");
+
+  server_links("hub.test");
+  assert_int_equal(nsent, 0);
+  assert_string_equal(ls_sasl(), "sasl=PLAIN");
 }
 
 /** IAuth's list taking over when the services server leaves: one change,
@@ -859,6 +895,202 @@ static void health_iauth_list_is_new_value(void **state)
   assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
 }
 
+/* ====================================================================
+ * The services server linking or leaving, no list announced
+ * ==================================================================== */
+
+/** 1. Healthy tier, SASL_SERVER naming X3, a default other than the
+ * tier's list: X3 leaving tells nothing (CAP LS still gives the tier's
+ * list). */
+static void services_leave_healthy_tier_default_tells_nothing(void **state)
+{
+  struct Client *x3;
+  (void)state;
+
+  local_mechs = L_MECHS;
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  x3 = server("x3.test");
+  user302("n");
+  assert_string_equal(ls_sasl(), "sasl=" L_MECHS);
+
+  server_leaves(x3);
+  assert_int_equal(nsent, 0);
+  assert_string_equal(ls_sasl(), "sasl=" L_MECHS);
+}
+
+/** 2. ... and X3 linking tells nothing. */
+static void services_link_healthy_tier_default_tells_nothing(void **state)
+{
+  (void)state;
+
+  local_mechs = L_MECHS;
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  user302("n");
+
+  server_links("x3.test");
+  assert_int_equal(nsent, 0);
+  assert_string_equal(ls_sasl(), "sasl=" L_MECHS);
+}
+
+/** 3. No tier, a default: X3 linking is CAP NEW with the default, X3
+ * leaving is CAP DEL -- as always. */
+static void services_no_tier_default_link_new_leave_del(void **state)
+{
+  struct Client *x3;
+  (void)state;
+
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  user302("n");
+  assert_string_equal(ls_sasl(), "");
+
+  x3 = server_links("x3.test");
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(ls_sasl(), "sasl=PLAIN");
+  nsent = 0;
+
+  server_leaves(x3);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  assert_string_equal(ls_sasl(), "");
+}
+
+/** 4. No tier, a default: a server not matching SASL_SERVER linking or
+ * leaving tells nothing, with X3 linked or not. */
+static void other_server_no_tier_default_tells_nothing(void **state)
+{
+  struct Client *leaf;
+  (void)state;
+
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  user302("n");
+
+  leaf = server_links("leaf.test");
+  server_leaves(leaf);
+  assert_int_equal(nsent, 0);
+
+  server("x3.test");
+  leaf = server_links("leaf.test");
+  server_leaves(leaf);
+  assert_int_equal(nsent, 0);
+  assert_string_equal(ls_sasl(), "sasl=PLAIN");
+}
+
+/** 5. A configured tier gone unhealthy, a default: X3 leaving is CAP DEL
+ * (nothing else offers sasl), X3 linking CAP NEW with the default. */
+static void services_unhealthy_tier_default_leave_del_link_new(void **state)
+{
+  struct Client *x3;
+  (void)state;
+
+  local_mechs = L_MECHS;
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  user302("n");
+  x3 = server_links("x3.test");
+  assert_int_equal(nsent, 0);
+  tier_health(NULL);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  nsent = 0;
+
+  server_leaves(x3);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  nsent = 0;
+
+  server_links("x3.test");
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+}
+
+/** A SASL_SERVER pattern two linked servers match, no tier, a default:
+ * while one of them is linked CAP LS offers sasl, so the other linking
+ * or leaving tells nothing; the last one leaving is CAP DEL.  (309aed9b:
+ * a CAP NEW at the second link and a CAP DEL at the first leave.) */
+static void services_pattern_two_matches(void **state)
+{
+  struct Client *a, *b;
+  (void)state;
+
+  sasl_server = "services.*";
+  default_mechs = "PLAIN";
+  user302("n");
+
+  a = server_links("services.a");
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  nsent = 0;
+
+  b = server_links("services.b");
+  assert_int_equal(nsent, 0);
+
+  server_leaves(a);
+  assert_int_equal(nsent, 0);
+  assert_string_equal(ls_sasl(), "sasl=PLAIN");
+
+  server_leaves(b);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+}
+
+/** IAuth handling SASL (no list from it yet), a default: X3 linking sends
+ * what it always did, CAP NEW with the default, untouched by the
+ * difference rule. */
+static void iauth_services_link_told_as_before(void **state)
+{
+  (void)state;
+
+  iauth_sasl = 1;
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  user302("n");
+
+  server_links("x3.test");
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+}
+
+/** ... and X3 leaving: CAP DEL, then CAP NEW without a value (IAuth has
+ * no list), as always. */
+static void iauth_services_leave_told_as_before(void **state)
+{
+  struct Client *x3;
+  (void)state;
+
+  iauth_sasl = 1;
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  x3 = server("x3.test");
+  user302("n");
+
+  server_leaves(x3);
+  assert_int_equal(nsent, 2);
+  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  assert_string_equal(sent_text(1), "CAP n NEW :sasl");
+}
+
+/** With the sasl capability's feature off, CAP LS never offers sasl, so a
+ * health change of the tier tells nothing. */
+static void health_cap_sasl_off_tells_nothing(void **state)
+{
+  (void)state;
+
+  cap_sasl_off = 1;
+  local_mechs = L_MECHS;
+  user302("n");
+  assert_string_equal(ls_sasl(), "");
+
+  tier_health(NULL);
+  assert_int_equal(nsent, 0);
+  tier_health(L_MECHS);
+  assert_int_equal(nsent, 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -877,7 +1109,8 @@ int main(void)
     T(no_tier_split_no_default_is_del),
     T(empty_list_withdraws_announced_list),
     T(iauth_list_told_as_before),
-    T(default_only_split_told_as_before),
+    T(default_only_any_split_tells_nothing),
+    T(default_only_any_link_tells_nothing),
     T(services_leave_falls_back_to_iauth_once),
     T(services_leave_falls_back_to_iauth_local_tier),
     T(iauth_replacing_announced_list_is_a_change),
@@ -890,6 +1123,15 @@ int main(void)
     T(health_no_change_tells_nothing),
     T(health_down_then_services_list_changes),
     T(health_iauth_list_is_new_value),
+    T(services_leave_healthy_tier_default_tells_nothing),
+    T(services_link_healthy_tier_default_tells_nothing),
+    T(services_no_tier_default_link_new_leave_del),
+    T(other_server_no_tier_default_tells_nothing),
+    T(services_unhealthy_tier_default_leave_del_link_new),
+    T(services_pattern_two_matches),
+    T(iauth_services_link_told_as_before),
+    T(iauth_services_leave_told_as_before),
+    T(health_cap_sasl_off_tells_nothing),
 #undef T
   };
 

@@ -272,33 +272,9 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
       chathistory_reflood_ads(sptr);
   }
 
-  /* Check if the linking server is the SASL server (for legacy X3 support).
-   * If SASL_DEFAULT_MECHANISMS is set and no dynamic mechanisms have been
-   * received yet, enable SASL with the default mechanisms.
-   * Only send CAP NEW if the advertised state actually changes.
-   */
-  {
-    const char *sasl_server = feature_str(FEAT_SASL_SERVER);
-    int is_sasl_server = (!strcmp(sasl_server, "*") ||
-                          match(sasl_server, cli_name(sptr)) == 0);
-
-    if (is_sasl_server && !get_sasl_mechanisms()) {
-      const char *default_mechs = feature_str(FEAT_SASL_DEFAULT_MECHANISMS);
-      if (default_mechs && *default_mechs) {
-        /* In wildcard mode, SASL was already being advertised (UserStats.servers > 0
-         * is always true due to local server), using these same default mechanisms.
-         * In specific server mode, SASL wasn't advertised before, so send CAP NEW. */
-        int was_already_advertised = !strcmp(sasl_server, "*");
-
-        if (!was_already_advertised) {
-          log_write(LS_SYSTEM, L_INFO, 0,
-                    "SASL server linked (%C), enabling SASL with default mechanisms: %s",
-                    sptr, default_mechs);
-          send_cap_notify("sasl", 1, default_mechs);
-        }
-      }
-    }
-  }
+  /* The services server linking can change what CAP LS says of sasl
+   * (sasl_mechs.c). */
+  sasl_mechanisms_server_linked(sptr);
 
   /* Count through channels... */
   for (chan = GlobalChannelList; chan; chan = next_chan) {

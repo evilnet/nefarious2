@@ -72,6 +72,9 @@ extern const char* get_sasl_mechanisms(void);
 extern void sasl_mechanisms_announced(const char *mechs);
 /** A server left: the stored list may go with it (free_client()) */
 extern void sasl_mechanisms_server_gone(struct Client *cptr);
+/** A server finished its burst: the services server may have linked
+ * (ms_end_of_burst()) */
+extern void sasl_mechanisms_server_linked(struct Client *sptr);
 
 /** What CAP LS says of sasl: whether it is offered, and its value
  * (cap_sasl_mechanisms(); empty for none). */

@@ -531,6 +531,28 @@ struct Client* find_match_server(char *mask)
   return 0;
 }
 
+/** Find a server matching a mask, other than \a except.
+ * @param[in] mask Server name mask (collapsed in place, as by
+ *   find_match_server()).
+ * @param[in] except Server not to return (NULL: any).
+ * @return A matching server other than \a except, or NULL.
+ */
+struct Client* find_match_server_except(char *mask, struct Client *except)
+{
+  struct Client *acptr;
+  unsigned int i;
+
+  if (!(BadPtr(mask))) {
+    collapse(mask);
+    for (i = 0; i < lastNNServer; i++) {
+      if ((acptr = server_list[i]) && acptr != except
+          && (!match(mask, cli_name(acptr))))
+        return acptr;
+    }
+  }
+  return 0;
+}
+
 /** Encode an IP address in the base64 used by numnicks.
  * For IPv4 addresses (including IPv4-mapped and IPv4-compatible IPv6
  * addresses), the 32-bit host address is encoded directly as six
