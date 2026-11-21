@@ -21,7 +21,7 @@ TESTPROGS = \
 # CMocka test programs (proper assertions)
 #
 # @KC_CMOCKA_TESTPROGS@ is kc_url_cmocka kc_base64_cmocka kc_cache_cmocka ... webhook_subject_cmocka
-# kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka
+# kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka kc_keycloak_cmocka
 # ircd_kc_adapter_cmocka under --enable-keycloak, and empty otherwise: the
 # kc suites link ../kc/*.o, which ircd/Makefile only builds when Keycloak
 # is enabled (see configure.in's Keycloak block), and the adapter's body is
@@ -208,6 +208,7 @@ DEP_SRC = \
 	kc_jwt_cmocka.c \
 	kc_cred_derive_cmocka.c \
 	kc_error_classify_cmocka.c \
+	kc_keycloak_cmocka.c \
 	ircd_kc_adapter_cmocka.c \
 	websocket_cmocka.c \
 	db_casefold_cmocka.c \
@@ -603,6 +604,15 @@ kc_cred_derive_cmocka: $(KC_CRED_DERIVE_CMOCKA_OBJS)
 KC_ERROR_CLASSIFY_CMOCKA_OBJS = kc_error_classify_cmocka.o ../kc/kc_error_classify.o
 kc_error_classify_cmocka: $(KC_ERROR_CLASSIFY_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(KC_ERROR_CLASSIFY_CMOCKA_OBJS) $(CMOCKA_LIBS) $(JANSSON_LIBS)
+
+# kc_keycloak tests - the Keycloak REST client.  kc_http_request is a fake
+# in the test (records each request, lets the test answer it), so neither
+# kc_http.o nor kc.o is linked; the test stubs kc_get_log_ops and
+# kc_get_event_ops.  kc_jwt.o is real (a parsed access token's created_at
+# claim), and brings kc_base64.o and kc_http_sync.o, which no test calls.
+KC_KEYCLOAK_CMOCKA_OBJS = kc_keycloak_cmocka.o ../kc/kc_keycloak.o ../kc/kc_url.o ../kc/kc_error_classify.o ../kc/kc_jwt.o ../kc/kc_base64.o ../kc/kc_http_sync.o
+kc_keycloak_cmocka: $(KC_KEYCLOAK_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(KC_KEYCLOAK_CMOCKA_OBJS) $(CMOCKA_LIBS) $(JANSSON_LIBS) $(CURL_LIBS) $(SSL_LIBS)
 
 # ircd_kc_adapter tests - libkc's socket and timer bridge onto the event
 # engine.  The event layer is a fake in the test with the kernel's fd

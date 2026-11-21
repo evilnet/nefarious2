@@ -42,6 +42,7 @@ struct kc_config {
     const char *realm;
     const char *client_id;
     const char *client_secret;
+    long timeout_ms;              /* per-request limit in ms; <= 0 means 10000 */
 };
 
 /* Access token */

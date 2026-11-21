@@ -65,6 +65,12 @@ static struct kc_realm get_realm(void) {
     return (struct kc_realm){ .base_url = g_config.base_url, .realm = g_config.realm };
 }
 
+/* The per-request limit: the configured one, or 10 s when it is unset. */
+static long request_timeout_ms(void)
+{
+    return g_config.timeout_ms > 0 ? g_config.timeout_ms : 10000;
+}
+
 /* ================================================================
  * JSON parsing helpers
  * ================================================================ */
@@ -461,7 +467,7 @@ static int start_token_refresh(void)
     req.body = body;
     req.body_len = strlen(body);
     req.headers = headers;
-    req.timeout_ms = 10000;
+    req.timeout_ms = request_timeout_ms();
 
     g_token_refreshing = 1;
 
@@ -950,7 +956,7 @@ static void op_token_ready(int result, const struct kc_access_token *token, void
     req.body_len = ctx->body ? strlen(ctx->body) : 0;
     req.headers = ctx->headers;
     req.bearer_token = token->access_token;
-    req.timeout_ms = 10000;
+    req.timeout_ms = request_timeout_ms();
 
     if (kc_http_request(&req, op_response_handler, ctx) != 0) {
         /* HTTP request failed to submit */
@@ -1012,6 +1018,7 @@ int kc_keycloak_init(const struct kc_config *config)
         g_config.client_id = strdup(config->client_id);
     if (config->client_secret)
         g_config.client_secret = strdup(config->client_secret);
+    g_config.timeout_ms = config->timeout_ms;
 
     memset(&g_kc_stats, 0, sizeof(g_kc_stats));
     g_initialized = 1;
@@ -1407,7 +1414,7 @@ int kc_user_verify_password(const char *username, const char *password,
     req.body = body;
     req.body_len = strlen(body);
     req.headers = curl_slist_append(NULL, "Content-Type: application/x-www-form-urlencoded");
-    req.timeout_ms = 10000;
+    req.timeout_ms = request_timeout_ms();
 
     int rc = kc_http_request(&req, op_response_handler, ctx);
 
@@ -1532,7 +1539,7 @@ int kc_token_introspect(const char *token, kc_introspect_cb cb, void *data)
     req.body = body;
     req.body_len = strlen(body);
     req.headers = curl_slist_append(NULL, "Content-Type: application/x-www-form-urlencoded");
-    req.timeout_ms = 10000;
+    req.timeout_ms = request_timeout_ms();
 
     int rc = kc_http_request(&req, op_response_handler, ctx);
 
@@ -1572,7 +1579,7 @@ int kc_jwks_refresh(kc_result_cb cb, void *data)
     memset(&req, 0, sizeof(req));
     req.url = ctx->url;
     req.method = "GET";
-    req.timeout_ms = 10000;
+    req.timeout_ms = request_timeout_ms();
 
     int rc = kc_http_request(&req, op_response_handler, ctx);
     if (rc != 0) {
