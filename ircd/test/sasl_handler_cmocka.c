@@ -674,8 +674,9 @@ static int sasl_cap_dels;
 #define NTOLD 8
 static int told_tells;
 static int told_after[NTOLD];
-int sasl_tell_now(void)
+int sasl_tell_now(const char *event)
 {
+  (void)event;
   if (told_tells < NTOLD)
     told_after[told_tells] = sasl_local_available();
   if (!sasl_local_available())

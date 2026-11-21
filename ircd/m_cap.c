@@ -307,12 +307,10 @@ cap_sasl_mechanisms(void)
 }
 
 /** Check if the SASL server is available.
- * @param[in] moment Which moment to answer for (enum sasl_server_moment):
- *   now, or the moment before a server matching SASL_SERVER left.
  * @return 1 if SASL server is connected and mechanisms available, 0 otherwise.
  */
 static int
-sasl_server_available_as(enum sasl_server_moment moment)
+sasl_server_available(void)
 {
   const char *sasl_server;
 
@@ -338,38 +336,25 @@ sasl_server_available_as(enum sasl_server_moment moment)
   sasl_server = feature_str(FEAT_SASL_SERVER);
 
   /* If set to "*", SASL is broadcast to all servers - check if any exist
-   * (this server itself counts, so a server leaving changes nothing
-   * here) */
+   * (this server itself counts) */
   if (!strcmp(sasl_server, "*"))
     return (UserStats.servers > 0);
 
-  /* Otherwise, check if the specific SASL server is connected (or was,
-   * the moment before it left) */
-  return moment == SASL_SERVER_LEAVING
-         || (find_match_server((char *)sasl_server) != NULL);
-}
-
-/** Check if the SASL server is available now. */
-static int
-sasl_server_available(void)
-{
-  return sasl_server_available_as(SASL_SERVER_NOW);
+  /* Otherwise, check if the specific SASL server is connected */
+  return (find_match_server((char *)sasl_server) != NULL);
 }
 
 /** Does CAP LS offer the sasl capability (its feature on, and SASL
  * available: sasl_server_available())?  With cap_sasl_mechanisms(), what
  * a client is told of sasl.
- * @param[in] moment SASL_SERVER_NOW, or answer as the moment before a
- *   server matching SASL_SERVER left (SASL_SERVER_LEAVING: it is already
- *   out of the server table).
  * @return Non-zero if sasl is offered.
  */
 int
-cap_sasl_offered(enum sasl_server_moment moment)
+cap_sasl_offered(void)
 {
   if (!feature_bool(FEAT_CAP_sasl))
     return 0;
-  return sasl_server_available_as(moment);
+  return sasl_server_available();
 }
 
 /**

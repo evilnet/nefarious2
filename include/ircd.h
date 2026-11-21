@@ -60,11 +60,11 @@ extern int	      running;
 extern int            server_boot_complete; /**< Subsystem init finished, accept_connection may pull from listen backlog */
 extern unsigned long  MsgIdCounter;   /**< Counter for unique message IDs */
 
-/** SASL mechanism list received from services (dynamic, for CAP LS) */
+/** Size of the stored SASL mechanism list (sasl_mechs.c), its terminator
+ * included: a list stored whole is at most SASL_MECHS_LEN - 2 bytes */
 #define SASL_MECHS_LEN 128
-extern char           SaslMechanisms[SASL_MECHS_LEN];
 
-/** Set the SASL mechanism list (called when services announces mechanisms) */
+/** Set the SASL mechanism list (IAuth's) */
 extern void set_sasl_mechanisms(const char *mechs);
 /** Get the SASL mechanism list (for CAP LS value) */
 extern const char* get_sasl_mechanisms(void);
@@ -78,7 +78,9 @@ extern void sasl_mechanisms_server_linked(struct Client *sptr);
 
 /** Tell cap-notify clients what changed in what CAP LS says of sasl since
  * they were last told (1: CAP NEW, -1: CAP DEL, 0: nothing) */
-extern int sasl_tell_now(void);
+extern int sasl_tell_now(const char *event);
+/** The end of a rehash: tell the difference, once IAuth has settled */
+extern void sasl_tell_after_rehash(void);
 /** Remember what CAP LS says of sasl as told, telling nobody (start-up) */
 extern void sasl_told_set_now(void);
 

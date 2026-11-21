@@ -3479,7 +3479,7 @@ static void sasl_mark_unhealthy_why(int result, const char *reason)
     else
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "SASL LOCAL: Keycloak became unreachable (result %d) — removing SASL", result);
-    sasl_tell_now();
+    sasl_tell_now("Keycloak unreachable");
   }
   sasl_start_health_retry();
 }
@@ -3495,7 +3495,7 @@ static void sasl_mark_healthy(void)
   if (!was_healthy && sasl_local_initialized) {
     log_write(LS_SYSTEM, L_NOTICE, 0,
               "SASL LOCAL: Keycloak is now reachable — advertising SASL");
-    sasl_tell_now();
+    sasl_tell_now("Keycloak reachable");
   }
   sasl_stop_health_retry();
 }

@@ -1652,7 +1652,7 @@ static void test_other_network_wide_forms_are_only_relayed(void **state)
 }
 
 /* The list is the trailing parameter, and goes into every client's CAP LS
- * value: one with a space or a control character is relayed but not
+ * value: one with a space or a control character (not names) is relayed but not
  * stored, and logged once (a warning), not at every re-send. */
 static void test_mech_list_with_space_is_only_relayed(void **state)
 {
@@ -1689,6 +1689,72 @@ static void test_mech_list_with_control_is_only_relayed(void **state)
   nlogged = 0;
   deliver(ms_sasl, svs, svs, "* * M :PLAIN\tX");
   assert_int_equal(stored_calls, 1);
+  assert_int_equal(nlogged, 1);
+}
+
+/* The list must be comma-separated mechanism names (RFC 4422's
+ * characters, as sasl_mechanism_name_ok() checks), with no empty entry,
+ * and fit the store whole (at most SASL_MECHS_LEN - 2 bytes): any other
+ * is relayed only, and logged once. */
+static void test_mech_list_entries_must_be_names(void **state)
+{
+  static const char *const bad[] = {
+    "PLAIN,X+Y",                        /* not a name */
+    "PLAIN,plain",                      /* lower case */
+    "PLAIN,,EXTERNAL",                  /* an empty entry */
+    "PLAIN,",                           /* ... at the end */
+    ",PLAIN",                           /* ... at the start */
+    "PLAIN,\303\251",                   /* bytes >= 0x80 */
+    "PLAIN,ABCDEFGHIJKLMNOPQRSTUVWXY",  /* a 25-character entry */
+  };
+  struct Client *svs = services_link();
+  size_t i;
+  (void)state;
+
+  /* A single mechanism is stored (and resets the once-only warning). */
+  deliver(ms_sasl, svs, svs, "* * M :EXTERNAL");
+  assert_int_equal(stored_calls, 1);
+  assert_string_equal(stored_mechs, "EXTERNAL");
+
+  for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+    deliver(ms_sasl, svs, svs, "* * M :%s", bad[i]);
+    assert_int_equal(stored_calls, 1);
+    assert_int_equal(relay_calls, (int)i + 2);
+  }
+  assert_int_equal(nlogged, 1);
+
+  deliver(ms_sasl, svs, svs, "* * M :PLAIN,EXTERNAL");
+  assert_int_equal(stored_calls, 2);
+  assert_string_equal(stored_mechs, "PLAIN,EXTERNAL");
+  deliver(ms_sasl, svs, svs, "* * M :ECDSA-NIST256P-CHALLENGE,SCRAM-SHA-256");
+  assert_int_equal(stored_calls, 3);
+}
+
+/* A list that would be cut to fit the store is relayed only: one that
+ * fits exactly (SASL_MECHS_LEN - 2 bytes) is stored, one a byte longer is
+ * not. */
+static void test_mech_list_must_fit_whole(void **state)
+{
+  struct Client *svs = services_link();
+  char list[SASL_MECHS_LEN + 8];
+  size_t len;
+  (void)state;
+
+  /* "A,A,...,A": SASL_MECHS_LEN - 2 bytes */
+  for (len = 0; len < SASL_MECHS_LEN - 2; len++)
+    list[len] = (len % 2) ? ',' : 'A';
+  if (list[len - 1] == ',')
+    list[len - 1] = 'B';                /* "...,AB" ends with a name */
+  list[len] = '\0';
+  deliver(ms_sasl, svs, svs, "* * M :%s", list);
+  assert_int_equal(stored_calls, 1);
+  assert_int_equal(strlen(stored_mechs), SASL_MECHS_LEN - 2);
+
+  list[len] = 'C';                      /* one byte more */
+  list[len + 1] = '\0';
+  deliver(ms_sasl, svs, svs, "* * M :%s", list);
+  assert_int_equal(stored_calls, 1);
+  assert_int_equal(relay_calls, 2);
   assert_int_equal(nlogged, 1);
 }
 
@@ -1751,6 +1817,8 @@ int main(void)
     T(test_mech_list_with_space_is_only_relayed),
     T(test_mech_list_with_control_is_only_relayed),
     T(test_mech_reply_must_be_exactly_m),
+    T(test_mech_list_entries_must_be_names),
+    T(test_mech_list_must_fit_whole),
 #undef T
   };
 

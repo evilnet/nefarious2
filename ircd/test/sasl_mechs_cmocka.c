@@ -62,6 +62,7 @@ static const char *local_mechs;        /* the Keycloak tier: NULL = none
 static const char *sasl_server;        /* FEAT_SASL_SERVER */
 static const char *default_mechs;      /* FEAT_SASL_DEFAULT_MECHANISMS */
 static int iauth_sasl;                 /* auth_iauth_handles_sasl() */
+static int iauth_policy_pending;       /* auth_iauth_policy_pending() */
 static const char *iauth_mechs;        /* auth_iauth_sasl_mechs() */
 static int cap_sasl_off;               /* FEAT_CAP_sasl off */
 
@@ -124,6 +125,7 @@ const char *feature_str(enum Feature feat)
 int sasl_local_available(void) { return local_mechs != NULL; }
 const char *sasl_local_mechanisms(void) { return local_mechs; }
 int auth_iauth_handles_sasl(void) { return iauth_sasl; }
+int auth_iauth_policy_pending(void) { return iauth_policy_pending; }
 const char *auth_iauth_sasl_mechs(void)
 {
   return iauth_sasl ? iauth_mechs : NULL;
@@ -162,14 +164,26 @@ const char *batch_current_id(struct Client *cli) { (void)cli; return ""; }
 int send_reply(struct Client *to, int reply, ...)
 { (void)to; (void)reply; return 0; }
 void debug(int level, const char *form, ...) { (void)level; (void)form; }
-/* "SASL server linked ..., enabling SASL ..." lines logged. */
-static int nlog_linked;
+/* Lines logged: "SASL server linked ..., enabling SASL ...", "SASL: told
+ * clients ..." (the last one's text, formatted), "Services disconnect:
+ * clearing SASL ...". */
+static int nlog_linked, nlog_told, nlog_clearing;
+static char log_told[LINE];
 void log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
                const char *fmt, ...)
 {
   (void)subsys; (void)severity; (void)flags;
   if (strstr(fmt, "SASL server linked"))
     nlog_linked++;
+  if (strstr(fmt, "SASL: told clients")) {
+    va_list vl;
+    va_start(vl, fmt);
+    vsnprintf(log_told, sizeof(log_told), fmt, vl);
+    va_end(vl);
+    nlog_told++;
+  }
+  if (strstr(fmt, "Services disconnect: clearing SASL"))
+    nlog_clearing++;
 }
 
 /* ====================================================================
@@ -317,8 +331,10 @@ static int setup(void **state)
   default_mechs = "";
   iauth_sasl = 0;
   iauth_mechs = NULL;
+  iauth_policy_pending = 0;
   cap_sasl_off = 0;
-  nlog_linked = 0;
+  nlog_linked = nlog_told = nlog_clearing = 0;
+  log_told[0] = '\0';
   started = 0;
   memset(linked, 0, sizeof(linked));
   GlobalClientList = NULL;
@@ -734,7 +750,7 @@ static void iauth_replacing_announced_list_is_a_change(void **state)
 static void tier_health(const char *mechs)
 {
   local_mechs = mechs;
-  sasl_tell_now();
+  sasl_tell_now("health change");
 }
 
 /** 1. Services linked with a different list S: the tier going down moves
@@ -1470,6 +1486,102 @@ static void iauth_raw_send_then_other_event(void **state)
   assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
 }
 
+/* ====================================================================
+ * The end of a rehash
+ * ==================================================================== */
+
+/** The reproduction: IAuth handles SASL with list S, SASL_SERVER names X3,
+ * which is not linked; clients were told sasl=S.  A rehash replaces the
+ * IAuth program: the new instance has no policy yet (does not handle
+ * SASL), so CAP LS says "not offered" for now -- the rehash's telling
+ * waits, nothing is sent.  The policy then comes with S: IAuth's list is
+ * the stored one already, so IAuth stores and sends nothing, and CAP LS
+ * and what clients were told agree (a telling finds nothing to send).
+ * (b7d707fe: CAP DEL :sasl at the rehash, never corrected.) */
+static void rehash_waits_for_iauth_policy(void **state)
+{
+  (void)state;
+
+  sasl_server = "x3.test";
+  iauth_sasl = 1;
+  iauth_mechs = "PLAIN";
+  user302("n");
+  set_sasl_mechanisms("PLAIN");         /* told, raw, as always */
+  assert_int_equal(nsent, 1);
+  nsent = 0;
+
+  iauth_sasl = 0;                       /* the new instance */
+  iauth_policy_pending = 1;
+  sasl_tell_after_rehash();
+  assert_int_equal(nsent, 0);
+
+  iauth_sasl = 1;                       /* its O line, then its l line */
+  iauth_policy_pending = 0;
+  assert_string_equal(ls_sasl(), "sasl=PLAIN");
+  assert_int_equal(sasl_tell_now("check"), 0);
+  assert_int_equal(nsent, 0);
+}
+
+/** An IAuth block a rehash removed: the program is gone when the rehash's
+ * telling runs (after auth_close_unused(); conf_include_cmocka pins the
+ * order), so the telling sees CAP LS without it -- here no services
+ * server linked: CAP DEL :sasl, logged. */
+static void rehash_after_iauth_removed_tells(void **state)
+{
+  (void)state;
+
+  sasl_server = "x3.test";
+  iauth_sasl = 1;
+  iauth_mechs = "PLAIN";
+  user302("n");
+  set_sasl_mechanisms("PLAIN");
+  nsent = 0;
+
+  iauth_sasl = 0;                       /* removed: no instance at all */
+  iauth_policy_pending = 0;
+  sasl_tell_after_rehash();
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  assert_int_equal(nlog_told, 1);
+  assert_string_equal(log_told, "SASL: told clients CAP DEL :sasl (rehash)");
+}
+
+/* ====================================================================
+ * Logging
+ * ==================================================================== */
+
+/** A hub's end of burst that announces sasl again (X3 back behind it) is
+ * logged; "clearing SASL" only when a list is cleared. */
+static void told_and_clearing_logged(void **state)
+{
+  struct Client *hub, *x3;
+  (void)state;
+
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
+  user302("n");
+  x3 = server("x3.test");
+  sasl_mechanisms_server_linked(x3);
+  nsent = nlog_told = 0;
+
+  server_leaves(x3);                    /* default only: nothing cleared */
+  assert_int_equal(nlog_clearing, 0);
+  assert_int_equal(nlog_told, 1);
+  assert_string_equal(log_told, "SASL: told clients CAP DEL :sasl (a server left)");
+
+  hub = server("hub2.test");
+  x3 = server_via("x3.test", hub);
+  sasl_mechanisms_server_linked(hub);
+  assert_int_equal(nsent, 2);
+  assert_int_equal(nlog_told, 2);
+  assert_string_equal(log_told, "SASL: told clients CAP NEW :sasl=PLAIN (end of burst)");
+
+  sasl_mechanisms_announced("PLAIN,EXTERNAL");
+  assert_int_equal(nlog_told, 3);
+  server_leaves(x3);                    /* services' list: cleared */
+  assert_int_equal(nlog_clearing, 1);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -1526,6 +1638,9 @@ int main(void)
     T(health_flip_during_burst_no_repeat),
     T(boot_healthy_tier_first_eob_tells_nothing),
     T(iauth_raw_send_then_other_event),
+    T(rehash_waits_for_iauth_policy),
+    T(rehash_after_iauth_removed_tells),
+    T(told_and_clearing_logged),
 #undef T
   };
 

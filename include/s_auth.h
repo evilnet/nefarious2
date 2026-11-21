@@ -77,6 +77,7 @@ extern void report_iauth_conf(struct Client *cptr, const struct StatDesc *sd, ch
 extern void report_iauth_stats(struct Client *cptr, const struct StatDesc *sd, char *param);
 
 /* SASL via IAuth */
+extern int auth_iauth_policy_pending(void);
 extern int auth_iauth_handles_sasl(void);
 extern const char *auth_iauth_sasl_mechs(void);
 extern int auth_send_sasl_start(struct Client *cptr, const char *mechanism, const char *certfp);

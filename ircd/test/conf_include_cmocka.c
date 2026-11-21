@@ -133,8 +133,6 @@ void feature_mark(void) { }
 void clear_nameservers(void) { }
 void sasl_conf_reset_pending(void) { }
 void sasl_conf_apply(void) { }
-int server_boot_complete;          /* the first read: nothing told */
-int sasl_tell_now(void) { return 0; }
 void authtoken_conf_begin(void) { }
 void authtoken_conf_apply(void) { }
 void auth_conf_begin(void) { }
@@ -146,6 +144,82 @@ void auth_conf_apply(void)
 {
   auth_apply_saw_error = conf_get_error_flag();
 }
+
+/* ------------------------------------------------------------------ */
+/* The ircd around rehash()                                            */
+/* ------------------------------------------------------------------ */
+
+/* The IAuth close and the sasl telling at the end of a rehash, in the
+ * order they ran; the telling's calls. */
+static char rehash_order[64];
+static int ntells;
+
+void auth_close_unused(void)
+{
+  strcat(rehash_order, "close ");
+}
+
+void sasl_tell_after_rehash(void)
+{
+  ntells++;
+  strcat(rehash_order, "tell ");
+}
+
+/* The rest, as nothing: no configuration in use, no local connection. */
+char *configfile = "ircd.conf";
+int HighestFd = -1;
+struct Client *LocalClientArray[MAXCONNECTIONS];
+static int fake_file;
+FBFILE *lexer_open_config(void) { return (FBFILE *)&fake_file; }
+void lexer_close_config(void) { }
+int fbstat(struct stat *sb, FBFILE *fb)
+{
+  (void)fb;
+  memset(sb, 0, sizeof(*sb));
+  sb->st_mode = S_IFREG;
+  sb->st_size = 1;
+  return 0;
+}
+FBFILE *fbopen(const char *filename, const char *mode)
+{ (void)filename; (void)mode; return NULL; }
+char *fbgets(char *buf, size_t len, FBFILE *fb)
+{ (void)buf; (void)len; (void)fb; return NULL; }
+void fbclose(FBFILE *fb) { (void)fb; }
+void auth_mark_closing(void) { }
+void auth_send_event(const char *event, const char *paramstring)
+{ (void)event; (void)paramstring; }
+int bounce_forced_exit(struct Client *cptr, struct Client *victim,
+                       enum bounce_forced_exit why, const char *comment)
+{ (void)cptr; (void)victim; (void)why; (void)comment; return 0; }
+void bounce_restamp_sessions(void) { }
+void class_delete_marked(void) { }
+void class_mark_delete(void) { }
+void clearNickJupes(void) { }
+void close_listeners(void) { }
+void mark_listeners_closing(void) { }
+void crule_free(struct CRuleNode **elem) { (void)elem; }
+void delete_resolver_queries(const void *vptr) { (void)vptr; }
+void restart_resolver(void) { }
+void dnsbl_clear_servers(void) { }
+int exit_client(struct Client *cptr, struct Client *bcptr,
+                struct Client *sptr, const char *comment)
+{ (void)cptr; (void)bcptr; (void)sptr; (void)comment; return 0; }
+void free_link(struct SLink *lp) { (void)lp; }
+struct SLink *make_link(void) { return calloc(1, sizeof(struct SLink)); }
+void geoip_init(void) { }
+const char *get_client_name(const struct Client *sptr, int showip)
+{ (void)showip; return cli_name(sptr); }
+struct Gline *gline_lookup(struct Client *cptr, unsigned int flags)
+{ (void)cptr; (void)flags; return NULL; }
+struct Zline *zline_lookup(struct Client *cptr, unsigned int flags)
+{ (void)cptr; (void)flags; return NULL; }
+void init_isupport(void) { }
+void send_isupport_update(void) { }
+void log_reopen(void) { }
+void motd_clear(void) { }
+int send_reply(struct Client *to, int reply, ...)
+{ (void)to; (void)reply; return 0; }
+int unregister_mapping(struct s_map *map) { (void)map; return 0; }
 
 int init_lexer(void)
 {
@@ -549,6 +623,33 @@ static void notes_do_not_outlive_the_pass(void **state)
   assert_int_equal(0, nnotices);
 }
 
+/* ------------------------------------------------------------------ */
+/* The sasl telling at the end of a rehash                             */
+/* ------------------------------------------------------------------ */
+
+/** Reading the configuration tells nothing of sasl, at the first read
+ * (start-up sets what clients start from) and at any later one; a rehash
+ * tells once, after a removed IAuth program is closed
+ * (sasl_tell_after_rehash() itself waits while a new program's policy is
+ * unknown: sasl_mechs_cmocka). */
+static void rehash_tells_sasl_once_after_iauth_close(void **state)
+{
+  static const struct step steps[] = { { END, NULL, 0 } };
+  static struct Server me_serv;          /* no servers below this one */
+
+  (void)state;
+  cli_serv(&me) = &me_serv;
+  rehash_order[0] = '\0';
+  ntells = 0;
+  run(steps);
+  assert_int_equal(0, ntells);
+
+  parse_steps = steps;
+  rehash(&me, 0);
+  assert_int_equal(1, ntells);
+  assert_string_equal(rehash_order, "close tell ");
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -567,6 +668,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(other_missing_include_fails, setup, teardown),
     cmocka_unit_test_setup_teardown(gitsync_disabled_fails, setup, teardown),
     cmocka_unit_test_setup_teardown(notes_do_not_outlive_the_pass, setup, teardown),
+    cmocka_unit_test_setup_teardown(rehash_tells_sasl_once_after_iauth_close, setup, teardown),
 #ifdef USE_LIBGIT2
     cmocka_unit_test_setup_teardown(check_only_writes_nothing, setup, teardown),
 #endif

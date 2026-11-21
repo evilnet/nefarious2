@@ -35,7 +35,7 @@
 #include <string.h>
 
 /** SASL mechanism list received from services. Empty means use default. */
-char SaslMechanisms[SASL_MECHS_LEN] = "";
+static char SaslMechanisms[SASL_MECHS_LEN] = "";
 
 /** Non-zero while SaslMechanisms holds a list services announced
  * ("SASL * * M", sasl_mechanisms_announced()) rather than IAuth's.  A
@@ -53,20 +53,17 @@ struct sasl_told {
 
 /** What cap-notify clients were last told of sasl (a CAP NEW with its
  * value, or a CAP DEL); set at the end of start-up, before any client is
- * accepted (sasl_tell_now()). */
+ * accepted (sasl_told_set_now()). */
 static struct sasl_told sasl_last_told;
 
 /** What CAP LS says of sasl now.
  * @param[out] told Filled in.
- * @param[in] moment SASL_SERVER_NOW, or as the moment before a server
- *   matching SASL_SERVER left (cap_sasl_offered()).
  */
-static void sasl_told_now(struct sasl_told *told,
-                          enum sasl_server_moment moment)
+static void sasl_told_now(struct sasl_told *told)
 {
   const char *value = cap_sasl_mechanisms();
 
-  told->offered = cap_sasl_offered(moment);
+  told->offered = cap_sasl_offered();
   ircd_strncpy(told->value, value ? value : "", sizeof(told->value));
 }
 
@@ -109,18 +106,38 @@ static int sasl_tell_difference(const struct sasl_told *was,
  * stored list, the local Keycloak tier's health, a server leaving, any
  * server's end of burst, the end of start-up and of a rehash.  Never the
  * stored list itself: the server's own Keycloak mechanisms come before it
- * (cap_sasl_mechanisms()).
+ * (cap_sasl_mechanisms()).  What it sends is logged, with @a event.
+ * @param[in] event What happened, for the log.
  * @return 1 for a CAP NEW, -1 for a CAP DEL, 0 when nothing was sent.
  */
-int sasl_tell_now(void)
+int sasl_tell_now(const char *event)
 {
   struct sasl_told was = sasl_last_told, now;
   int sent;
 
-  sasl_told_now(&now, SASL_SERVER_NOW);
+  sasl_told_now(&now);
   sent = sasl_tell_difference(&was, &now);
   sasl_last_told = now;
+  if (sent > 0)
+    log_write(LS_SYSTEM, L_INFO, 0, "SASL: told clients CAP NEW :sasl%s%s (%s)",
+              now.value[0] ? "=" : "", now.value, event);
+  else if (sent < 0)
+    log_write(LS_SYSTEM, L_INFO, 0, "SASL: told clients CAP DEL :sasl (%s)",
+              event);
   return sent;
+}
+
+/** The end of a rehash (rehash(), after a removed IAuth program is gone):
+ * tell the difference -- unless an IAuth program's policy is still to come
+ * (auth_iauth_policy_pending(): a program the rehash started).  Until it
+ * comes CAP LS does not say what the program will offer, and IAuth's own
+ * paths tell what they always did; what clients were last told stays, and
+ * the next event tells the difference. */
+void sasl_tell_after_rehash(void)
+{
+  if (auth_iauth_policy_pending())
+    return;
+  sasl_tell_now("rehash");
 }
 
 /** Remember what CAP LS says of sasl as what clients were last told,
@@ -128,7 +145,7 @@ int sasl_tell_now(void)
  * (main()). */
 void sasl_told_set_now(void)
 {
-  sasl_told_now(&sasl_last_told, SASL_SERVER_NOW);
+  sasl_told_now(&sasl_last_told);
 }
 
 /** Copy a list into SaslMechanisms (NULL or empty clears it). */
@@ -150,7 +167,7 @@ static void sasl_store_told(const char *mechs, int announced)
 {
   sasl_store(mechs);
   sasl_list_announced = announced && SaslMechanisms[0];
-  sasl_tell_now();
+  sasl_tell_now("mechanism list");
 }
 
 /** Store IAuth's list (or clear it) with the notifications it has always
@@ -186,28 +203,21 @@ static void sasl_store_legacy(const char *mechs)
   }
 }
 
-/** Replace or clear the stored list, for a source other than services'
- * announcement.  A list services announced is replaced (or cleared) as a
- * change of what clients are told (sasl_store_told()); otherwise the
- * stored list is IAuth's or none, told as it always was.
- * @param[in] mechs List; NULL or empty clears.
- */
-static void sasl_replace(const char *mechs)
-{
-  if (sasl_list_announced)
-    sasl_store_told(mechs, 0);
-  else
-    sasl_store_legacy(mechs);
-}
-
-/** Set the SASL mechanism list: IAuth's (iauth_cmd_sasl_global_mechs()).
- * The list stored afterwards is not services' announcement.
+/** Set the SASL mechanism list: IAuth's (iauth_cmd_sasl_global_mechs()),
+ * or none (a server matching SASL_SERVER left).  A list services
+ * announced is replaced (or cleared) as a change of what clients are told
+ * (sasl_store_told()); otherwise the stored list is IAuth's or none, told
+ * as it always was.  The list stored afterwards is not services'
+ * announcement.
  * @param[in] mechs Comma-separated list of mechanism names; NULL or empty
  *   clears.
  */
 void set_sasl_mechanisms(const char *mechs)
 {
-  sasl_replace(mechs);
+  if (sasl_list_announced)
+    sasl_store_told(mechs, 0);
+  else
+    sasl_store_legacy(mechs);
 }
 
 /** Get the SASL mechanism list for CAP LS.
@@ -275,10 +285,10 @@ void sasl_mechanisms_server_gone(struct Client *cptr)
            * from what CAP LS said the moment before the server left. */
           struct sasl_told before, after;
 
-          sasl_told_now(&before, SASL_SERVER_LEAVING);
+          sasl_told_now(&before);
           sasl_store(iauth_mechs);
           sasl_list_announced = 0;
-          sasl_told_now(&after, SASL_SERVER_NOW);
+          sasl_told_now(&after);
           sasl_tell_difference(&before, &after);
         } else {
           if (had_dynamic)
@@ -290,11 +300,10 @@ void sasl_mechanisms_server_gone(struct Client *cptr)
           else
             sasl_notify(1, NULL);  /* Re-advertise without mechanism list */
         }
-      } else {
+      } else if (had_dynamic) {
         log_write(LS_SYSTEM, L_INFO, 0,
                   "Services disconnect: clearing SASL (%C)", cptr);
-        if (had_dynamic)
-          sasl_replace(NULL);  /* told below for services' list */
+        set_sasl_mechanisms(NULL);  /* told below for services' list */
       }
     }
   }
@@ -302,7 +311,7 @@ void sasl_mechanisms_server_gone(struct Client *cptr)
   /* Any server leaving can change what CAP LS says (the services server,
    * or a hub it was behind).  IAuth's branch above told its own. */
   if (!auth_iauth_handles_sasl())
-    sasl_tell_now();
+    sasl_tell_now("a server left");
 }
 
 /** A server finished its burst (ms_end_of_burst()): it, and any server
@@ -340,7 +349,7 @@ void sasl_mechanisms_server_linked(struct Client *sptr)
     return;
   }
 
-  if (sasl_tell_now() > 0 && enables_default)
+  if (sasl_tell_now("end of burst") > 0 && enables_default)
     log_write(LS_SYSTEM, L_INFO, 0,
               "SASL server linked (%C), enabling SASL with default mechanisms: %s",
               sptr, default_mechs);

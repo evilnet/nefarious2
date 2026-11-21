@@ -207,7 +207,7 @@ int server_boot_complete = 0;
 /** Counter for generating unique message IDs. */
 unsigned long MsgIdCounter = 0;
 
-/* The stored SASL mechanism list (SaslMechanisms, set_sasl_mechanisms(),
+/* The stored SASL mechanism list (set_sasl_mechanisms(),
  * get_sasl_mechanisms()) lives in sasl_mechs.c. */
 
 /** VAPID public key received from services. Empty means webpush unavailable. */

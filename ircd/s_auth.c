@@ -2226,6 +2226,17 @@ void auth_sasl_clear(struct AuthRequest *auth)
 /** Check if IAuth is configured to handle SASL authentication.
  * @return Non-zero if IAuth handles SASL, zero otherwise.
  */
+/** Is an IAuth program's policy (its O line) still to come: an instance
+ * exists that has not announced one -- a program the last rehash started,
+ * or one not running yet?  Until then auth_iauth_handles_sasl() does not
+ * say what the program will do.
+ * @return Non-zero while the policy is not known.
+ */
+int auth_iauth_policy_pending(void)
+{
+  return iauth && !IAuthHas(iauth, IAUTH_ANNOUNCED);
+}
+
 int auth_iauth_handles_sasl(void)
 {
   return IAuthHas(iauth, IAUTH_SASL);

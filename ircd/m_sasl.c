@@ -124,15 +124,35 @@ static void sasl_relay_end(struct Client *acptr)
     auth_sasl_done(cli_auth(acptr));
 }
 
-/** Is \a list fit for the sasl= cap value: no space, no control
- * character?  It is the trailing parameter of "SASL * * M", and goes into
- * every client's CAP LS line as it is. */
+/** Is \a list fit for the sasl= cap value: comma-separated entries that
+ * are each a mechanism name (sasl_mechanism_name_ok(): RFC 4422's
+ * characters, no empty entry), short enough to be stored whole?  It is the
+ * trailing parameter of "SASL * * M", goes into every client's CAP LS line
+ * as it is, and AUTHENTICATE takes its entries as names
+ * (sasl_mechanism_listed()).  The empty list is fit: it withdraws the
+ * list (sasl_mechanisms_announced()). */
 static int sasl_mech_list_clean(const char *list)
 {
-  for (; *list; list++)
-    if ((unsigned char)*list <= ' ' || *list == '\177')
+  char name[SASL_MECHANISM_NAME_MAX + 1];
+  const char *p = list;
+
+  if (!*list)
+    return 1;
+  if (strlen(list) > SASL_MECHS_LEN - 2)
+    return 0;
+  for (;;) {
+    size_t len = strcspn(p, ",");
+
+    if (len == 0 || len > SASL_MECHANISM_NAME_MAX)
       return 0;
-  return 1;
+    memcpy(name, p, len);
+    name[len] = '\0';
+    if (!sasl_mechanism_name_ok(name))
+      return 0;
+    if (p[len] == '\0')
+      return 1;
+    p += len + 1;
+  }
 }
 
 int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
@@ -159,9 +179,9 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     /* Network-wide forms are relayed as-is.  "SASL * * M :<mechanisms>"
      * is the list services announce (and re-send when servers link); it
      * is stored here for the sasl= cap value (see cap_sasl_mechanisms())
-     * and relayed like the rest.  A list with a space or a control
-     * character is relayed only, and logged once until a good list
-     * comes. */
+     * and relayed like the rest.  A list that is not comma-separated
+     * mechanism names, or too long to store whole, is relayed only, and
+     * logged once until a good list comes. */
     if (!strcmp(token, "*") && reply[0] == 'M' && reply[1] == '\0') {
       static int warned;
 
@@ -171,7 +191,8 @@ int ms_sasl(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       } else if (!warned) {
         warned = 1;
         log_write(LS_SYSTEM, L_WARNING, 0, "SASL mechanism list from %C "
-                  "has a space or a control character: not stored", sptr);
+                  "is not comma-separated mechanism names that fit: not "
+                  "stored", sptr);
       }
     }
 

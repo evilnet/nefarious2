@@ -167,6 +167,22 @@ static struct Client *linked(const char *name, const char *numeric,
   return c;
 }
 
+/** A server behind @a link (introduced by it), numeric @a numeric. */
+static struct Client *behind(struct Client *link, const char *name,
+                             const char *numeric)
+{
+  struct Client *c = fake_client(name, STAT_SERVER);
+  char yxx[6];
+
+  cli_serv(c) = calloc(1, sizeof(struct Server));
+  assert_non_null(cli_serv(c));
+  snprintf(yxx, sizeof(yxx), "%s]]]", numeric);
+  SetServerYXX(link, c, yxx);
+  cli_connect(c) = cli_connect(link);   /* cli_from(c): the link */
+  cli_serv(c)->up = link;
+  return c;
+}
+
 static struct Client *a_user(const char *nick)
 {
   struct Client *c = fake_client(nick, STAT_USER);
@@ -1827,6 +1843,30 @@ static void test_end_of_burst_from_a_user(void **state)
   assert_int_equal(nopnotices, 0);
   assert_int_equal(nviolations, 1);
   assert_int_equal(sent_count_to(ae), 0);
+  assert_int_equal(nsasl_linked, 0);    /* nothing told of sasl */
+}
+
+/* A server behind the link ends its burst (X3 restarting behind the hub
+ * that stays linked): relayed, and what clients are told of sasl is asked
+ * once, about that server -- the call is outside the block for links of
+ * our own. */
+static void test_end_of_burst_relayed(void **state)
+{
+  struct Client *ac, *ae, *ad;
+  (void)state;
+  ac = linked("leafa.test", "AC", 1);
+  ae = linked("leafc.test", "AE", 1);
+  ad = behind(ac, "x3.test", "AD");
+  SetBurst(ad);
+
+  deliver(ms_end_of_burst, ac, ad, "");
+
+  assert_false(IsBurst(ad));
+  assert_string_equal(sent_to(ae, 0), "AD EB ");
+  assert_int_equal(sent_count_to(ac), 0);   /* no ack: not our link */
+  assert_int_equal(nviolations, 0);
+  assert_int_equal(nsasl_linked, 1);
+  assert_ptr_equal(sasl_linked_by, ad);
 }
 
 static void test_end_of_burst_ack_from_a_user(void **state)
@@ -1906,6 +1946,7 @@ int main(void)
     T(test_topic_without_a_setter),
     T(test_end_of_burst_from_a_server),
     T(test_end_of_burst_from_a_user),
+    T(test_end_of_burst_relayed),
     T(test_end_of_burst_ack_from_a_user),
     T(test_burst_from_a_user),
     T(test_destruct_from_a_user),
