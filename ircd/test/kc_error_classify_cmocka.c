@@ -2,6 +2,8 @@
 #include <stddef.h>
 #include <setjmp.h>
 #include <cmocka.h>
+#include <stdlib.h>
+#include <string.h>
 #include <jansson.h>
 #include "kc/kc_keycloak.h"
 #include "kc/kc_error_classify.h"
@@ -44,6 +46,32 @@ static void test_classify(void **state) {
     check(400, "[1,2]", KC_ERROR);                                     /* non-object */
     /* an error object under a status that is no refusal of the credentials */
     check(503, "{\"error\":\"temporarily_unavailable\"}", KC_ERROR);
+}
+
+/* A description far longer than anything Keycloak sends (over 4 KB) is
+ * read whole: the keyword at its very end still decides, and without one
+ * it is a plain refusal.  Built as a JSON object, not text, so no body
+ * buffer is involved. */
+static void check_long_description(const char *tail, int expect) {
+    enum { FILL = 5000 };
+    char *desc = malloc(FILL + strlen(tail) + 1);
+    json_t *j;
+
+    assert_non_null(desc);
+    memset(desc, 'x', FILL);
+    strcpy(desc + FILL, tail);
+    j = json_pack("{s:s, s:s}", "error", "invalid_grant", "error_description", desc);
+    free(desc);
+    assert_non_null(j);
+    assert_int_equal(kc_classify_grant_error(400, j), expect);
+    json_decref(j);
+}
+
+static void test_classify_very_long_description(void **state) {
+    (void)state;
+    check_long_description(" Account disabled", KC_DISABLED);
+    check_long_description(" Account is not fully set up", KC_UNVERIFIED);
+    check_long_description("", KC_FORBIDDEN);
 }
 
 static void create(long status, const char *body, int expect) {
@@ -119,6 +147,7 @@ static void test_classify_create(void **state) {
 
 int main(void) {
     const struct CMUnitTest tests[] = { cmocka_unit_test(test_classify),
+                                        cmocka_unit_test(test_classify_very_long_description),
                                         cmocka_unit_test(test_classify_create) };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

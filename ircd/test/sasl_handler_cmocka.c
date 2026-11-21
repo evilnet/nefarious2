@@ -6159,12 +6159,53 @@ static void test_plain_disabled_account_is_a_credential_failure(void **state)
   assert_null(cli_saslsession(c));
 }
 
+/** One PLAIN attempt by a new client on \a fd for \a user, answered \a res:
+ * 904 for any failure.  The client is gone afterwards. */
+static struct fake *plain_answered(int fd, const char *user, int res)
+{
+  struct Client *c = new_client(fd, "rf", 0, REG_KEEPS);
+  struct fake *f = fake_of(c);
+
+  plain_pending(c, user, "refusedpw");
+  pend_deliver_kind(P_TOKEN, res);
+  run_event_loop();
+  assert_true(has_numeric(f, res == KC_SUCCESS ? RPL_SASLSUCCESS : ERR_SASLFAIL));
+  assert_null(cli_saslsession(c));
+  f->in_use = 0;
+  LocalClientArray[fd] = NULL;
+  return f;
+}
+
+/** \a n refusals of the ircd's own client in a row, Keycloak still usable
+ * and sasl not withdrawn after each. */
+static void client_refusals_tolerated(int n)
+{
+  int i, dels = sasl_cap_dels;
+
+  for (i = 0; i < n; i++) {
+    plain_answered(210 + i, "rhea", KC_CLIENT_REFUSED);
+    assert_true(sasl_local_available());
+    assert_int_equal(sasl_cap_dels, dels);
+  }
+}
+
+/** The run of client refusals starts at 0: an answer that proves Keycloak
+ * accepted the ircd's client (a wrong password, for a user of its own). */
+static void client_refusals_cleared(void)
+{
+  static int n;
+  char user[16];
+
+  snprintf(user, sizeof(user), "clr%d", n++);
+  plain_answered(209, user, KC_FORBIDDEN);
+}
+
 /** Keycloak refused the ircd's own client (KC_CLIENT_REFUSED: a wrong
  * client secret, or a client the password grant is not enabled for): no
- * fault of the user's.  904, Keycloak is marked unusable (sasl withdrawn
- * once), nothing goes into the negative cache, and the failure is not
- * counted. */
-static void test_plain_client_refused_marks_keycloak_unusable(void **state)
+ * fault of the user's.  One such answer: 904, Keycloak stays usable (sasl
+ * is not withdrawn for one refusal any unregistered client can cause),
+ * nothing goes into the negative cache, and the failure is not counted. */
+static void test_plain_client_refused_once_keeps_keycloak_usable(void **state)
 {
   struct Client *c;
   struct fake *f;
@@ -6172,6 +6213,7 @@ static void test_plain_client_refused_marks_keycloak_unusable(void **state)
 
   sasl_init_once();
   assert_true(sasl_local_available());
+  client_refusals_cleared();
   sasl_cap_dels = 0;
   c = new_client(204, "cr", 0, REG_KEEPS);
   f = fake_of(c);
@@ -6182,18 +6224,75 @@ static void test_plain_client_refused_marks_keycloak_unusable(void **state)
   assert_false(has_numeric(f, RPL_SASLSUCCESS));
   assert_null(cli_saslsession(c));
   assert_int_equal(cli_sasl_failures(c), 0);     /* not counted */
-  assert_false(sasl_local_available());          /* marked unhealthy ... */
-  assert_int_equal(sasl_cap_dels, 1);            /* ... once */
-  kc_healthy_again();
+  assert_true(sasl_local_available());           /* not marked unhealthy */
+  assert_int_equal(sasl_cap_dels, 0);
 
   c = new_client(205, "cs", 0, REG_KEEPS);       /* the same pair again */
   f = fake_of(c);
   requests = kc_requests;
   plain_pending(c, "rhea", "refusedpw");
   assert_int_equal(kc_requests, requests + 1);   /* asked: no negative cache */
-  pend_deliver_kind(P_TOKEN, KC_SUCCESS);
+  pend_deliver_kind(P_TOKEN, KC_CLIENT_REFUSED);
   run_event_loop();
-  assert_true(has_numeric(f, RPL_SASLSUCCESS));
+  assert_true(has_numeric(f, ERR_SASLFAIL));
+  assert_int_equal(cli_sasl_failures(c), 0);
+  assert_true(sasl_local_available());
+  assert_int_equal(sasl_cap_dels, 0);
+}
+
+/** Five refusals in a row: sasl is withdrawn, once, on the fifth. */
+static void test_plain_client_refused_five_in_a_row_withdraws_sasl(void **state)
+{
+  sasl_init_once();
+  assert_true(sasl_local_available());
+  client_refusals_cleared();
+  sasl_cap_dels = 0;
+  client_refusals_tolerated(4);
+  plain_answered(214, "rhea", KC_CLIENT_REFUSED);
+  assert_false(sasl_local_available());
+  assert_int_equal(sasl_cap_dels, 1);
+  kc_healthy_again();
+  assert_true(sasl_local_available());
+}
+
+/** An answer that proves Keycloak accepted the ircd's client (here a wrong
+ * password) ends the run: four refusals, that answer, four more, and sasl
+ * stays. */
+static void test_plain_client_refused_run_ends_on_an_accepted_answer(void **state)
+{
+  sasl_init_once();
+  assert_true(sasl_local_available());
+  client_refusals_cleared();
+  sasl_cap_dels = 0;
+  client_refusals_tolerated(4);
+  plain_answered(220, "rufus", KC_FORBIDDEN);
+  assert_true(sasl_local_available());
+  client_refusals_tolerated(4);
+  assert_int_equal(sasl_cap_dels, 0);
+  client_refusals_cleared();
+}
+
+/** After a withdrawal and the health check's restore, the run starts over:
+ * four refusals keep sasl, the fifth withdraws it again. */
+static void test_plain_client_refused_counts_again_after_restore(void **state)
+{
+  sasl_init_once();
+  assert_true(sasl_local_available());
+  client_refusals_cleared();
+  sasl_cap_dels = 0;
+  client_refusals_tolerated(4);
+  plain_answered(214, "rhea", KC_CLIENT_REFUSED);
+  assert_int_equal(sasl_cap_dels, 1);
+  kc_healthy_again();
+  assert_true(sasl_local_available());
+
+  client_refusals_tolerated(4);
+  assert_int_equal(sasl_cap_dels, 1);
+  plain_answered(214, "rhea", KC_CLIENT_REFUSED);
+  assert_false(sasl_local_available());
+  assert_int_equal(sasl_cap_dels, 2);
+  kc_healthy_again();
+  assert_true(sasl_local_available());
 }
 
 /** Keycloak could not be asked: the client gets an error challenge, and
@@ -6393,7 +6492,10 @@ int main(void)
     cmocka_unit_test_setup(max_failures_mark_is_final, setup),
     cmocka_unit_test_setup(max_failures_unavailable_never_counts, setup),
     cmocka_unit_test_setup(test_plain_disabled_account_is_a_credential_failure, setup),
-    cmocka_unit_test_setup(test_plain_client_refused_marks_keycloak_unusable, setup),
+    cmocka_unit_test_setup(test_plain_client_refused_once_keeps_keycloak_usable, setup),
+    cmocka_unit_test_setup(test_plain_client_refused_five_in_a_row_withdraws_sasl, setup),
+    cmocka_unit_test_setup(test_plain_client_refused_run_ends_on_an_accepted_answer, setup),
+    cmocka_unit_test_setup(test_plain_client_refused_counts_again_after_restore, setup),
     cmocka_unit_test_setup(toolong_ends_local_exchange, setup),
     cmocka_unit_test_setup(toolong_local_registration_exits, setup),
     cmocka_unit_test_setup(toolong_local_registration_keeps, setup),

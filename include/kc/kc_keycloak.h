@@ -137,7 +137,9 @@ typedef void (*kc_token_cb)(int result, const struct kc_access_token *token, voi
 /* A password grant's answer.  On KC_SUCCESS, token is the user's token
  * (borrowed, valid during the call); NULL on any other result.  reason is
  * Keycloak's error_description exactly as sent, or NULL when the answer
- * had none (always NULL on KC_SUCCESS); borrowed, valid during the call. */
+ * had none (always NULL on KC_SUCCESS); borrowed, valid during the call.
+ * reason is unvalidated bytes from the network, of any length: strip
+ * control characters and bound its length before showing or storing it. */
 typedef void (*kc_grant_cb)(int result, const struct kc_access_token *token,
                             const char *reason, void *data);
 typedef void (*kc_user_cb)(int result, const struct kc_user *user, void *data);
@@ -150,11 +152,14 @@ typedef void (*kc_introspect_cb)(int result, const struct kc_token_info *info, v
  * call), or NULL when the answer named none; NULL on any other result. */
 typedef void (*kc_create_cb)(int result, const char *id, void *data);
 /* A group lookup's answer.  On KC_SUCCESS, group is the group (borrowed,
- * valid during the call); NULL on any other result. */
+ * valid during the call) and group->id is set; NULL on any other result
+ * (KC_INVALID_RESPONSE when Keycloak's answer named no id). */
 typedef void (*kc_group_cb)(int result, const struct kc_group *group, void *data);
 /* A user representation's answer.  On KC_SUCCESS, repr is the user's full
- * JSON representation as Keycloak sent it (borrowed, valid during the call;
- * json_incref() it to keep it); NULL on any other result. */
+ * JSON representation as Keycloak sent it; NULL on any other result.  It is
+ * borrowed: valid during the call, and released after it, so json_incref()
+ * it to keep it.  The callback may modify it in place (nothing reads it
+ * after the call), e.g. to change a field and hand it to kc_user_update(). */
 typedef void (*kc_user_repr_cb)(int result, json_t *repr, void *data);
 
 /*
@@ -166,6 +171,21 @@ int kc_keycloak_init(const struct kc_config *config);
 
 /*
  * Shutdown Keycloak subsystem. Called before kc_shutdown().
+ *
+ * Drops the configuration, the cached admin token and the user-id cache;
+ * kc_keycloak_init() may be called again afterwards (also from a callback
+ * this call makes).
+ *   - Operations still waiting for an admin token are answered inside this
+ *     call: an operation's callback gets KC_TOKEN_ERROR (a kc_token_ensure()
+ *     callback gets KC_UNAVAILABLE).
+ *   - Requests already in flight are NOT cancelled: each still calls back
+ *     later, exactly once, with the old configuration's result, so the
+ *     `data` of any operation started before a shutdown must outlive it.
+ *     An admin-token refresh in flight is the exception: its answer is
+ *     dropped (it installs no token and answers no one under a later
+ *     kc_keycloak_init()).
+ *   - kc_shutdown() (the HTTP layer) by contrast drops every transfer in
+ *     flight without calling back.
  */
 void kc_keycloak_shutdown(void);
 
@@ -189,7 +209,11 @@ const struct kc_access_token *kc_token_cached(void);
  *                  the start function returns, so the caller must not touch
  *                  `data` after a successful start.
  *   - return -1 => the callback was NOT and will NOT be invoked; `data` is
- *                  still the caller's to free.
+ *                  still the caller's to free.  Every operation returns -1
+ *                  for a NULL required argument or callback and when it is
+ *                  called before kc_keycloak_init() (or after
+ *                  kc_keycloak_shutdown()); most also when an allocation
+ *                  fails.  Some operations list their cases in full below.
  */
 
 /* Get user by exact username match */
@@ -253,7 +277,12 @@ int kc_user_update(const char *id, json_t *repr, kc_result_cb cb, void *data);
  * PUT replaces what it is sent.  The result: KC_SUCCESS with the JSON
  * object (see kc_user_repr_cb); KC_NOT_FOUND on 404; KC_TOKEN_ERROR when
  * no admin token could be had; KC_ERROR for no answer, any other status,
- * or a 200 that is not a JSON object. */
+ * or a 200 that is not a JSON object.  Returns -1 without calling back
+ * (the general contract above) exactly when: id or cb is NULL; it is
+ * called before kc_keycloak_init() or after kc_keycloak_shutdown(), or the
+ * configuration has no base URL or realm (no URL can be built); or an
+ * allocation fails (the URL, the operation, or its place in the queue for
+ * an admin token). */
 int kc_user_get_repr(const char *id, kc_user_repr_cb cb, void *data);
 
 /*
@@ -295,11 +324,16 @@ int kc_user_remove_group(const char *user_id, const char *group_id,
                          kc_result_cb cb, void *data);
 
 /* Look a group up by its path ("/parent/child"; it must start with '/').
- * The result: KC_SUCCESS with the group (see kc_group_cb); KC_NOT_FOUND on
- * 404; KC_TOKEN_ERROR when no admin token could be had; KC_ERROR for no
- * answer, any other status, or a 200 that is not a JSON object.  Returns
- * -1 without calling back when the URL cannot be built (a NULL path, or
- * one without the leading '/'). */
+ * The result: KC_SUCCESS with the group (see kc_group_cb), whose id is
+ * then always set; KC_NOT_FOUND on 404; KC_TOKEN_ERROR when no admin token
+ * could be had; KC_INVALID_RESPONSE for a 200 JSON object without a string
+ * "id"; KC_ERROR for no answer, any other status, or a 200 that is not a
+ * JSON object.  Returns -1 without calling back (the general contract
+ * above) exactly when: path or cb is NULL, or path does not start with
+ * '/'; it is called before kc_keycloak_init() or after
+ * kc_keycloak_shutdown(), or the configuration has no base URL or realm
+ * (no URL can be built); or an allocation fails (the URL, the operation,
+ * or its place in the queue for an admin token). */
 int kc_group_get_by_path(const char *path, kc_group_cb cb, void *data);
 
 /*

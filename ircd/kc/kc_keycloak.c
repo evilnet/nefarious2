@@ -20,6 +20,8 @@
 #include <kc/kc_jwt.h>
 #include <kc/kc_url.h>
 
+#include <stdarg.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -42,6 +44,13 @@ static struct kc_access_token *g_cached_token = NULL;
 static time_t g_token_expires = 0;
 static int g_token_refreshing = 0;
 
+/* The configuration's generation, bumped by kc_keycloak_shutdown().  A
+ * token refresh carries the generation it was started in; a completion
+ * from an earlier one (its request outlived a shutdown, since requests in
+ * flight are not cancelled) is ignored: it installs no token, answers no
+ * waiter and leaves the current refresh alone. */
+static uintptr_t g_token_gen = 0;
+
 /* Token refresh margin: refresh 60s before expiry */
 #define TOKEN_REFRESH_MARGIN 60
 
@@ -59,7 +68,7 @@ static int g_token_waiter_count = 0;
 
 /* Forward declarations */
 static void token_refresh_done(struct kc_http_response *resp, void *data);
-static void notify_token_waiters(int result, const struct kc_access_token *token);
+static void notify_token_waiters(int result);
 
 static struct kc_realm get_realm(void) {
     return (struct kc_realm){ .base_url = g_config.base_url, .realm = g_config.realm };
@@ -69,6 +78,41 @@ static struct kc_realm get_realm(void) {
 static long request_timeout_ms(void)
 {
     return g_config.timeout_ms > 0 ? g_config.timeout_ms : 10000;
+}
+
+/* printf into a fresh heap string (free()); NULL when out of memory. */
+static char *str_printf(const char *fmt, ...)
+{
+    va_list ap;
+    char *out;
+    int n;
+
+    va_start(ap, fmt);
+    n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0 || !(out = malloc((size_t)n + 1)))
+        return NULL;
+    va_start(ap, fmt);
+    vsnprintf(out, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    return out;
+}
+
+/* The client's own credentials as form fields,
+ * "client_id=<id>&client_secret=<secret>", each URL-encoded the way the
+ * username and password are (a secret may hold '&', '%', '+' or a space);
+ * an unset one is sent empty.  Heap (free()); NULL when out of memory. */
+static char *client_form_fields(void)
+{
+    char *id = curl_easy_escape(NULL, g_config.client_id ? g_config.client_id : "", 0);
+    char *secret = curl_easy_escape(NULL, g_config.client_secret ? g_config.client_secret : "", 0);
+    char *out = NULL;
+
+    if (id && secret)
+        out = str_printf("client_id=%s&client_secret=%s", id, secret);
+    curl_free(id);
+    curl_free(secret);
+    return out;
 }
 
 /* ================================================================
@@ -390,16 +434,34 @@ static void userid_cache_clear(void)
  * Token management implementation
  * ================================================================ */
 
-static void notify_token_waiters(int result, const struct kc_access_token *token)
+/*
+ * Answer every queued waiter with result.  On KC_SUCCESS each waiter gets
+ * the token cached when it is called, never a pointer read before the
+ * loop: a waiter's own request can run other transfers' completions before
+ * it returns (kc_http_request() -> check_multi_info()), and one of those
+ * can be another refresh, which replaces -- and frees -- the cached token,
+ * or a callback can shut down.  Waiters still left after a shutdown came
+ * in between are answered as that shutdown answers queued waiters
+ * (KC_UNAVAILABLE).
+ */
+static void notify_token_waiters(int result)
 {
     struct token_waiter *w = g_token_waiters;
+    uintptr_t gen = g_token_gen;
+
     g_token_waiters = NULL;
     g_token_waiter_count = 0;
 
     while (w) {
         struct token_waiter *next = w->next;
-        if (w->callback)
-            w->callback(result, token, w->data);
+        if (w->callback) {
+            if (result != KC_SUCCESS)
+                w->callback(result, NULL, w->data);
+            else if (gen != g_token_gen || !g_cached_token)
+                w->callback(KC_UNAVAILABLE, NULL, w->data);
+            else
+                w->callback(KC_SUCCESS, g_cached_token, w->data);
+        }
         free(w);
         w = next;
     }
@@ -407,14 +469,20 @@ static void notify_token_waiters(int result, const struct kc_access_token *token
 
 static void token_refresh_done(struct kc_http_response *resp, void *data)
 {
-    (void)data;
+    if ((uintptr_t)data != g_token_gen) {
+        /* Started before a kc_keycloak_shutdown(): another configuration's
+         * answer.  Its waiters were answered by that shutdown; whatever
+         * refresh and waiters exist now belong to the current one. */
+        kc_log_debug("kc_keycloak: dropping a token refresh started before a shutdown");
+        return;
+    }
 
     g_token_refreshing = 0;
 
     if (!resp || resp->status_code != 200 || !resp->json) {
         kc_log_error("kc_keycloak: token refresh failed (status=%ld)",
                      resp ? resp->status_code : 0);
-        notify_token_waiters(KC_TOKEN_ERROR, NULL);
+        notify_token_waiters(KC_TOKEN_ERROR);
         return;
     }
 
@@ -422,7 +490,7 @@ static void token_refresh_done(struct kc_http_response *resp, void *data)
     struct kc_access_token *new_token = parse_access_token(resp->json);
     if (!new_token) {
         kc_log_error("kc_keycloak: failed to parse token response");
-        notify_token_waiters(KC_TOKEN_ERROR, NULL);
+        notify_token_waiters(KC_TOKEN_ERROR);
         return;
     }
 
@@ -438,13 +506,14 @@ static void token_refresh_done(struct kc_http_response *resp, void *data)
     kc_log_debug("kc_keycloak: token refreshed, expires_in=%ld", new_token->expires_in);
 
     /* Notify all waiters */
-    notify_token_waiters(KC_SUCCESS, g_cached_token);
+    notify_token_waiters(KC_SUCCESS);
 }
 
 static int start_token_refresh(void)
 {
     char *url;
-    char body[1024];
+    char *creds;
+    char *body;
     struct kc_http_request req;
     struct curl_slist *headers = NULL;
 
@@ -455,9 +524,13 @@ static int start_token_refresh(void)
     if (!url)
         return -1;
 
-    snprintf(body, sizeof(body),
-             "grant_type=client_credentials&client_id=%s&client_secret=%s",
-             g_config.client_id, g_config.client_secret);
+    creds = client_form_fields();
+    body = creds ? str_printf("grant_type=client_credentials&%s", creds) : NULL;
+    free(creds);
+    if (!body) {
+        free(url);
+        return -1;
+    }
 
     headers = curl_slist_append(NULL, "Content-Type: application/x-www-form-urlencoded");
 
@@ -471,10 +544,11 @@ static int start_token_refresh(void)
 
     g_token_refreshing = 1;
 
-    int rc = kc_http_request(&req, token_refresh_done, NULL);
+    int rc = kc_http_request(&req, token_refresh_done, (void *)g_token_gen);
 
     curl_slist_free_all(headers);
     free(url);
+    free(body);
 
     if (rc != 0) {
         g_token_refreshing = 0;
@@ -526,7 +600,7 @@ int kc_token_ensure(kc_token_cb cb, void *data)
              * invoked, so the caller still owns its context".  We just ran
              * the callback (which frees that context), so reporting failure
              * here invites a double free in the caller's error path. */
-            notify_token_waiters(KC_TOKEN_ERROR, NULL);
+            notify_token_waiters(KC_TOKEN_ERROR);
             return 0;
         }
     }
@@ -554,7 +628,6 @@ struct kc_op_ctx {
         kc_user_cb user;
         kc_users_cb users;
         kc_result_cb result;
-        kc_token_cb token;
         kc_grant_cb grant;
         kc_groups_cb groups;
         kc_introspect_cb introspect;
@@ -934,6 +1007,13 @@ static void op_response_handler(struct kc_http_response *resp, void *data)
             ctx->cb.group(KC_ERROR, NULL, ctx->cb_data);
             break;
         }
+        if (!group.id) {
+            /* An object without a string "id" is no group a caller can use
+             * (it needs the id at once: group membership goes by id). */
+            kc_group_free(&group);
+            ctx->cb.group(KC_INVALID_RESPONSE, NULL, ctx->cb_data);
+            break;
+        }
         ctx->cb.group(KC_SUCCESS, &group, ctx->cb_data);
         kc_group_free(&group);
         break;
@@ -1061,7 +1141,13 @@ static int start_op(struct kc_op_ctx *ctx)
         op_ctx_free(ctx);
         return -1;
     }
-    return kc_token_ensure(op_token_ready, ctx);
+    if (kc_token_ensure(op_token_ready, ctx) != 0) {
+        /* Only before op_token_ready could run (out of memory for the
+         * waiter): ctx is still ours. */
+        op_ctx_free(ctx);
+        return -1;
+    }
+    return 0;
 }
 
 /* ================================================================
@@ -1099,8 +1185,11 @@ void kc_keycloak_shutdown(void)
     if (!g_initialized)
         return;
 
-    /* Notify pending waiters of shutdown */
-    notify_token_waiters(KC_UNAVAILABLE, NULL);
+    /* A new generation: a token refresh still in flight (requests are not
+     * cancelled) is ignored when it completes (token_refresh_done()). */
+    g_initialized = 0;
+    g_token_gen++;
+    g_token_refreshing = 0;
 
     free((void *)g_config.base_url);
     free((void *)g_config.realm);
@@ -1113,12 +1202,16 @@ void kc_keycloak_shutdown(void)
         g_cached_token = NULL;
     }
     g_token_expires = 0;
-    g_token_refreshing = 0;
 
     userid_cache_clear();
 
-    g_initialized = 0;
     kc_log_info("kc_keycloak: shutdown");
+
+    /* Answer the queued waiters last, once nothing of the dropped
+     * configuration is left: a callback may start again at once
+     * (kc_keycloak_init(), then a new operation, which then queues under
+     * the new generation), and none can queue under the old one. */
+    notify_token_waiters(KC_UNAVAILABLE);
 }
 
 /* ================================================================
@@ -1460,27 +1553,22 @@ int kc_user_verify_password(const char *username, const char *password,
         return -1;
 
     char *body = NULL;
-    size_t body_len;
+    char *creds = client_form_fields();
     char *escaped_user = curl_easy_escape(NULL, username, 0);
     char *escaped_pass = curl_easy_escape(NULL, password, 0);
 
-    if (!escaped_user || !escaped_pass) {
-        curl_free(escaped_user);
-        curl_free(escaped_pass);
+    if (creds && escaped_user && escaped_pass)
+        body = str_printf("grant_type=password&scope=openid&%s&username=%s&password=%s",
+                          creds, escaped_user, escaped_pass);
+
+    free(creds);
+    curl_free(escaped_user);
+    curl_free(escaped_pass);
+
+    if (!body) {
         free(url);
         return -1;
     }
-
-    body_len = snprintf(NULL, 0,
-        "grant_type=password&scope=openid&client_id=%s&client_secret=%s&username=%s&password=%s",
-        g_config.client_id, g_config.client_secret, escaped_user, escaped_pass);
-    body = malloc(body_len + 1);
-    snprintf(body, body_len + 1,
-        "grant_type=password&scope=openid&client_id=%s&client_secret=%s&username=%s&password=%s",
-        g_config.client_id, g_config.client_secret, escaped_user, escaped_pass);
-
-    curl_free(escaped_user);
-    curl_free(escaped_pass);
 
     /* This operation doesn't need a bearer token — it IS the token request.
      * Submit directly without going through kc_token_ensure. */
@@ -1616,21 +1704,20 @@ int kc_token_introspect(const char *token, kc_introspect_cb cb, void *data)
         return -1;
 
     /* Introspect uses client credentials in POST body, not bearer token */
+    char *body = NULL;
+    char *creds = client_form_fields();
     char *escaped_token = curl_easy_escape(NULL, token, 0);
-    if (!escaped_token) {
+
+    if (creds && escaped_token)
+        body = str_printf("token=%s&%s", escaped_token, creds);
+
+    free(creds);
+    curl_free(escaped_token);
+
+    if (!body) {
         free(url);
         return -1;
     }
-
-    size_t body_len = snprintf(NULL, 0,
-        "token=%s&client_id=%s&client_secret=%s",
-        escaped_token, g_config.client_id, g_config.client_secret);
-    char *body = malloc(body_len + 1);
-    snprintf(body, body_len + 1,
-        "token=%s&client_id=%s&client_secret=%s",
-        escaped_token, g_config.client_id, g_config.client_secret);
-
-    curl_free(escaped_token);
 
     struct kc_op_ctx *ctx = calloc(1, sizeof(*ctx));
     if (!ctx) {

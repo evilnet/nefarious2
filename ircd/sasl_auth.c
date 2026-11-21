@@ -139,10 +139,23 @@ static struct Timer sasl_health_retry_timer;
 static int sasl_health_retry_timer_active = 0;
 
 #ifdef USE_LIBKC
+/** How many password grants in a row Keycloak may answer by refusing the
+ * ircd's own client (KC_CLIENT_REFUSED: a wrong client secret, or Direct
+ * Access Grants off for it) before sasl is withdrawn as for an unusable
+ * Keycloak.  One refusal does not withdraw it: any unregistered client can
+ * cause one, and the client-credentials health check would restore sasl
+ * at once, only for the next attempt to withdraw it again. */
+#define SASL_CLIENT_REFUSED_LIMIT 5
+
+/** Password grants answered KC_CLIENT_REFUSED since the last answer that
+ * showed Keycloak accepts the ircd's client (sasl_plain_answer()). */
+static int sasl_client_refusals = 0;
+
 static void sasl_health_retry_timer_cb(struct Event *ev);
 static void sasl_start_health_retry(void);
 static void sasl_stop_health_retry(void);
 static void sasl_mark_unhealthy(int result);
+static void sasl_mark_unhealthy_why(int result, const char *reason);
 static void sasl_mark_healthy(void);
 #endif
 
@@ -1581,8 +1594,49 @@ static void sasl_kc_answer_end(struct sasl_kc_answer *st)
   cli_label_responded(st->cptr) = st->responded;
 }
 
+/** Copy text that came from the network into \a out (size \a outsz,
+ * at least 4) for a log line: control characters and DEL become '?', and
+ * text too long for \a out is cut and ends in "...".
+ * @return \a out. */
+static const char *sasl_log_safe(const char *in, char *out, size_t outsz)
+{
+  size_t i = 0;
+
+  for (; *in && i + 1 < outsz; in++)
+    out[i++] = ((unsigned char)*in < 0x20 || *in == 0x7f) ? '?' : *in;
+  out[i] = '\0';
+  if (*in)
+    memcpy(out + outsz - 4, "...", 4);
+  return out;
+}
+
+/** A password grant answered KC_CLIENT_REFUSED (Keycloak refused the
+ * ircd's own client; \a reason is Keycloak's text, or NULL): withdraw sasl
+ * only once SASL_CLIENT_REFUSED_LIMIT such answers came in a row.  Logged
+ * when a run starts and when it reaches the limit, not for each refusal
+ * between (any client can cause one: no log flood). */
+static void sasl_client_refused(const char *reason)
+{
+  char shown[200];
+
+  if (++sasl_client_refusals == 1)
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "SASL LOCAL: Keycloak refused the ircd's own client (%s): check "
+              "the client secret and that Direct Access Grants is enabled",
+              reason ? sasl_log_safe(reason, shown, sizeof(shown))
+                     : "no reason given");
+  if (sasl_client_refusals >= SASL_CLIENT_REFUSED_LIMIT) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "SASL LOCAL: Keycloak refused the ircd's own client %d times in "
+              "a row -- withdrawing sasl", sasl_client_refusals);
+    sasl_client_refusals = 0;
+    sasl_mark_unhealthy(KC_CLIENT_REFUSED);
+  }
+}
+
 /** Callback from kc_user_verify_password(). */
-static void sasl_plain_answer(int result, const struct kc_access_token *token, void *data)
+static void sasl_plain_answer(int result, const struct kc_access_token *token,
+                              const char *reason, void *data)
 {
   struct sasl_cb_ctx *ctx = (struct sasl_cb_ctx *)data;
   struct Client *acptr;
@@ -1602,6 +1656,12 @@ static void sasl_plain_answer(int result, const struct kc_access_token *token, v
               "SASL PLAIN: Callback for %C but session state is wrong", acptr);
     return;
   }
+
+  /* An answer about the user's credentials shows Keycloak accepted the
+   * ircd's client: a run of client refusals is over. */
+  if (result == KC_SUCCESS || result == KC_FORBIDDEN || result == KC_DISABLED
+      || result == KC_UNVERIFIED)
+    sasl_client_refusals = 0;
 
   if (result == KC_SUCCESS) {
     const char *login_as = sasl_resolve_login_identity(session, session->authcid);
@@ -1653,16 +1713,19 @@ static void sasl_plain_answer(int result, const struct kc_access_token *token, v
        * KC_FORBIDDEN = wrong password (HTTP 401/400) — Keycloak is working fine.
        * KC_DISABLED = the account is disabled — Keycloak is working fine.
        * KC_NOT_FOUND = user doesn't exist — Keycloak is working fine.
+       * KC_CLIENT_REFUSED = Keycloak refused the ircd's own client (its
+       * secret, or the password grant not enabled for it) — no answer
+       * about the user's credentials, but sasl is withdrawn only after
+       * SASL_CLIENT_REFUSED_LIMIT in a row (sasl_client_refused()).
        * Everything else (KC_ERROR, KC_UNAVAILABLE, KC_TIMEOUT, KC_TOKEN_ERROR,
        * KC_INVALID_RESPONSE) indicates a connectivity or service problem --
-       * and so do KC_CLIENT_REFUSED (Keycloak refused the ircd's own client:
-       * its secret, or the password grant not enabled for it) and a 400/401
-       * whose body is no Keycloak error object (KC_ERROR): no answer about
-       * the user's credentials.
+       * and so does a 400/401 whose body is no Keycloak error object
+       * (KC_ERROR).
        */
-      if (result != KC_FORBIDDEN && result != KC_DISABLED && result != KC_NOT_FOUND) {
-        sasl_mark_unhealthy(result);
-      }
+      if (result == KC_CLIENT_REFUSED)
+        sasl_client_refused(reason);
+      else if (result != KC_FORBIDDEN && result != KC_DISABLED && result != KC_NOT_FOUND)
+        sasl_mark_unhealthy_why(result, reason);
 
       /* Update auth caches — only for actual auth failures, not connectivity errors */
       if ((result == KC_FORBIDDEN || result == KC_DISABLED || result == KC_NOT_FOUND)
@@ -1698,10 +1761,8 @@ static void sasl_plain_cb(int result, const struct kc_access_token *token,
 {
   struct sasl_kc_answer st;
 
-  (void)reason;                    /* Keycloak's reason text: not used yet */
-
   sasl_kc_answer_begin(data, &st);
-  sasl_plain_answer(result, token, data);
+  sasl_plain_answer(result, token, reason, data);
   sasl_kc_answer_end(&st);
 }
 
@@ -3399,12 +3460,25 @@ static void sasl_health_retry_timer_cb(struct Event *ev)
  */
 static void sasl_mark_unhealthy(int result)
 {
+  sasl_mark_unhealthy_why(result, NULL);
+}
+
+/** sasl_mark_unhealthy(), with Keycloak's own text for the cause (network
+ *  bytes, logged through sasl_log_safe()), or NULL when there is none. */
+static void sasl_mark_unhealthy_why(int result, const char *reason)
+{
   int was_healthy = kc_sasl_healthy;
+  char shown[200];
 
   kc_sasl_healthy = 0;
   if (was_healthy && sasl_local_initialized) {
-    log_write(LS_SYSTEM, L_WARNING, 0,
-              "SASL LOCAL: Keycloak became unreachable (result %d) — removing SASL", result);
+    if (reason)
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "SASL LOCAL: Keycloak became unreachable (result %d: %s) — removing SASL",
+                result, sasl_log_safe(reason, shown, sizeof(shown)));
+    else
+      log_write(LS_SYSTEM, L_WARNING, 0,
+                "SASL LOCAL: Keycloak became unreachable (result %d) — removing SASL", result);
     send_cap_notify("sasl", 0, NULL);
   }
   sasl_start_health_retry();

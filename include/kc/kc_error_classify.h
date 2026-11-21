@@ -1,15 +1,22 @@
-/* kc_error_classify.h -- classify a resource-owner-password-credentials
- * (ROPC) grant error body.
+/* kc_error_classify.h -- classify Keycloak's refusals: a
+ * resource-owner-password-credentials (ROPC) grant's, and a user create's.
  *
- * Keycloak's token endpoint returns HTTP 400/401 with a JSON body
- * {"error": "...", "error_description": "..."} for both "bad credentials"
- * and "account not fully set up" (pending a required action such as
- * VERIFY_EMAIL). Both cases are otherwise indistinguishable from the HTTP
- * status alone, so callers that need to tell a genuinely rejected login
- * apart from "the account exists but registration didn't finish" must
- * inspect error_description. This is the substring Task 0's live probe
- * confirmed verbatim: {"error":"invalid_grant","error_description":
- * "Account is not fully set up"}.
+ * Keycloak's token endpoint answers a refused password grant with HTTP
+ * 400/401 and a JSON body {"error": "...", "error_description": "..."},
+ * whatever the reason, so the status alone cannot tell the reasons apart.
+ * kc_classify_grant_error() reads the body into one of five outcomes:
+ *   - KC_FORBIDDEN       the user's credentials are wrong
+ *   - KC_DISABLED        the account is disabled
+ *   - KC_UNVERIFIED      the account is not fully set up (a pending
+ *                        required action such as VERIFY_EMAIL; Task 0's
+ *                        live probe saw {"error":"invalid_grant",
+ *                        "error_description":"Account is not fully set up"})
+ *   - KC_CLIENT_REFUSED  Keycloak refused the caller's own client (its
+ *                        secret, or the grant not enabled for it)
+ *   - KC_ERROR           no Keycloak error object at all (a proxy's page,
+ *                        an empty body), or not a 400/401: nothing about
+ *                        the credentials
+ * The rules, in order, are on the function below.
  *
  * MUST stay ircd-header-free (kc boundary; see check-kc-boundary in
  * ircd/Makefile.in).
