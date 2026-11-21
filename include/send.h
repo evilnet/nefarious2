@@ -59,11 +59,10 @@ extern void client_reconcile_sendq(struct Client *to);
  * WITHOUT A PREFIX!
  */
 extern void sendrawto_one(struct Client *to, const char *pattern, ...);
-/* The same line, with the tags the recipient's capabilities call for and
- * no more (@label or the labeled-response @batch of an answer, @time
- * under server-time): a server line that has always gone out without a
- * source prefix keeps it that way; a client with no tag capability gets
- * exactly what sendrawto_one() sends. */
+/* The same line (its own prefix), with the tags the recipient's
+ * capabilities call for and no more (@label or the labeled-response @batch
+ * of an answer, @time under server-time) in front of it; a client with no
+ * tag capability gets exactly what sendrawto_one() sends. */
 extern void sendrawto_one_tags(struct Client *to, const char *pattern, ...);
 /* A raw line (own prefix, no tags) that is part of the answer to the line
  * a local client is sending: tagged with the batch open on that answer,

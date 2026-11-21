@@ -233,18 +233,18 @@ static void value_change_only_to_302(void **state)
   two(&n, &o);                         /* both listed draft/multiline */
   send_cap_notify("draft/multiline", 1, "max-lines=50");
   assert_int_equal(sent_count_to(n), 1);
-  assert_string_equal(sent_to(n, 0), "CAP n NEW :draft/multiline=max-lines=50");
+  assert_string_equal(sent_to(n, 0), ":irc.test CAP n NEW :draft/multiline=max-lines=50");
   assert_int_equal(sent_count_to(o), 0);
 
   nsent = 0;
   send_cap_notify("draft/multiline", 0, NULL);
-  assert_string_equal(sent_to(n, 0), "CAP n DEL :draft/multiline");
-  assert_string_equal(sent_to(o, 0), "CAP o DEL :draft/multiline");
+  assert_string_equal(sent_to(n, 0), ":irc.test CAP n DEL :draft/multiline");
+  assert_string_equal(sent_to(o, 0), ":irc.test CAP o DEL :draft/multiline");
 
   nsent = 0;
   send_cap_notify("draft/multiline", 1, "max-lines=50");
-  assert_string_equal(sent_to(n, 0), "CAP n NEW :draft/multiline=max-lines=50");
-  assert_string_equal(sent_to(o, 0), "CAP o NEW :draft/multiline");
+  assert_string_equal(sent_to(n, 0), ":irc.test CAP n NEW :draft/multiline=max-lines=50");
+  assert_string_equal(sent_to(o, 0), ":irc.test CAP o NEW :draft/multiline");
 }
 
 /** The same from the rehash batch: the pre-302 client gets the
@@ -264,9 +264,9 @@ static void batch_value_change_only_to_302(void **state)
   cap_notify_flush();
   assert_int_equal(sent_count_to(n), 1);
   assert_string_equal(sent_to(n, 0),
-                      "CAP n NEW :draft/multiline=max-lines=60 draft/chathistory=77");
+                      ":irc.test CAP n NEW :draft/multiline=max-lines=60 draft/chathistory=77");
   assert_int_equal(sent_count_to(o), 1);
-  assert_string_equal(sent_to(o, 0), "CAP o NEW :draft/multiline");
+  assert_string_equal(sent_to(o, 0), ":irc.test CAP o NEW :draft/multiline");
 }
 
 /** A capability a client knows of from its CAP ACK alone counts. */
@@ -281,12 +281,77 @@ static void acked_counts_as_known(void **state)
   assert_int_equal(nsent, 0);
 }
 
+/** The rehash batch's CAP DEL comes from the server too, as every CAP
+ * line does (legacy master's CAP replies: ":<server> CAP ..."). */
+static void batch_del_carries_the_server_source(void **state)
+{
+  struct Client *n, *o;
+  (void)state;
+
+  two(&n, &o);
+  cap_notify_begin_batch();
+  send_cap_notify("draft/multiline", 0, NULL);
+  send_cap_notify("draft/chathistory", 0, NULL);
+  cap_notify_flush();
+  assert_int_equal(sent_count_to(n), 1);
+  assert_string_equal(sent_to(n, 0),
+                      ":irc.test CAP n DEL :draft/multiline draft/chathistory");
+  assert_int_equal(sent_count_to(o), 1);
+  assert_string_equal(sent_to(o, 0),
+                      ":irc.test CAP o DEL :draft/multiline draft/chathistory");
+}
+
+/** With the longest server name and nick a batched line still fits in
+ * 510 bytes: the list gets the room the source and the nick leave, and
+ * no name is cut (a cut name is a capability the client never had). */
+static void batch_line_fits_with_the_longest_source(void **state)
+{
+  char names[8][64], seen[1024] = "";
+  struct Client *n;
+  int i;
+  (void)state;
+
+  memset(cli_name(&me), 'S', HOSTLEN);
+  cli_name(&me)[HOSTLEN] = '\0';
+  n = user("NNNNNNNNNNNNNNNNNNNNNNNNNNNNNN");     /* 30, NICKLEN */
+  cap(n, "LS", "302");
+  nsent = 0;
+  cap_notify_begin_batch();
+  for (i = 0; i < 8; i++) {                      /* 8 x 49 + 7 = 399 */
+    snprintf(names[i], sizeof(names[i]),
+             "vendor.example/%c%033d", 'a' + i, 0);
+    send_cap_notify(names[i], 0, NULL);
+  }
+  cap_notify_flush();
+  assert_int_equal(sent_count_to(n), 2);
+  for (i = 0; i < 2; i++) {
+    const char *line = sent_to(n, i), *list;
+    char head[2 * (HOSTLEN + 1) + 16];
+
+    snprintf(head, sizeof(head), ":%s CAP %s DEL :", cli_name(&me), cli_name(n));
+    assert_true(strlen(line) <= 510);
+    assert_true(!strncmp(line, head, strlen(head)));
+    list = line + strlen(head);
+    if (seen[0])
+      strcat(seen, " ");
+    strcat(seen, list);
+  }
+  for (i = 0; i < 8; i++) {
+    char want[70];
+    snprintf(want, sizeof(want), "%s%s", i ? " " : "", names[i]);
+    assert_non_null(strstr(seen, want));
+  }
+  assert_int_equal((int)strlen(seen), 8 * 49 + 7);   /* nothing cut */
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
     cmocka_unit_test_setup_teardown(value_change_only_to_302, setup, teardown),
     cmocka_unit_test_setup_teardown(batch_value_change_only_to_302, setup, teardown),
     cmocka_unit_test_setup_teardown(acked_counts_as_known, setup, teardown),
+    cmocka_unit_test_setup_teardown(batch_del_carries_the_server_source, setup, teardown),
+    cmocka_unit_test_setup_teardown(batch_line_fits_with_the_longest_source, setup, teardown),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

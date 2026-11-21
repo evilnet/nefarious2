@@ -112,7 +112,7 @@ static int webpush_cooldown_ok(const char *account, const char *origin,
 static void send_webpush_fail(struct Client *sptr, const char *code,
                               const char *context, const char *message)
 {
-  sendrawto_one(sptr, "FAIL WEBPUSH %s %s :%s",
+  sendrawto_one(sptr, ":%s FAIL WEBPUSH %s %s :%s", cli_name(&me),
                 code, context ? context : "*", message);
 }
 
@@ -277,9 +277,9 @@ static int webpush_cmd_register(struct Client *sptr, int parc, char *parv[])
         && webpush_store_get(cli_user(sptr)->account, endpoint,
                              existing, sizeof(existing)) != 0
         && webpush_store_count(cli_user(sptr)->account) >= max) {
-      sendrawto_one(sptr, "FAIL WEBPUSH MAX_REGISTRATIONS REGISTER %s "
+      sendrawto_one(sptr, ":%s FAIL WEBPUSH MAX_REGISTRATIONS REGISTER %s "
                     ":This account already has %d push registrations",
-                    endpoint, max);
+                    cli_name(&me), endpoint, max);
       return 0;
     }
   }
@@ -317,7 +317,7 @@ static int webpush_cmd_register(struct Client *sptr, int parc, char *parv[])
                         (long long)CurrentTime, keyid[0] ? keyid : "-");
 
   /* Echo success to client per spec */
-  sendrawto_one(sptr, "WEBPUSH REGISTER %s", endpoint);
+  sendrawto_one(sptr, ":%s WEBPUSH REGISTER %s", cli_name(&me), endpoint);
 
   log_write(LS_SYSTEM, L_INFO, 0,
             "WEBPUSH: %s!%s@%s registered endpoint for account %s",
@@ -365,7 +365,7 @@ static int webpush_cmd_unregister(struct Client *sptr, int parc, char *parv[])
                         cli_user(sptr)->account, endpoint);
 
   /* Echo success to client per spec (silently succeeds even if not registered) */
-  sendrawto_one(sptr, "WEBPUSH UNREGISTER %s", endpoint);
+  sendrawto_one(sptr, ":%s WEBPUSH UNREGISTER %s", cli_name(&me), endpoint);
 
   log_write(LS_SYSTEM, L_INFO, 0,
             "WEBPUSH: %s!%s@%s unregistered endpoint for account %s",

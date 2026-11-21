@@ -319,8 +319,8 @@ static void register_complete_success(struct Client *acptr,
 
   if (held[0] && 0 == ircd_strcmp(held, account)) {
     reg_answer_begin(acptr, ctx, &st, 0);
-    sendrawto_one_tags(acptr, "REGISTER SUCCESS %s :Account registered",
-                       account);
+    sendrawto_one_tags(acptr, ":%s REGISTER SUCCESS %s :Account registered",
+                       cli_name(&me), account);
     reg_answer_end(acptr, &st);
     return;
   }
@@ -368,9 +368,10 @@ static void reg_email_cb(int result, void *data)
     struct reg_label_state st;
 
     reg_answer_begin(acptr, ctx, &st, 0);
-    sendrawto_one_tags(acptr, "REGISTER VERIFICATION_REQUIRED %s "
+    sendrawto_one_tags(acptr, ":%s REGISTER VERIFICATION_REQUIRED %s "
                        ":Account created - check your email for a verification "
-                       "link, then log in normally (SASL)", ctx->account);
+                       "link, then log in normally (SASL)", cli_name(&me),
+                       ctx->account);
     reg_answer_end(acptr, &st);
   }
 

@@ -445,7 +445,7 @@ static void no_tier_first_list_is_new(void **state)
   sasl_mechanisms_announced("PLAIN,EXTERNAL");
   assert_int_equal(nsent, 1);
   assert_ptr_equal(sent[0].to, n);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN,EXTERNAL");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN,EXTERNAL");
   assert_string_equal(ls_sasl(), "sasl=PLAIN,EXTERNAL");
 }
 
@@ -462,7 +462,7 @@ static void no_tier_list_over_default_is_new_value(void **state)
 
   sasl_mechanisms_announced("PLAIN,EXTERNAL");
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN,EXTERNAL");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN,EXTERNAL");
 }
 
 /** ... and nothing when the list is the default value already. */
@@ -494,7 +494,7 @@ static void no_tier_same_list_again_tells_nothing(void **state)
 
   sasl_mechanisms_announced("PLAIN");
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
 }
 
 /** (e) A server that does not match SASL_SERVER leaving: the list stays,
@@ -536,7 +536,7 @@ static void no_tier_named_services_leave_is_del(void **state)
   server_leaves(x3);
   assert_null(get_sasl_mechanisms());
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  assert_string_equal(sent_text(0), ":irc.test CAP n DEL :sasl");
   assert_string_equal(ls_sasl(), "");
 }
 
@@ -557,7 +557,7 @@ static void no_tier_split_falls_back_to_default(void **state)
   server_leaves(hub);
   assert_null(get_sasl_mechanisms());
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
   assert_string_equal(ls_sasl(), "sasl=PLAIN");
 }
 
@@ -593,7 +593,7 @@ static void no_tier_split_no_default_is_del(void **state)
 
   server_leaves(hub);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  assert_string_equal(sent_text(0), ":irc.test CAP n DEL :sasl");
   assert_string_equal(ls_sasl(), "");
 }
 
@@ -610,7 +610,7 @@ static void empty_list_withdraws_announced_list(void **state)
   sasl_mechanisms_announced("");
   assert_null(get_sasl_mechanisms());
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  assert_string_equal(sent_text(0), ":irc.test CAP n DEL :sasl");
 }
 
 /* ====================================================================
@@ -634,14 +634,14 @@ static void iauth_list_told_as_before(void **state)
 
   set_sasl_mechanisms("PLAIN");
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
   nsent = 0;
 
   server_leaves(hub);
   assert_string_equal(get_sasl_mechanisms(), "PLAIN");
   assert_int_equal(nsent, 2);
-  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
-  assert_string_equal(sent_text(1), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n DEL :sasl");
+  assert_string_equal(sent_text(1), ":irc.test CAP n NEW :sasl=PLAIN");
 }
 
 /** A server with only SASL_DEFAULT_MECHANISMS under SASL_SERVER "*": CAP
@@ -696,7 +696,7 @@ static void services_leave_falls_back_to_iauth_once(void **state)
   server_leaves(x3);
   assert_string_equal(get_sasl_mechanisms(), "PLAIN");
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
 }
 
 /** ... and nothing at all with the Keycloak tier healthy. */
@@ -767,13 +767,13 @@ static void health_services_list_differs_is_new_value(void **state)
 
   tier_health(NULL);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN,EXTERNAL");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN,EXTERNAL");
   assert_string_equal(ls_sasl(), "sasl=PLAIN,EXTERNAL");
   nsent = 0;
 
   tier_health(L_MECHS);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=" L_MECHS);
   assert_string_equal(ls_sasl(), "sasl=" L_MECHS);
 }
 
@@ -809,13 +809,13 @@ static void health_services_default_is_new_value(void **state)
 
   tier_health(NULL);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
   assert_string_equal(ls_sasl(), "sasl=PLAIN");
   nsent = 0;
 
   tier_health(L_MECHS);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=" L_MECHS);
 }
 
 /** 3. ... a default equal to the tier's list: nothing either way. */
@@ -847,13 +847,13 @@ static void health_no_fallback_del_then_new(void **state)
 
   tier_health(NULL);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  assert_string_equal(sent_text(0), ":irc.test CAP n DEL :sasl");
   assert_string_equal(ls_sasl(), "");
   nsent = 0;
 
   tier_health(L_MECHS);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=" L_MECHS);
 }
 
 /** 4. ... with SASL_SERVER "*" (the default) and only this server: the
@@ -866,12 +866,12 @@ static void health_no_fallback_any_server_del_then_new(void **state)
 
   tier_health(NULL);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  assert_string_equal(sent_text(0), ":irc.test CAP n DEL :sasl");
   nsent = 0;
 
   tier_health(L_MECHS);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=" L_MECHS);
 }
 
 /** 5. A step that changes nothing CAP LS says tells nothing (the real
@@ -909,13 +909,14 @@ static void health_down_then_services_list_changes(void **state)
 
   sasl_mechanisms_announced("PLAIN,EXTERNAL,SCRAM-SHA-256");
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN,EXTERNAL,SCRAM-SHA-256");
+  assert_string_equal(sent_text(0),
+                      ":irc.test CAP n NEW :sasl=PLAIN,EXTERNAL,SCRAM-SHA-256");
 
   /* Recovery: back to the tier's value, once. */
   nsent = 0;
   tier_health(L_MECHS);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=" L_MECHS);
 }
 
 /** IAuth handling SASL with its list I: IAuth's own store told clients
@@ -931,7 +932,7 @@ static void health_iauth_list_already_told_tells_nothing(void **state)
   user302("n");
   set_sasl_mechanisms("PLAIN");        /* told as it always was */
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
   nsent = 0;
 
   tier_health(NULL);
@@ -940,7 +941,7 @@ static void health_iauth_list_already_told_tells_nothing(void **state)
 
   tier_health(L_MECHS);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=" L_MECHS);
 }
 
 /* ====================================================================
@@ -997,14 +998,14 @@ static void services_no_tier_default_link_new_leave_del(void **state)
 
   x3 = server_links("x3.test");
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
   assert_int_equal(nlog_linked, 1);
   assert_string_equal(ls_sasl(), "sasl=PLAIN");
   nsent = 0;
 
   server_leaves(x3);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  assert_string_equal(sent_text(0), ":irc.test CAP n DEL :sasl");
   assert_string_equal(ls_sasl(), "");
 }
 
@@ -1049,7 +1050,7 @@ static void services_mid_burst_other_eob_tells_once(void **state)
   x3 = server("x3.test");
   server_links("leaf.test");
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
   assert_int_equal(nlog_linked, 0);
   nsent = 0;
 
@@ -1072,17 +1073,17 @@ static void services_unhealthy_tier_default_leave_del_link_new(void **state)
   assert_int_equal(nsent, 0);
   tier_health(NULL);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
   nsent = 0;
 
   server_leaves(x3);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  assert_string_equal(sent_text(0), ":irc.test CAP n DEL :sasl");
   nsent = 0;
 
   server_links("x3.test");
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
 }
 
 /** A SASL_SERVER pattern two linked servers match, no tier, a default:
@@ -1100,7 +1101,7 @@ static void services_pattern_two_matches(void **state)
 
   a = server_links("services.a");
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
   nsent = 0;
 
   b = server_links("services.b");
@@ -1113,7 +1114,7 @@ static void services_pattern_two_matches(void **state)
 
   server_leaves(b);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  assert_string_equal(sent_text(0), ":irc.test CAP n DEL :sasl");
 }
 
 /** IAuth handling SASL (no list from it yet), a default: X3 linking sends
@@ -1130,7 +1131,7 @@ static void iauth_services_link_told_as_before(void **state)
 
   server_links("x3.test");
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
   assert_int_equal(nlog_linked, 1);     /* logged as it always was */
 }
 
@@ -1149,8 +1150,8 @@ static void iauth_services_leave_told_as_before(void **state)
 
   server_leaves(x3);
   assert_int_equal(nsent, 2);
-  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
-  assert_string_equal(sent_text(1), "CAP n NEW :sasl");
+  assert_string_equal(sent_text(0), ":irc.test CAP n DEL :sasl");
+  assert_string_equal(sent_text(1), ":irc.test CAP n NEW :sasl");
 }
 
 /** With the sasl capability's feature off, CAP LS never offers sasl, so a
@@ -1192,7 +1193,7 @@ static void net_burst_brings_services_told_once(void **state)
   b = server_via("services.b", a);
   sasl_mechanisms_server_linked(a);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
   assert_int_equal(nlog_linked, 1);
   nsent = 0;
 
@@ -1333,13 +1334,13 @@ static void services_behind_hub_split_and_join(void **state)
   server_leaves(x3);                    /* the split: downlink first */
   server_leaves(hub);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  assert_string_equal(sent_text(0), ":irc.test CAP n DEL :sasl");
   nsent = 0;
 
   x3 = x3_behind(&hub);                 /* the net join */
   sasl_mechanisms_server_linked(hub);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
   assert_string_equal(ls_sasl(), "sasl=PLAIN");
 }
 
@@ -1358,7 +1359,7 @@ static void services_behind_hub_join_then_own_eob(void **state)
   sasl_mechanisms_server_linked(hub);
   sasl_mechanisms_server_linked(x3);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
 }
 
 /** No tier, a default D: X3 announces S after its burst -- CAP NEW with
@@ -1377,7 +1378,7 @@ static void services_list_after_burst_is_new(void **state)
   sasl_mechanisms_announced("PLAIN,EXTERNAL");
   sasl_mechanisms_announced("PLAIN,EXTERNAL");
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN,EXTERNAL");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN,EXTERNAL");
 }
 
 /** ... with S equal to D: nothing after the CAP NEW the link sent. */
@@ -1416,11 +1417,12 @@ static void services_list_during_burst_told_once(void **state)
     sasl_mechanisms_announced("PLAIN,EXTERNAL");
     sasl_mechanisms_server_linked(x3);
     assert_int_equal(nsent, 1);
-    assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN,EXTERNAL");
+    assert_string_equal(sent_text(0),
+                        ":irc.test CAP n NEW :sasl=PLAIN,EXTERNAL");
 
     server_leaves(x3);                  /* clears the list: DEL */
     assert_int_equal(nsent, 2);
-    assert_string_equal(sent_text(1), "CAP n DEL :sasl");
+    assert_string_equal(sent_text(1), ":irc.test CAP n DEL :sasl");
   }
 }
 
@@ -1439,7 +1441,7 @@ static void health_flip_during_burst_no_repeat(void **state)
   x3 = server("x3.test");
   tier_health(NULL);
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
   sasl_mechanisms_server_linked(x3);
   assert_int_equal(nsent, 1);
 }
@@ -1477,13 +1479,13 @@ static void iauth_raw_send_then_other_event(void **state)
   user302("n");
   set_sasl_mechanisms("PLAIN");
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=PLAIN");
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
   nsent = 0;
 
   iauth_sasl = 0;
   server_links("leaf.test");
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n NEW :sasl=" L_MECHS);
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=" L_MECHS);
 }
 
 /* ====================================================================
@@ -1541,7 +1543,7 @@ static void rehash_after_iauth_removed_tells(void **state)
   iauth_policy_pending = 0;
   sasl_tell_after_rehash();
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), "CAP n DEL :sasl");
+  assert_string_equal(sent_text(0), ":irc.test CAP n DEL :sasl");
   assert_int_equal(nlog_told, 1);
   assert_string_equal(log_told, "SASL: told clients CAP DEL :sasl (rehash)");
 }

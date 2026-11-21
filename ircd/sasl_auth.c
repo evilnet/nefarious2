@@ -1273,8 +1273,8 @@ static int sasl_login_apply(struct Client *sptr, const char *account,
   /* 2. Send RPL_LOGGEDIN; a REGISTER's own reply comes first, as the spec's
    * example has it ("VERIFY SUCCESS ...", then "900 ..."). */
   if (by == LOGIN_BY_REGISTER)
-    sendrawto_one_tags(sptr, "REGISTER SUCCESS %s :Account registered",
-                       cli_saslaccount(sptr));
+    sendrawto_one_tags(sptr, ":%s REGISTER SUCCESS %s :Account registered",
+                       cli_name(&me), cli_saslaccount(sptr));
   send_reply(sptr, RPL_LOGGEDIN,
              BadPtr(cli_name(sptr)) ? "*" : cli_name(sptr),
              (!cli_user(sptr) || BadPtr(cli_user(sptr)->username)) ? "*" : cli_user(sptr)->username,

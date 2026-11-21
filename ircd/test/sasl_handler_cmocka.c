@@ -1364,6 +1364,7 @@ static int setup(void **state)
   in_session_too = NULL;
   ntlog = 0;
   sasl_notifies = told_tells = 0;
+  ircd_strncpy(cli_name(&me), "irc.test", sizeof(me.cli_name));
 #ifdef USE_LIBKC
   token_ensure_fail = 0;
   kc_mode = KC_LATER;
@@ -2497,7 +2498,7 @@ static void register_answer_after_login_to_the_same_account(void **state)
     f->n_numerics = 0;
     ntlog = 0;
     pend_deliver_kind(P_CREATED, KC_SUCCESS);       /* REGISTER's answer */
-    snprintf(want, sizeof(want), "raw sw REGISTER SUCCESS %s ", acct);
+    snprintf(want, sizeof(want), "raw sw :irc.test REGISTER SUCCESS %s ", acct);
     assert_int_equal(ntlog, 1);
     assert_true(!strncmp(tlog[0], want, strlen(want)));
     assert_false(has_numeric(f, RPL_LOGGEDIN));
@@ -2658,7 +2659,7 @@ static void register_success_is_a_sasl_login(void **state)
     sasl_login_of(s, acct, &ts);
     register_login_of(r, acct, &tr);
 
-    snprintf(success, sizeof(success), "raw tw REGISTER SUCCESS %s ", acct);
+    snprintf(success, sizeof(success), "raw tw :irc.test REGISTER SUCCESS %s ", acct);
     rest.n = 0;
     for (i = 0; i < tr.n; i++)
       if (strncmp(tr.e[i], success, strlen(success)))
@@ -3177,7 +3178,7 @@ static void register_answer_carries_its_own_label(void **state)
   ntlog = 0;
   pend_deliver_kind(P_CREATED, KC_SUCCESS);
   assert_string_equal(tlog[0], "BATCH + labeled-response lb [label=L1]");
-  assert_string_equal(tlog[1], "raw lb REGISTER SUCCESS nlab1 :Account registered");
+  assert_string_equal(tlog[1], "raw lb :irc.test REGISTER SUCCESS nlab1 :Account registered");
   assert_true(!strncmp(tlog[2], "900 lb ", 7));
   assert_string_equal(tlog[ntlog - 1], "BATCH - lb");
   assert_string_equal(cli_label(c), "L2");          /* the line's own, back */
@@ -3243,7 +3244,7 @@ static void register_answer_carries_its_own_label(void **state)
   pend_deliver_kind(P_CREATED, KC_SUCCESS);
   ntlog = 0;
   pend_deliver_kind(P_RESULT, KC_SUCCESS);          /* the mail */
-  assert_true(tlog_has("raw lg REGISTER VERIFICATION_REQUIRED nlab6 :Account created - "
+  assert_true(tlog_has("raw lg :irc.test REGISTER VERIFICATION_REQUIRED nlab6 :Account created - "
                        "check your email for a verification link, then log in "
                        "normally (SASL) [label=L9]"));
 }

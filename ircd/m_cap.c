@@ -177,8 +177,10 @@ cap_notify_v302(struct Client *cptr)
   return cli_capab_version(cptr) >= 302;
 }
 
-/** The longest list one CAP NEW/DEL line carries: with "CAP <nick> NEW :"
- * and the CRLF the line stays well under 512 bytes. */
+/** The longest list one CAP NEW/DEL line carries: with ":<server> CAP
+ * <nick> NEW :" and the CRLF the line stays under 512 bytes, unless the
+ * server name and the nick are long enough to leave it less room
+ * (cap_batch_send()). */
 #define CAP_LINE_LIST 400
 
 /** Send the batched changes of one kind to \a to, as many CAP lines as
@@ -194,7 +196,15 @@ cap_batch_send(struct Client *to, int available, int v302)
 {
   char buf[CAP_LINE_LIST + 1], item[sizeof(cap_batch.entries[0].capname)
                                     + sizeof(cap_batch.entries[0].value) + 1];
-  int len = 0, i;
+  int len = 0, i, room = CAP_LINE_LIST;
+
+  /* What 510 bytes leave the list after ":<server> CAP <nick> NEW :". */
+  if (to) {
+    int head = (int)(strlen(cli_name(&me)) + strlen(cli_name(to)))
+               + (int)sizeof(": CAP  NEW :") - 1;
+    if (BUFSIZE - 2 - head < room)
+      room = BUFSIZE - 2 - head;
+  }
 
   for (i = 0; i <= cap_batch.count; i++) {
     int n = 0;
@@ -215,9 +225,9 @@ cap_batch_send(struct Client *to, int available, int v302)
       n = strlen(item);
     }
     /* Flush before an item that does not fit, and at the end. */
-    if (len && (i == cap_batch.count || len + 1 + n > CAP_LINE_LIST)) {
+    if (len && (i == cap_batch.count || len + 1 + n > room)) {
       if (to)
-        sendrawto_one(to, "CAP %s %s :%s", cli_name(to),
+        sendrawto_one(to, ":%s CAP %s %s :%s", cli_name(&me), cli_name(to),
                       available ? "NEW" : "DEL", buf);
       else
         log_write(LS_SYSTEM, L_INFO, 0, "CAP notify: %s %s",
@@ -226,8 +236,8 @@ cap_batch_send(struct Client *to, int available, int v302)
     }
     if (i == cap_batch.count)
       break;
-    if (n > CAP_LINE_LIST)
-      n = CAP_LINE_LIST;      /* one item longer than a line: cut it */
+    if (n > room)
+      n = room;               /* one item longer than a line: cut it */
     if (len)
       buf[len++] = ' ';
     memcpy(buf + len, item, n);
@@ -402,13 +412,15 @@ void send_cap_notify(const char *capname, int available, const char *value)
     if (available) {
       /* CAP NEW with optional value */
       if (value && *value && cap_notify_v302(cptr))
-        sendrawto_one(cptr, "CAP %s NEW :%s=%s",
-                      cli_name(cptr), capname, value);
+        sendrawto_one(cptr, ":%s CAP %s NEW :%s=%s",
+                      cli_name(&me), cli_name(cptr), capname, value);
       else
-        sendrawto_one(cptr, "CAP %s NEW :%s", cli_name(cptr), capname);
+        sendrawto_one(cptr, ":%s CAP %s NEW :%s", cli_name(&me),
+                      cli_name(cptr), capname);
     } else {
       /* CAP DEL */
-      sendrawto_one(cptr, "CAP %s DEL :%s", cli_name(cptr), capname);
+      sendrawto_one(cptr, ":%s CAP %s DEL :%s", cli_name(&me),
+                    cli_name(cptr), capname);
     }
   }
 }

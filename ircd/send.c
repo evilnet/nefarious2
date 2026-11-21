@@ -1786,13 +1786,15 @@ void sendrawto_one(struct Client *to, const char *pattern, ...)
   msgq_clean(mb);
 }
 
-/** Send a line without a source prefix to one local client, with the tags
- * its capabilities call for (format_message_tags_for_ex() as for a line
- * from this server: @label or the labeled-response @batch when answering
- * a labeled command, @time under server-time; nothing else applies to a
- * server source).  For server lines that have always been unprefixed --
- * draft/account-registration's "REGISTER SUCCESS <account> :..." -- so a
- * client that asked for no tags sees the line byte for byte as before.
+/** Send a line (@a pattern carries its own prefix: ":<server> ...") to
+ * one local client, with the tags its capabilities call for
+ * (format_message_tags_for_ex() as for a line from this server: @label or
+ * the labeled-response @batch when answering a labeled command, @time
+ * under server-time; nothing else applies to a server source), put in
+ * front of the prefix.  For server lines written by hand --
+ * draft/account-registration's ":<server> REGISTER SUCCESS <account> :..."
+ * -- so a client that asked for no tags sees exactly what sendrawto_one()
+ * would send.
  * @param[in] to Client to send to.
  * @param[in] pattern Format string for the line. */
 void sendrawto_one_tags(struct Client *to, const char *pattern, ...)
