@@ -1898,25 +1898,22 @@ static int rehash_conf_unchanged(void)
       && path.st_dev == now.st_dev && path.st_ino == now.st_ino;
 }
 
-static const char precheck_self[] = "/proc/self/exe";
-/** Whether /proc/self/exe identified the daemon at startup. */
-static int precheck_use_self;
+/** The binary a configuration check runs, chosen once at startup
+ * (conf_precheck_init()). */
+static const char *precheck_exe;
 
-/** Check at startup whether /proc/self/exe names SPATH. Under Valgrind
- * it names Valgrind's tool. */
+/** Choose, at startup, the binary a REHASH checks the configuration
+ * with (conf_precheck_binary()): the server's own image, or under
+ * valgrind the file the server was started as. */
 void conf_precheck_init(void)
 {
-  struct stat self, spath;
-
-  precheck_use_self = !stat(precheck_self, &self) && !stat(SPATH, &spath)
-      && self.st_dev == spath.st_dev && self.st_ino == spath.st_ino;
+  precheck_exe = conf_precheck_binary("/proc/self/exe", SPATH);
 }
 
-/** Use the running image if /proc/self/exe identified it at startup,
- * even if SPATH has since been replaced. Otherwise use SPATH. */
+/** The binary chosen at startup; SPATH if none was. */
 static const char *precheck_binary(void)
 {
-  return precheck_use_self ? precheck_self : SPATH;
+  return precheck_exe ? precheck_exe : SPATH;
 }
 
 /** Read the new configuration in a fresh "ircd -k" before anything of

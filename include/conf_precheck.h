@@ -42,4 +42,25 @@ extern enum conf_precheck_result
 conf_precheck_run(const char *exe, const char *dpath, const char *conf,
                   int timeout_ms, char *out, size_t outlen);
 
+/** Remember the file the server was started as.  Call it with argv[0]
+ * before the first chdir(): a path relative to where the server was
+ * started is resolved here.  A name with no directory in it (found
+ * through PATH) is not looked up, and counts as unknown.
+ * @param[in] argv0 argv[0] of main(), or NULL to forget it. */
+extern void conf_precheck_started(const char *argv0);
+
+/** Choose the binary a configuration check runs.
+ *
+ * The server's own image, @a self, is the right one: it stays what the
+ * server runs after an upgrade replaces the file on disk.  It is used
+ * when it is the file the server was started as, or the file at
+ * @a spath.  When it is neither, @a self is not the ircd (under valgrind
+ * it is valgrind's tool), and the check runs the file the server was
+ * started as; when that is unknown, gone or not executable, @a spath.
+ * @param[in] self  The running image ("/proc/self/exe").
+ * @param[in] spath Where the ircd is installed (SPATH).
+ * @return @a self, @a spath, or the started file's path (valid until
+ *   the next conf_precheck_started()). */
+extern const char *conf_precheck_binary(const char *self, const char *spath);
+
 #endif /* INCLUDED_conf_precheck_h */

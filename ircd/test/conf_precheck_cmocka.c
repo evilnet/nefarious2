@@ -9,6 +9,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -332,6 +333,132 @@ static void a_check_leaves_no_core(void **state)
   assert_string_equal(out, "0\n");
 }
 
+/* ---- Which binary the check runs (conf_precheck_started(),
+ * conf_precheck_binary()).  Files in a directory of their own stand in
+ * for /proc/self/exe, the file the server was started as, and SPATH. ---- */
+
+static char bdir[64], b_image[96], b_self[96], b_other[96], b_spath[96];
+
+static void put_file(const char *path, int mode)
+{
+  FILE *f = fopen(path, "w");
+
+  assert_non_null(f);
+  fprintf(f, "#!/bin/sh\nexit 0\n");
+  fclose(f);
+  assert_int_equal(chmod(path, mode), 0);
+}
+
+/* image: the server's binary.  self: another name of the same file, as
+ * /proc/self/exe is.  other: another program (what /proc/self/exe names
+ * under valgrind).  spath: a third program. */
+static int binary_setup(void **state)
+{
+  char made[64], real[PATH_MAX];
+
+  snprintf(made, sizeof(made), "/tmp/conf_precheck_bin_XXXXXX");
+  assert_non_null(mkdtemp(made));
+  assert_non_null(realpath(made, real));        /* /tmp may be a link */
+  assert_true(strlen(real) < sizeof(bdir));
+  strcpy(bdir, real);
+  (void)state;
+  snprintf(b_image, sizeof(b_image), "%s/image", bdir);
+  snprintf(b_self, sizeof(b_self), "%s/self", bdir);
+  snprintf(b_other, sizeof(b_other), "%s/other", bdir);
+  snprintf(b_spath, sizeof(b_spath), "%s/spath", bdir);
+  put_file(b_image, 0700);
+  put_file(b_other, 0700);
+  put_file(b_spath, 0700);
+  assert_int_equal(link(b_image, b_self), 0);
+  conf_precheck_started(NULL);
+  return 0;
+}
+
+static int binary_teardown(void **state)
+{
+  (void)state;
+  unlink(b_image);
+  unlink(b_self);
+  unlink(b_other);
+  unlink(b_spath);
+  rmdir(bdir);
+  conf_precheck_started(NULL);
+  return 0;
+}
+
+/* Started from a file that is not SPATH (a copy, the build tree, a
+ * versioned name): the server's own image does the check. */
+static void started_as_its_own_image_uses_self(void **state)
+{
+  (void)state;
+  conf_precheck_started(b_image);
+  assert_ptr_equal(conf_precheck_binary(b_self, b_spath), b_self);
+}
+
+/* Started by a name that cannot be found again, from SPATH (a restart
+ * execs SPATH with the first argv[0]): its own image. */
+static void spath_is_its_image_uses_self(void **state)
+{
+  (void)state;
+  conf_precheck_started("ircd");        /* no directory: not looked up */
+  assert_ptr_equal(conf_precheck_binary(b_self, b_image), b_self);
+  conf_precheck_started(NULL);
+  assert_ptr_equal(conf_precheck_binary(b_self, b_image), b_self);
+}
+
+/* Under valgrind /proc/self/exe is valgrind's tool: the file the server
+ * was started as does the check, whatever is at SPATH. */
+static void self_is_another_program_uses_the_started_file(void **state)
+{
+  (void)state;
+  conf_precheck_started(b_image);
+  assert_string_equal(conf_precheck_binary(b_other, b_spath), b_image);
+}
+
+/* Nothing says which file the server is: SPATH. */
+static void nothing_known_uses_spath(void **state)
+{
+  (void)state;
+  conf_precheck_started("ircd");
+  assert_ptr_equal(conf_precheck_binary(b_other, b_spath), b_spath);
+  conf_precheck_started(NULL);
+  assert_ptr_equal(conf_precheck_binary(b_other, b_spath), b_spath);
+  /* started as a file that is gone, or that cannot be executed */
+  conf_precheck_started("/tmp/conf_precheck_no_such_file");
+  assert_ptr_equal(conf_precheck_binary(b_other, b_spath), b_spath);
+  assert_int_equal(chmod(b_image, 0600), 0);
+  conf_precheck_started(b_image);
+  assert_ptr_equal(conf_precheck_binary(b_other, b_spath), b_spath);
+}
+
+/* No /proc: the file the server was started as, else SPATH. */
+static void without_self_uses_the_started_file(void **state)
+{
+  (void)state;
+  conf_precheck_started(b_image);
+  assert_string_equal(conf_precheck_binary("/tmp/conf_precheck_no_proc/exe",
+                                           b_spath), b_image);
+  conf_precheck_started(NULL);
+  assert_ptr_equal(conf_precheck_binary("/tmp/conf_precheck_no_proc/exe",
+                                        b_spath), b_spath);
+}
+
+/* argv[0] relative to where the server was started is kept as the file
+ * it named then: main() changes directory afterwards. */
+static void a_relative_start_is_resolved_at_once(void **state)
+{
+  char cwd[256];
+
+  (void)state;
+  assert_non_null(getcwd(cwd, sizeof(cwd)));
+  assert_int_equal(chdir(bdir), 0);
+  conf_precheck_started("./image");
+  assert_int_equal(chdir("/"), 0);
+  assert_ptr_equal(conf_precheck_binary(b_self, b_spath), b_self);
+  assert_string_equal(conf_precheck_binary(b_other, b_spath), b_image);
+  assert_int_equal(chdir(cwd), 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -349,6 +476,12 @@ int main(void)
     cmocka_unit_test_teardown(long_output_is_cut, teardown),
     cmocka_unit_test_teardown(descriptors_are_not_inherited, teardown),
     cmocka_unit_test_teardown(a_check_leaves_no_core, teardown),
+    cmocka_unit_test_setup_teardown(started_as_its_own_image_uses_self, binary_setup, binary_teardown),
+    cmocka_unit_test_setup_teardown(spath_is_its_image_uses_self, binary_setup, binary_teardown),
+    cmocka_unit_test_setup_teardown(self_is_another_program_uses_the_started_file, binary_setup, binary_teardown),
+    cmocka_unit_test_setup_teardown(nothing_known_uses_spath, binary_setup, binary_teardown),
+    cmocka_unit_test_setup_teardown(without_self_uses_the_started_file, binary_setup, binary_teardown),
+    cmocka_unit_test_setup_teardown(a_relative_start_is_resolved_at_once, binary_setup, binary_teardown),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
