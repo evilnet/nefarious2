@@ -101,7 +101,7 @@ static void other_ends_fail(void **state)
   char out[512];
 
   (void)state;
-  make_script("exit 4");          /* "ircd -k" could not reach a path */
+  make_script("exit 4");          /* The check could not read its config file. */
   assert_int_equal(conf_precheck_run(script, "/tmp", "c", 5000, out, sizeof(out)),
                    CONF_PRECHECK_FAILED);
   assert_non_null(strstr(out, "it exited with status 4"));
@@ -244,6 +244,24 @@ static void a_hung_check_is_killed(void **state)
   assert_int_equal(waitpid(-1, &st, WNOHANG), -1);
 }
 
+/** A check that keeps writing is still killed at the deadline. */
+static void continuous_output_times_out(void **state)
+{
+  char out[512];
+  long t0;
+  int st;
+
+  (void)state;
+  make_script("yes flooding &\nwriter=$!\nsleep 4\nkill \"$writer\"");
+  t0 = now_ms();
+  assert_int_equal(conf_precheck_run(script, "/tmp", "c", 500, out, sizeof(out)),
+                   CONF_PRECHECK_FAILED);
+  assert_true(now_ms() - t0 < 3000);
+  assert_non_null(strstr(out, "flooding\n"));
+  assert_non_null(strstr(out, "it did not finish in 500 ms"));
+  assert_int_equal(waitpid(-1, &st, WNOHANG), -1);
+}
+
 /* A process the check left behind holding its output does not hold the
  * server: the check's own status is what counts, and what it left is
  * killed with it (its process group). */
@@ -275,7 +293,7 @@ static void long_output_is_cut(void **state)
   assert_int_equal(strlen(out), sizeof(out) - 1);
 }
 
-/* The check gets none of the server's descriptors. */
+/** The check gets none of the server's descriptors. */
 static void descriptors_are_not_inherited(void **state)
 {
   char out[512], conf[16];
@@ -284,12 +302,17 @@ static void descriptors_are_not_inherited(void **state)
   (void)state;
   assert_int_equal(pipe(p), 0);
   snprintf(conf, sizeof(conf), "%d", p[1]);
-  make_script("if [ -e /proc/$$/fd/$5 ]; then echo open; else echo closed; fi");
+  make_script("if [ -e /proc/self/fd/1 ]; then dir=/proc/self/fd\n"
+              "elif [ -e /dev/fd/1 ]; then dir=/dev/fd\n"
+              "else echo unavailable; exit 0; fi\n"
+              "if [ -e \"$dir/$5\" ]; then echo open; else echo closed; fi");
   assert_int_equal(conf_precheck_run(script, "/tmp", conf, 5000, out, sizeof(out)),
                    CONF_PRECHECK_OK);
-  assert_string_equal(out, "closed\n");
   close(p[0]);
   close(p[1]);
+  if (!strcmp(out, "unavailable\n"))
+    skip();
+  assert_string_equal(out, "closed\n");
 }
 
 /* A check that crashes leaves no core file, whatever the server's own
@@ -321,6 +344,7 @@ int main(void)
     cmocka_unit_test_teardown(a_crash_fails, teardown),
     cmocka_unit_test_teardown(sigchld_ignored_is_still_waited_for, teardown),
     cmocka_unit_test_teardown(a_hung_check_is_killed, teardown),
+    cmocka_unit_test_teardown(continuous_output_times_out, teardown),
     cmocka_unit_test_teardown(a_leftover_process_does_not_hold_the_wait, teardown),
     cmocka_unit_test_teardown(long_output_is_cut, teardown),
     cmocka_unit_test_teardown(descriptors_are_not_inherited, teardown),

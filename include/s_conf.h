@@ -283,6 +283,7 @@ extern enum AuthorizationCheckResult attach_conf(struct Client *cptr, struct Con
 extern struct ConfItem* find_conf_exact(const char* name, struct Client *cptr, int statmask);
 extern enum AuthorizationCheckResult conf_check_client(struct Client *cptr);
 extern int  conf_check_server(struct Client *cptr);
+extern void conf_precheck_init(void);
 extern int rehash(struct Client *cptr, int sig);
 extern int find_kill(struct Client *cptr);
 extern const char *find_quarantine(const char* chname);

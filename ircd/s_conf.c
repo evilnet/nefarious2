@@ -1898,13 +1898,25 @@ static int rehash_conf_unchanged(void)
       && path.st_dev == now.st_dev && path.st_ino == now.st_ino;
 }
 
-/** The binary a configuration check runs: /proc/self/exe, the image this
- * server runs even when an upgrade replaced the file; elsewhere SPATH. */
+static const char precheck_self[] = "/proc/self/exe";
+/** Whether /proc/self/exe identified the daemon at startup. */
+static int precheck_use_self;
+
+/** Check at startup whether /proc/self/exe names SPATH. Under Valgrind
+ * it names Valgrind's tool. */
+void conf_precheck_init(void)
+{
+  struct stat self, spath;
+
+  precheck_use_self = !stat(precheck_self, &self) && !stat(SPATH, &spath)
+      && self.st_dev == spath.st_dev && self.st_ino == spath.st_ino;
+}
+
+/** Use the running image if /proc/self/exe identified it at startup,
+ * even if SPATH has since been replaced. Otherwise use SPATH. */
 static const char *precheck_binary(void)
 {
-  static const char self[] = "/proc/self/exe";
-
-  return access(self, X_OK) == 0 ? self : SPATH;
+  return precheck_use_self ? precheck_self : SPATH;
 }
 
 /** Read the new configuration in a fresh "ircd -k" before anything of
