@@ -238,11 +238,13 @@ static void value_change_only_to_302(void **state)
   assert_int_equal(sent_count_to(o), 0);
 
   nsent = 0;
+  feat_off[FEAT_CAP_draft_multiline] = 1;      /* a DEL: CAP LS dropped it */
   send_cap_notify("draft/multiline", 0, NULL);
   assert_string_equal(sent_to(n, 0), ":irc.test CAP n DEL :draft/multiline");
   assert_string_equal(sent_to(o, 0), ":irc.test CAP o DEL :draft/multiline");
 
   nsent = 0;
+  feat_off[FEAT_CAP_draft_multiline] = 0;
   send_cap_notify("draft/multiline", 1, "max-lines=50");
   assert_string_equal(sent_to(n, 0), ":irc.test CAP n NEW :draft/multiline=max-lines=50");
   assert_string_equal(sent_to(o, 0), ":irc.test CAP o NEW :draft/multiline");
@@ -307,6 +309,8 @@ static void batch_del_carries_the_server_source(void **state)
   (void)state;
 
   two(&n, &o);
+  feat_off[FEAT_CAP_draft_multiline] = 1;      /* DELs: CAP LS dropped them */
+  feat_off[FEAT_CAP_draft_chathistory] = 1;
   cap_notify_begin_batch();
   send_cap_notify("draft/multiline", 0, NULL);
   send_cap_notify("draft/chathistory", 0, NULL);

@@ -615,14 +615,44 @@ static void empty_list_withdraws_announced_list(void **state)
 }
 
 /* ====================================================================
- * IAuth's list (a server that never receives "SASL * * M")
+ * IAuth's list (a server whose IAuth handles SASL)
  * ==================================================================== */
 
-/** IAuth's list is stored and told as it always was: a CAP NEW with the
- * list when it is first stored (even past the Keycloak tier's value), a
- * CAP DEL then a CAP NEW with IAuth's list when a server matching
- * SASL_SERVER leaves. */
-static void iauth_list_told_as_before(void **state)
+/** IAuth's list arriving makes CAP LS offer sasl (while IAuth handles
+ * SASL, CAP LS offers it only with IAuth's mechanisms): CAP NEW with the
+ * list.  IAuth withdrawing it: CAP DEL.  Told by the difference, as every
+ * other event is. */
+static void iauth_list_arriving_and_withdrawn(void **state)
+{
+  (void)state;
+
+  iauth_sasl = 1;
+  user302("n");
+  assert_string_equal(ls_sasl(), "");
+
+  iauth_mechs = "PLAIN";
+  set_sasl_mechanisms("PLAIN");
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
+  nsent = 0;
+
+  iauth_mechs = "PLAIN,EXTERNAL";       /* a changed list: its value */
+  set_sasl_mechanisms("PLAIN,EXTERNAL");
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN,EXTERNAL");
+  nsent = 0;
+
+  iauth_mechs = NULL;
+  set_sasl_mechanisms(NULL);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), ":irc.test CAP n DEL :sasl");
+}
+
+/** With the Keycloak tier healthy CAP LS gives the tier's list whatever
+ * IAuth stores, so IAuth's list being stored tells nothing, and neither
+ * does a server matching SASL_SERVER leaving.  (These used to send CAP NEW
+ * :sasl=<IAuth's list>, then CAP DEL and CAP NEW again at the leave.) */
+static void iauth_list_with_tier_tells_nothing(void **state)
 {
   struct Client *hub;
   (void)state;
@@ -632,17 +662,15 @@ static void iauth_list_told_as_before(void **state)
   iauth_mechs = "PLAIN";
   hub = server("hub.test");
   user302("n");
+  assert_string_equal(ls_sasl(), "sasl=PLAIN,OAUTHBEARER");
 
   set_sasl_mechanisms("PLAIN");
-  assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
-  nsent = 0;
+  assert_int_equal(nsent, 0);
 
   server_leaves(hub);
   assert_string_equal(get_sasl_mechanisms(), "PLAIN");
-  assert_int_equal(nsent, 2);
-  assert_string_equal(sent_text(0), ":irc.test CAP n DEL :sasl");
-  assert_string_equal(sent_text(1), ":irc.test CAP n NEW :sasl=PLAIN");
+  assert_int_equal(nsent, 0);
+  assert_string_equal(ls_sasl(), "sasl=PLAIN,OAUTHBEARER");
 }
 
 /** A server with only SASL_DEFAULT_MECHANISMS under SASL_SERVER "*": CAP
@@ -920,25 +948,25 @@ static void health_down_then_services_list_changes(void **state)
   assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=" L_MECHS);
 }
 
-/** IAuth handling SASL with its list I: IAuth's own store told clients
- * sasl=I (raw, as it always was), so the tier going down -- CAP LS now
- * says I -- tells nothing more; recovery moves the value back.  (Task 6
- * pinned a second CAP NEW :sasl=PLAIN at the tier going down.) */
-static void health_iauth_list_already_told_tells_nothing(void **state)
+/** IAuth handling SASL with its list I, the tier healthy: CAP LS gives
+ * the tier's value, so IAuth's store tells nothing; the tier going down
+ * -- CAP LS now says I -- tells sasl=I once, and recovery moves the value
+ * back. */
+static void health_iauth_list_follows_cap_ls(void **state)
 {
   (void)state;
   local_mechs = L_MECHS;
   iauth_sasl = 1;
   iauth_mechs = "PLAIN";
   user302("n");
-  set_sasl_mechanisms("PLAIN");        /* told as it always was */
-  assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
-  nsent = 0;
+  set_sasl_mechanisms("PLAIN");        /* CAP LS still gives the tier's */
+  assert_int_equal(nsent, 0);
 
   tier_health(NULL);
-  assert_int_equal(nsent, 0);
+  assert_int_equal(nsent, 1);
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
   assert_string_equal(ls_sasl(), "sasl=PLAIN");
+  nsent = 0;
 
   tier_health(L_MECHS);
   assert_int_equal(nsent, 1);
@@ -1118,10 +1146,11 @@ static void services_pattern_two_matches(void **state)
   assert_string_equal(sent_text(0), ":irc.test CAP n DEL :sasl");
 }
 
-/** IAuth handling SASL (no list from it yet), a default: X3 linking sends
- * what it always did, CAP NEW with the default, untouched by the
- * difference rule. */
-static void iauth_services_link_told_as_before(void **state)
+/** IAuth handling SASL (no list from it yet), a default: CAP LS does not
+ * offer sasl (IAuth has no mechanisms, and AUTHENTICATE goes to IAuth,
+ * not to services), so X3 linking changes nothing and tells nothing.
+ * (It used to send CAP NEW :sasl=PLAIN, the default, here.) */
+static void iauth_services_link_no_list_tells_nothing(void **state)
 {
   (void)state;
 
@@ -1129,16 +1158,16 @@ static void iauth_services_link_told_as_before(void **state)
   sasl_server = "x3.test";
   default_mechs = "PLAIN";
   user302("n");
+  assert_string_equal(ls_sasl(), "");
 
   server_links("x3.test");
-  assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
-  assert_int_equal(nlog_linked, 1);     /* logged as it always was */
+  assert_int_equal(nsent, 0);
+  assert_int_equal(nlog_linked, 0);     /* nothing was enabled */
 }
 
-/** ... and X3 leaving: CAP DEL, then CAP NEW without a value (IAuth has
- * no list), as always. */
-static void iauth_services_leave_told_as_before(void **state)
+/** ... and X3 leaving: sasl was not offered and is not now, so nothing
+ * is told.  (It used to send CAP DEL, then a bare CAP NEW.) */
+static void iauth_services_leave_no_list_tells_nothing(void **state)
 {
   struct Client *x3;
   (void)state;
@@ -1148,11 +1177,10 @@ static void iauth_services_leave_told_as_before(void **state)
   default_mechs = "PLAIN";
   x3 = server("x3.test");
   user302("n");
+  assert_string_equal(ls_sasl(), "");
 
   server_leaves(x3);
-  assert_int_equal(nsent, 2);
-  assert_string_equal(sent_text(0), ":irc.test CAP n DEL :sasl");
-  assert_string_equal(sent_text(1), ":irc.test CAP n NEW :sasl");
+  assert_int_equal(nsent, 0);
 }
 
 /** With the sasl capability's feature off, CAP LS never offers sasl, so a
@@ -1465,28 +1493,26 @@ static void boot_healthy_tier_first_eob_tells_nothing(void **state)
   assert_int_equal(nsent, 0);
 }
 
-/** A raw IAuth send, then an event outside IAuth: the comparison starts
- * from what the raw send told.  With the tier healthy (CAP LS: the tier's
- * list), IAuth's store tells sasl=PLAIN as it always did; IAuth then goes
- * and a server's end of burst tells the tier's list -- which it would not
- * if the raw CAP NEW had not been remembered. */
-static void iauth_raw_send_then_other_event(void **state)
+/** IAuth handling SASL with no list: X3 linking tells nothing (CAP LS
+ * does not offer sasl).  IAuth then stops handling SASL; CAP LS now
+ * offers sasl with the default through X3, and the next event tells it. */
+static void iauth_gone_then_services_default_is_told(void **state)
 {
   (void)state;
 
-  local_mechs = L_MECHS;
   iauth_sasl = 1;
-  iauth_mechs = "PLAIN";
+  sasl_server = "x3.test";
+  default_mechs = "PLAIN";
   user302("n");
-  set_sasl_mechanisms("PLAIN");
-  assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
-  nsent = 0;
+
+  server_links("x3.test");
+  assert_int_equal(nsent, 0);
 
   iauth_sasl = 0;
+  assert_string_equal(ls_sasl(), "sasl=PLAIN");
   server_links("leaf.test");
   assert_int_equal(nsent, 1);
-  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=" L_MECHS);
+  assert_string_equal(sent_text(0), ":irc.test CAP n NEW :sasl=PLAIN");
 }
 
 /* ====================================================================
@@ -1509,7 +1535,7 @@ static void rehash_waits_for_iauth_policy(void **state)
   iauth_sasl = 1;
   iauth_mechs = "PLAIN";
   user302("n");
-  set_sasl_mechanisms("PLAIN");         /* told, raw, as always */
+  set_sasl_mechanisms("PLAIN");         /* its list: the value changes */
   assert_int_equal(nsent, 1);
   nsent = 0;
 
@@ -1538,7 +1564,7 @@ static void rehash_after_iauth_removed_tells(void **state)
   iauth_mechs = "PLAIN";
   user302("n");
   set_sasl_mechanisms("PLAIN");
-  nsent = 0;
+  nsent = nlog_told = 0;
 
   iauth_sasl = 0;                       /* removed: no instance at all */
   iauth_policy_pending = 0;
@@ -1602,7 +1628,8 @@ int main(void)
     T(no_tier_split_default_same_tells_nothing),
     T(no_tier_split_no_default_is_del),
     T(empty_list_withdraws_announced_list),
-    T(iauth_list_told_as_before),
+    T(iauth_list_arriving_and_withdrawn),
+    T(iauth_list_with_tier_tells_nothing),
     T(default_only_any_split_tells_nothing),
     T(default_only_any_link_tells_nothing),
     T(services_leave_falls_back_to_iauth_once),
@@ -1616,15 +1643,15 @@ int main(void)
     T(health_no_fallback_any_server_del_then_new),
     T(health_no_change_tells_nothing),
     T(health_down_then_services_list_changes),
-    T(health_iauth_list_already_told_tells_nothing),
+    T(health_iauth_list_follows_cap_ls),
     T(services_leave_healthy_tier_default_tells_nothing),
     T(services_link_healthy_tier_default_tells_nothing),
     T(services_no_tier_default_link_new_leave_del),
     T(other_server_no_tier_default_tells_nothing),
     T(services_unhealthy_tier_default_leave_del_link_new),
     T(services_pattern_two_matches),
-    T(iauth_services_link_told_as_before),
-    T(iauth_services_leave_told_as_before),
+    T(iauth_services_link_no_list_tells_nothing),
+    T(iauth_services_leave_no_list_tells_nothing),
     T(health_cap_sasl_off_tells_nothing),
     T(net_burst_brings_services_told_once),
     T(server_behind_linked_services_tells_nothing),
@@ -1640,7 +1667,7 @@ int main(void)
     T(services_list_during_burst_told_once),
     T(health_flip_during_burst_no_repeat),
     T(boot_healthy_tier_first_eob_tells_nothing),
-    T(iauth_raw_send_then_other_event),
+    T(iauth_gone_then_services_default_is_told),
     T(rehash_waits_for_iauth_policy),
     T(rehash_after_iauth_removed_tells),
     T(told_and_clearing_logged),

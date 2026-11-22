@@ -76,6 +76,8 @@ static int cap_offered_to(struct Client *sptr, const struct capabilities *cap);
 static const char *cap_new_value(const struct capabilities *cap,
                                  const char *value);
 static void cap_take_away(struct Client *cptr, const struct capabilities *cap);
+static int cap_change_untold(struct Client *cptr,
+                             const struct capabilities *cap, int available);
 
 /* ---------------------------------------------------------------------------
  * CAP notify batching for rehash
@@ -223,6 +225,12 @@ cap_batch_send(struct Client *to, int available, int v302)
       if (!v302 && (!strcmp(entry->capname, "sts")
                     || (available && entry->known)))
         continue;
+      if (to) {
+        const struct capabilities *cap = cap_named(entry->capname);
+
+        if (cap && cap_change_untold(to, cap, available))
+          continue;
+      }
       if (v302 && entry->value[0])
         ircd_snprintf(0, item, sizeof(item), "%s=%s", entry->capname,
                       entry->value);
@@ -425,11 +433,11 @@ cap_sasl_offered(void)
  * @param[in] value Value for CAP NEW (e.g., mechanism list).  NULL or ""
  *   for the capability's stored one, if it has one.
  *
+ * A client is told only what CAP LS says to it (cap_change_untold()):
  * CAP NEW goes only to a client that CAP LS would offer the capability
- * to now (cap_offered_to()), so a client never hears of a capability
- * that its CAP REQ would then NAK: a caller may announce sasl that has
- * no mechanisms behind it, or one whose feature switch is off.  sasl's
- * and draft/webpush's values are always what CAP LS gives
+ * to now, so a client never hears of a capability that its CAP REQ
+ * would then NAK, and CAP DEL only to one CAP LS no longer offers it
+ * to.  sasl's and draft/webpush's values are always what CAP LS gives
  * (cap_new_value()), whatever the caller had at hand.
  */
 void send_cap_notify(const char *capname, int available, const char *value)
@@ -472,9 +480,11 @@ void send_cap_notify(const char *capname, int available, const char *value)
     if (!cap_notify_v302(cptr) && available && known)
       continue;
 
+    /* Never what CAP LS does not say to this client. */
+    if (cap && cap_change_untold(cptr, cap, available))
+      continue;
+
     if (available) {
-      if (cap && !cap_offered_to(cptr, cap))
-        continue;
       /* CAP NEW with optional value */
       if (value && *value && cap_notify_v302(cptr))
         sendrawto_one(cptr, ":%s CAP %s NEW :%s=%s",
@@ -812,6 +822,21 @@ static int
 cap_offered_to(struct Client *sptr, const struct capabilities *cap)
 {
   return cap_offered_at(cap, cli_capab_version(sptr));
+}
+
+/** Whether a CAP NEW (\a available) or CAP DEL of \a cap is not for
+ * \a cptr, because it would say what CAP LS does not say to that client:
+ * a NEW of a capability CAP LS does not offer it, or a DEL of one CAP LS
+ * still offers it (sasl announced gone while another tier keeps it up).
+ * cap-notify is offered to a CAP 302 client whatever CAP_cap_notify
+ * says, so switching that feature tells such a client nothing. */
+static int
+cap_change_untold(struct Client *cptr, const struct capabilities *cap,
+                  int available)
+{
+  if (cap->cap == CAP_CAPNOTIFY && cli_capab_version(cptr) >= CAP_VERSION_302)
+    return 1;
+  return available ? !cap_offered_to(cptr, cap) : cap_offered_to(cptr, cap);
 }
 
 /** The value CAP NEW gives \a cap, as CAP LS 302 spells it now: sasl's

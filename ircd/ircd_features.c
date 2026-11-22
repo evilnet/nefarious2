@@ -600,12 +600,14 @@ static void feature_notify_cap_##featname(void) { \
 }
 
 /* Generate notify functions for simple caps (no parameters) */
-/** sasl: CAP NEW carries the mechanism list; send_cap_notify() sends it
- * only while a SASL server is up (cap_offered_to()). */
+/** sasl: switching CAP_sasl changes what CAP LS says of sasl, and clients
+ * are told the difference from what they were last told (sasl_tell_now(),
+ * sasl_mechs.c).  Not during a configuration read: a rehash tells once,
+ * when everything it changed is in effect (sasl_tell_after_rehash()). */
 static void feature_notify_cap_sasl(void)
 {
-  send_cap_notify("sasl", feature_bool(FEAT_CAP_sasl),
-                  feature_bool(FEAT_CAP_sasl) ? cap_sasl_mechanisms() : NULL);
+  if (!feature_conf_loading())
+    sasl_tell_now("CAP_sasl");
 }
 
 /** draft/authtoken: CAP NEW only makes sense with a configured service. */
@@ -1373,7 +1375,7 @@ static struct FeatureDesc {
   F_B(CAP_extended_join, 0, 1, feature_notify_cap_extended_join),
   F_B(CAP_away_notify, 0, 1, feature_notify_cap_away_notify),
   F_B(CAP_account_notify, 0, 1, feature_notify_cap_account_notify),
-  F_B(CAP_sasl, 0, 1, feature_notify_cap_sasl),  /* NEW also follows the SASL server */
+  F_B(CAP_sasl, 0, 1, feature_notify_cap_sasl),  /* told by sasl_tell_now() */
   F_B(CAP_cap_notify, 0, 1, feature_notify_cap_cap_notify),
   F_B(CAP_server_time, 0, 1, feature_notify_cap_server_time),
   F_B(CAP_echo_message, 0, 1, feature_notify_cap_echo_message),

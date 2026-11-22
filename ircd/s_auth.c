@@ -4402,6 +4402,9 @@ static int iauth_cmd_sasl_global_mechs(struct IAuth *iauth, struct Client *cli,
         set_sasl_mechanisms(NULL);
       }
     }
+    /* IAuth's own list decides whether CAP LS offers sasl while IAuth
+     * handles it, whichever list is stored. */
+    sasl_tell_now("IAuth mechanisms");
     return 0;
   }
 
@@ -4412,10 +4415,13 @@ static int iauth_cmd_sasl_global_mechs(struct IAuth *iauth, struct Client *cli,
 
   /* IAuth's list becomes the global one (CAP LS, 908) when none is set,
    * and replaces it when the one set is IAuth's earlier list -- never a
-   * list services set.  A changed value is announced (CAP NEW sasl=,
-   * set_sasl_mechanisms()). */
+   * list services set.  What that changes in what CAP LS says is told
+   * (set_sasl_mechanisms()). */
   if (!current || iauth_set_it)
     set_sasl_mechanisms(iauth->i_sasl_mechs);
+  /* ... and with a list of its own IAuth makes CAP LS offer sasl,
+   * whichever list is stored: tell what that changed. */
+  sasl_tell_now("IAuth mechanisms");
 
   return 0;
 }

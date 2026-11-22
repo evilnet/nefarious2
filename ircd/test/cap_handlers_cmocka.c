@@ -307,8 +307,9 @@ static void del_takes_the_capability_away(void **state)
   assert_false(CapHas(cli_capab(a), CAP_SERVERTIME));
 }
 
-/** A DEL for a capability the client is still offered takes nothing:
- * cap-notify at CAP 302 with its feature switched off. */
+/** A DEL for a capability the client is still offered takes nothing and
+ * is not sent to it: cap-notify at CAP 302 with its feature switched
+ * off.  Nor is that client told when the feature comes back. */
 static void del_keeps_what_is_still_offered(void **state)
 {
   struct Client *a = user("a");
@@ -316,9 +317,14 @@ static void del_keeps_what_is_still_offered(void **state)
 
   cap(a, "LS", "302");
   cap(a, "REQ", "cap-notify");
+  nsent = 0;
   feat_off[FEAT_CAP_cap_notify] = 1;
   send_cap_notify("cap-notify", 0, NULL);
   assert_true(CapHas(cli_capab(a), CAP_CAPNOTIFY));
+  assert_int_equal(sent_count_to(a), 0);
+  feat_off[FEAT_CAP_cap_notify] = 0;
+  send_cap_notify("cap-notify", 1, NULL);
+  assert_int_equal(sent_count_to(a), 0);
 }
 
 /** A rehash that withdraws more capabilities than one line holds sends
@@ -343,6 +349,8 @@ static void a_long_del_goes_out_in_whole_lines(void **state)
 
   cap(a, "LS", "302");
   nsent = 0;
+  for (i = 0; i < FEAT_LAST_F; i++)     /* every feature off: CAP LS drops them */
+    feat_off[i] = 1;
   cap_notify_begin_batch();
   for (i = 0; i < sizeof(names) / sizeof(names[0]); i++)
     send_cap_notify(names[i], 0, NULL);
