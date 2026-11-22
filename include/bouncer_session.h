@@ -26,6 +26,10 @@
 #ifndef INCLUDED_bouncer_session_h
 #define INCLUDED_bouncer_session_h
 
+#ifndef INCLUDED_capab_h
+#include "capab.h"
+#endif
+
 /** The batch type a held session's restored channel state is sent in
  * (N027): the vendor cap's name, as the persistence draft defines no
  * batch type.  Builds before it used "draft/persistence", which a
@@ -40,13 +44,13 @@
  * negotiated evilnet.github.io/persistence, the old type for any other
  * while PERSISTENCE_DRAFT_EXTRAS is on, and none (send it unwrapped)
  * otherwise.
- * @param[in] vendor Non-zero if the connection negotiated the vendor cap.
+ * @param[in] caps The connection's own active capabilities.
  * @param[in] draft_extras FEAT_PERSISTENCE_DRAFT_EXTRAS.
  * @return The batch type, or NULL for no batch. */
-static inline const char *persistence_restore_batch_type(int vendor,
-                                                         int draft_extras)
+static inline const char *
+persistence_restore_batch_type(const struct CapSet *caps, int draft_extras)
 {
-  if (vendor)
+  if (CapHas(caps, CAP_EVILNET_PERSISTENCE) != 0)
     return PERSISTENCE_RESTORE_BATCH;
   if (draft_extras)
     return PERSISTENCE_RESTORE_BATCH_OLD;
@@ -68,9 +72,6 @@ static inline const char *persistence_restore_batch_type(int vendor,
 #endif
 #ifndef INCLUDED_ircd_events_h
 #include "ircd_events.h"
-#endif
-#ifndef INCLUDED_capab_h
-#include "capab.h"
 #endif
 #ifndef INCLUDED_dbuf_h
 #include "dbuf.h"
