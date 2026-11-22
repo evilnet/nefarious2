@@ -658,9 +658,13 @@ int main(int argc, char **argv) {
   if (!set_userid_if_needed())
     return 3;
 
-  /* Check paths for accessibility */
-  if (!check_file_access(SPATH, 'S', X_OK) ||
-      !check_file_access(configfile, 'C', R_OK))
+  /* Only a daemon run needs SPATH for restarts. */
+  if (!(thisServer.bootopt & BOOT_CHKCONF)) {
+    if (!check_file_access(SPATH, 'S', X_OK))
+      return 4;
+    conf_precheck_init();
+  }
+  if (!check_file_access(configfile, 'C', R_OK))
     return 4;
 
   if (!init_connection_limits())

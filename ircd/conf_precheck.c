@@ -151,19 +151,20 @@ conf_precheck_run(const char *exe, const char *dpath, const char *conf,
   return res;
 }
 
-/* Has @a pid exited?  It is left a zombie (WNOWAIT), so its pid, and the
- * process group named after it, cannot be reused until it is reaped:
- * the group kill below never reaches another process. */
-static int exited(pid_t pid, int *gone)
+/** Check whether @a pid has exited. WNOWAIT keeps the pid and its process
+ * group from being reused before the group kill and reap.
+ * @return 1 if exited, 0 if still running, or -1 on error. */
+static int exited(pid_t pid)
 {
   siginfo_t si;
+  int r;
 
-  memset(&si, 0, sizeof(si));
-  if (waitid(P_PID, (id_t)pid, &si, WEXITED | WNOHANG | WNOWAIT) < 0) {
-    if (errno != EINTR)
-      *gone = 1;                /* not ours to wait for, or to kill */
-    return 0;
-  }
+  do {
+    memset(&si, 0, sizeof(si));
+    r = waitid(P_PID, (id_t)pid, &si, WEXITED | WNOHANG | WNOWAIT);
+  } while (r < 0 && errno == EINTR);
+  if (r < 0)
+    return -1;
   return si.si_pid == pid;
 }
 
@@ -174,14 +175,24 @@ precheck_run(const char *exe, const char *dpath, const char *conf,
   struct timespec t0, exited_at;
   size_t used = 0;
   char note[160];
-  int p[2], status = 0, done = 0, eof = 0, gone = 0, i;
+  int p[2], status, done = 0, eof = 0, wait_error = 0, i;
   sigset_t all, old;
-  pid_t pid;
+  pid_t pid, r;
 
   out[0] = '\0';
   if (pipe(p) < 0) {
     snprintf(note, sizeof(note), "it could not be started: pipe(): %s\n",
              strerror(errno));
+    note_end(out, outlen, 0, note);
+    return CONF_PRECHECK_FAILED;
+  }
+  i = fcntl(p[0], F_GETFL);
+  if (i < 0 || fcntl(p[0], F_SETFL, i | O_NONBLOCK) < 0) {
+    i = errno;
+    close(p[0]);
+    close(p[1]);
+    snprintf(note, sizeof(note), "it could not be started: fcntl(): %s\n",
+             strerror(i));
     note_end(out, outlen, 0, note);
     return CONF_PRECHECK_FAILED;
   }
@@ -207,10 +218,9 @@ precheck_run(const char *exe, const char *dpath, const char *conf,
     return CONF_PRECHECK_FAILED;
   }
   close(p[1]);
-  fcntl(p[0], F_SETFL, fcntl(p[0], F_GETFL) | O_NONBLOCK);
 
-  /* Read its output to the end while it runs (a full pipe would stall
-   * it), and reap it; both within the time allowed. */
+  /* Drain its output while it runs so a full pipe cannot stall it.
+   * Check for exit and stop reading by the deadline. */
   clock_gettime(CLOCK_MONOTONIC, &t0);
   while (!done || !eof) {
     long left = timeout_ms - elapsed_ms(&t0);
@@ -232,10 +242,13 @@ precheck_run(const char *exe, const char *dpath, const char *conf,
           take = outlen - 1 - used;
         memcpy(out + used, buf, take);
         used += take;
+        left = timeout_ms - elapsed_ms(&t0);
+        if (left <= 0)
+          break;
       }
-      if (n == 0)
-        eof = 1;
-      else if (errno != EAGAIN && errno != EINTR)
+      if (left <= 0)
+        break;
+      if (n == 0 || (errno != EAGAIN && errno != EINTR))
         eof = 1;
     } else {
       struct timespec ten = { 0, 10000000 };
@@ -243,11 +256,15 @@ precheck_run(const char *exe, const char *dpath, const char *conf,
       nanosleep(&ten, NULL);
     }
     if (!done) {
-      if (exited(pid, &gone)) {
+      i = exited(pid);
+      if (i < 0) {
+        wait_error = errno;
+        break;
+      }
+      if (i) {
         done = 1;
         clock_gettime(CLOCK_MONOTONIC, &exited_at);
-      } else if (gone)
-        break;
+      }
     }
     /* Exited with the pipe still open: something it started holds it.
      * What the check said is in once it has exited. */
@@ -256,7 +273,7 @@ precheck_run(const char *exe, const char *dpath, const char *conf,
   }
   out[used] = '\0';
   close(p[0]);
-  if (gone) {
+  if (wait_error == ECHILD) {
     note_end(out, outlen, used, "it was reaped elsewhere\n");
     return CONF_PRECHECK_FAILED;
   }
@@ -271,18 +288,29 @@ precheck_run(const char *exe, const char *dpath, const char *conf,
      * reaps it once it goes. */
     for (i = 0; i < 100; i++) {
       struct timespec ten = { 0, 10000000 };
-      pid_t r = waitpid(pid, &status, WNOHANG);
 
+      r = waitpid(pid, &status, WNOHANG);
       if (r == pid || (r < 0 && errno != EINTR))
         break;
       nanosleep(&ten, NULL);
     }
-    snprintf(note, sizeof(note), "it did not finish in %d ms\n", timeout_ms);
+    if (wait_error)
+      snprintf(note, sizeof(note), "it could not be waited for: waitid(): %s\n",
+               strerror(wait_error));
+    else
+      snprintf(note, sizeof(note), "it did not finish in %d ms\n", timeout_ms);
     note_end(out, outlen, used, note);
     return CONF_PRECHECK_FAILED;
   }
-  while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-    ;                           /* a zombie: at once */
+  do {
+    r = waitpid(pid, &status, 0);
+  } while (r < 0 && errno == EINTR);
+  if (r < 0) {
+    snprintf(note, sizeof(note), "it could not be reaped: waitpid(): %s\n",
+             strerror(errno));
+    note_end(out, outlen, used, note);
+    return CONF_PRECHECK_FAILED;
+  }
   if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
     return CONF_PRECHECK_OK;
   if (WIFEXITED(status) && WEXITSTATUS(status) == CHKCONF_ERRORS)
