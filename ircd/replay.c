@@ -552,6 +552,10 @@ void replay_pm_nick_map_free(struct PmNickMap *map)
 /** Lazily emit the outer evilnet.github.io/bouncer-replay batch on first
  * inner-batch open.  Only relevant when wants_outer_batch is set.
  * Suppressed for empty replays because no inner batch ever opens.
+ * The rule wants_outer_batch was set by is checked again here: a
+ * federated first page can arrive after the client dropped the vendor
+ * cap.  A replay whose first inner batch goes out unwrapped stays
+ * unwrapped, so no wrapper ever holds only its tail.
  */
 static void replay_emit_outer_batch_if_needed(struct Client *sptr,
                                                struct ReplayState *rs)
@@ -560,6 +564,11 @@ static void replay_emit_outer_batch_if_needed(struct Client *sptr,
     return;
   if (!rs->framed)
     return;
+  if (!CapRecipientHas(sptr, CAP_EVILNET_PERSISTENCE)
+      && !feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS)) {
+    rs->wants_outer_batch = 0;
+    return;
+  }
   generate_batch_id(rs->outer_batch_id, sizeof(rs->outer_batch_id), sptr);
   sendcmdto_one(&me, CMD_BATCH_CMD, sptr, "+%s evilnet.github.io/bouncer-replay",
                 rs->outer_batch_id);

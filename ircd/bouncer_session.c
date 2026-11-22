@@ -18527,7 +18527,7 @@ void bounce_send_channel_state(struct Client *cptr)
         && CapRecipientHas(cptr, CAP_BATCH)
         && cli_user(cptr)->channel != NULL)
       batch_type = persistence_restore_batch_type(
-          CapOwnHas(cptr, CAP_EVILNET_PERSISTENCE),
+          cli_active_own(cptr),
           feature_bool(FEAT_PERSISTENCE_DRAFT_EXTRAS));
     wrap_in_persistence_batch = batch_type != NULL;
     if (wrap_in_persistence_batch)

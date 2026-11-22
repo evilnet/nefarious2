@@ -340,14 +340,20 @@ static void test_set_echo_for_vendor_cap(void **state)
  * it, the old one for any other while the flag is on, none otherwise. */
 static void test_restore_batch_type(void **state)
 {
+  struct CapSet *caps = cli_active_own(&cli);
+  const char *batch_type;
+
   (void)state;
-  assert_string_equal(persistence_restore_batch_type(1, 0),
+  CapSet(caps, CAP_EVILNET_PERSISTENCE);
+  batch_type = persistence_restore_batch_type(caps, 0);
+  assert_non_null(batch_type);
+  assert_string_equal(batch_type, PERSISTENCE_RESTORE_BATCH);
+  assert_string_equal(persistence_restore_batch_type(caps, 1),
                       PERSISTENCE_RESTORE_BATCH);
-  assert_string_equal(persistence_restore_batch_type(1, 1),
-                      PERSISTENCE_RESTORE_BATCH);
-  assert_string_equal(persistence_restore_batch_type(0, 1),
+  CapClr(caps, CAP_EVILNET_PERSISTENCE);
+  assert_string_equal(persistence_restore_batch_type(caps, 1),
                       PERSISTENCE_RESTORE_BATCH_OLD);
-  assert_null(persistence_restore_batch_type(0, 0));
+  assert_null(persistence_restore_batch_type(caps, 0));
 }
 
 /* A subcommand this server does not have is still answered, so a client
