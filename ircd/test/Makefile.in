@@ -21,7 +21,7 @@ TESTPROGS = \
 # CMocka test programs (proper assertions)
 #
 # @KC_CMOCKA_TESTPROGS@ is kc_url_cmocka kc_base64_cmocka kc_cache_cmocka ... webhook_subject_cmocka
-# kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka kc_keycloak_cmocka
+# kc_jwt_cmocka kc_cred_derive_cmocka kc_error_classify_cmocka kc_keycloak_cmocka kc_http_cmocka
 # ircd_kc_adapter_cmocka under --enable-keycloak, and empty otherwise: the
 # kc suites link ../kc/*.o, which ircd/Makefile only builds when Keycloak
 # is enabled (see configure.in's Keycloak block), and the adapter's body is
@@ -210,6 +210,7 @@ DEP_SRC = \
 	kc_cred_derive_cmocka.c \
 	kc_error_classify_cmocka.c \
 	kc_keycloak_cmocka.c \
+	kc_http_cmocka.c \
 	ircd_kc_adapter_cmocka.c \
 	websocket_cmocka.c \
 	db_casefold_cmocka.c \
@@ -615,6 +616,16 @@ kc_error_classify_cmocka: $(KC_ERROR_CLASSIFY_CMOCKA_OBJS)
 KC_KEYCLOAK_CMOCKA_OBJS = kc_keycloak_cmocka.o ../kc/kc_keycloak.o ../kc/kc_url.o ../kc/kc_error_classify.o ../kc/kc_jwt.o ../kc/kc_base64.o ../kc/kc_http_sync.o
 kc_keycloak_cmocka: $(KC_KEYCLOAK_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(KC_KEYCLOAK_CMOCKA_OBJS) $(CMOCKA_LIBS) $(JANSSON_LIBS) $(CURL_LIBS) $(SSL_LIBS)
+
+# kc_http tests - the async and sync HTTP clients' easy-handle setup and
+# the async client's libcurl capability warnings.  The link wraps curl_easy_setopt (records each option,
+# then calls the real one; libcurl has no getter) and curl_version_info (lets
+# a test present a libcurl without AsynchDNS, or older than 7.87.0).  The
+# real kc_http.o, kc_url.o (Location capture) and kc_http_sync.o are linked;
+# no async transfer runs, and the sync one is refused by 127.0.0.1:1.
+KC_HTTP_CMOCKA_OBJS = kc_http_cmocka.o ../kc/kc_http.o ../kc/kc_url.o ../kc/kc_http_sync.o
+kc_http_cmocka: $(KC_HTTP_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--wrap=curl_easy_setopt -Wl,--wrap=curl_version_info $(KC_HTTP_CMOCKA_OBJS) $(CMOCKA_LIBS) $(JANSSON_LIBS) $(CURL_LIBS) $(SSL_LIBS)
 
 # ircd_kc_adapter tests - libkc's socket and timer bridge onto the event
 # engine.  The event layer is a fake in the test with the kernel's fd

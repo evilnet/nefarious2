@@ -81,6 +81,30 @@ int kc_http_init(const struct kc_event_ops *ops, const struct kc_log_ops *log)
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
+    /* Warn when name resolution can stall the caller's event loop: a
+     * libcurl without the threaded resolver resolves in the caller, and
+     * without CURLOPT_QUICK_EXIT (7.87.0, both at build and at run time)
+     * a timed-out request joins a stalled resolver thread.  The caller
+     * decides whether to run anyway. */
+    if (log) {
+        const curl_version_info_data *vi = curl_version_info(CURLVERSION_NOW);
+
+        if (vi && !(vi->features & CURL_VERSION_ASYNCHDNS))
+            log->log(KC_LOG_WARNING,
+                     "kc_http: libcurl %s has no asynchronous resolver; "
+                     "every request resolves its host name in the caller's "
+                     "event loop and will block it",
+                     vi->version ? vi->version : "?");
+        if (vi && (vi->version_num < 0x075700
+                   || LIBCURL_VERSION_NUM < 0x075700))
+            log->log(KC_LOG_WARNING,
+                     "kc_http: libcurl %s (built against %s) is older than "
+                     "7.87.0 (no CURLOPT_QUICK_EXIT); a request that times "
+                     "out during a stalled DNS lookup will block the "
+                     "caller's event loop until the lookup gives up",
+                     vi->version ? vi->version : "?", LIBCURL_VERSION);
+    }
+
     g_multi = curl_multi_init();
     if (!g_multi) {
         if (log)
@@ -221,6 +245,13 @@ int kc_http_request(const struct kc_http_request *req,
     /* Timeout */
     if (req->timeout_ms > 0)
         curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, req->timeout_ms);
+
+#if LIBCURL_VERSION_NUM >= 0x075700
+    /* A transfer that times out while the threaded resolver is still in
+     * getaddrinfo() otherwise joins that thread, in the caller's event
+     * loop, until the lookup gives up.  QUICK_EXIT leaves it detached. */
+    curl_easy_setopt(easy, CURLOPT_QUICK_EXIT, 1L);
+#endif
 
     /* Response buffer */
     curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, write_callback);

@@ -110,6 +110,13 @@ apply_opts(CURL *curl, struct kc_http_sync_opts opts,
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
 
+#if LIBCURL_VERSION_NUM >= 0x075700
+    /* A timed-out perform would otherwise join a resolver thread stuck in
+     * getaddrinfo() until the lookup gives up, past CONNECTTIMEOUT.  Set
+     * here, per attempt: curl_easy_reset() on a retry clears it. */
+    curl_easy_setopt(curl, CURLOPT_QUICK_EXIT, 1L);
+#endif
+
     /* URL */
     curl_easy_setopt(curl, CURLOPT_URL, opts.uri);
 
