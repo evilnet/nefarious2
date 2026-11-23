@@ -68,9 +68,32 @@ void log_write(enum LogSys subsys, enum LogLevel severity, unsigned int flags,
   (void)subsys; (void)severity; (void)flags; (void)fmt;
 }
 
+/** The words no Debug() line of the crypt code may contain (passwords),
+ * looked for while debug_watch is set (one case at a time, on the main
+ * thread, nothing else running); debug_hits counts the lines that did. */
+static const char *debug_secrets[4];
+static int debug_watch;
+static int debug_hits;
+static char debug_first_hit[512];
+
 void debug(int level, const char *form, ...)
 {
-  (void)level; (void)form;
+  char line[512];
+  va_list vl;
+  int i;
+
+  (void)level;
+  if (!debug_watch)
+    return;
+  va_start(vl, form);
+  vsnprintf(line, sizeof(line), form, vl);
+  va_end(vl);
+  for (i = 0; i < 4 && debug_secrets[i]; i++)
+    if (strstr(line, debug_secrets[i])) {
+      if (!debug_hits++)
+        snprintf(debug_first_hit, sizeof(debug_first_hit), "%s", line);
+      break;
+    }
 }
 
 /* The pool mutes its workers (thread_pool.c); nothing here logs. */
@@ -732,6 +755,50 @@ static void test_shutdown_discards_queued_checks(void **state)
   assert_int_equal(blocks_held(), before);
 }
 
+/** ircd_crypt(key, stored) with the debug lines watched for the given
+ * passwords: how many lines named one. */
+static int debug_lines_naming(const char *key, const char *stored,
+                              const char *secret1, const char *secret2)
+{
+  char *got;
+
+  debug_secrets[0] = secret1;
+  debug_secrets[1] = secret2;
+  debug_secrets[2] = NULL;
+  debug_hits = 0;
+  debug_first_hit[0] = '\0';
+  debug_watch = 1;
+  got = ircd_crypt(key, stored);
+  debug_watch = 0;
+  free(got);
+  if (debug_hits)
+    print_message("  leaked in: %s\n", debug_first_hit);
+  return debug_hits;
+}
+
+/* The crypt code's Debug() lines never print a password: neither the one
+ * being checked (right or wrong) in any mechanism, nor a stored one kept
+ * in clear ($PLAIN$, or an untagged value that reaches the native crypt
+ * fallback). */
+static void test_debug_lines_never_print_a_password(void **state)
+{
+  int m;
+
+  (void)state;
+  for (m = 0; m < M_COUNT; m++) {
+    struct pair *p = &pairs[m][0];
+
+    assert_int_equal(debug_lines_naming(p->key, p->stored, p->key, NULL), 0);
+    assert_int_equal(debug_lines_naming(p->wrong, p->stored, p->wrong, NULL), 0);
+  }
+  assert_int_equal(debug_lines_naming("cand-plain-pw", "$PLAIN$stored-plain-pw",
+                                      "cand-plain-pw", "stored-plain-pw"), 0);
+  assert_int_equal(debug_lines_naming("stored-plain-pw", "$PLAIN$stored-plain-pw",
+                                      "stored-plain-pw", NULL), 0);
+  assert_int_equal(debug_lines_naming("cand-untagged-pw", "stored-untagged-pw",
+                                      "cand-untagged-pw", "stored-untagged-pw"), 0);
+}
+
 int main(void)
 {
   /* CRYPT_TEST_FILTER runs only the matching cases (cmocka's pattern). */
@@ -747,6 +814,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(test_main_thread_check_waits_for_one_hash_not_the_queue,
                                     pool_setup, pool_teardown),
     cmocka_unit_test(test_shutdown_discards_queued_checks),
+    cmocka_unit_test(test_debug_lines_never_print_a_password),
   };
 
   if (filter && *filter)

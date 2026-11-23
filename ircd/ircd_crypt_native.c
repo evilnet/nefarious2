@@ -35,6 +35,7 @@
 #include "ircd_alloc.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
+#include <string.h>
 #include <unistd.h>
 #ifdef HAVE_CRYPT_H
 #include <crypt.h>
@@ -55,8 +56,9 @@ const char* ircd_crypt_native(const char* key, const char* salt)
  assert(NULL != key);
  assert(NULL != salt);
 
- Debug((DEBUG_DEBUG, "ircd_crypt_native: key is %s", key));
- Debug((DEBUG_DEBUG, "ircd_crypt_native: salt is %s", salt));
+ /* The salt is the stored value, which may be an untagged password. */
+ Debug((DEBUG_DEBUG, "ircd_crypt_native: key = [hidden], salt = %u bytes",
+        (unsigned int)strlen(salt)));
 
  return (const char*)crypt(key, salt);
 }

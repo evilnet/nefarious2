@@ -124,7 +124,7 @@ const char* ircd_crypt_bcrypt(const char* key, const char* salt)
   assert(NULL != key);
   assert(NULL != salt);
 
-  Debug((DEBUG_DEBUG, "ircd_crypt_bcrypt: key = %s", key));
+  Debug((DEBUG_DEBUG, "ircd_crypt_bcrypt: key = [hidden]"));
   Debug((DEBUG_DEBUG, "ircd_crypt_bcrypt: salt = %s", salt));
 
   /* If salt is already a bcrypt hash/salt, use it directly */

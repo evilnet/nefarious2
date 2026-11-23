@@ -207,8 +207,10 @@ crypt_mechs_t* crypt_mech;
  assert(NULL != key);
  assert(NULL != salt);
 
- Debug((DEBUG_DEBUG, "ircd_crypt: key is %s", key));
- Debug((DEBUG_DEBUG, "ircd_crypt: salt is %s", salt));
+ /* Never the passwords: the one checked, nor the stored one ($PLAIN$, an
+  * untagged value) -- lengths only. */
+ Debug((DEBUG_DEBUG, "ircd_crypt: key = [hidden], %u bytes; stored = %u bytes",
+        (unsigned int)strlen(key), (unsigned int)strlen(salt)));
 
  crypt_mech = crypt_mechs_root->next;
 
@@ -224,8 +226,8 @@ crypt_mechs_t* crypt_mech;
    continue;
   }
 
-  Debug((DEBUG_DEBUG, "ircd_crypt: comparing %s with %s", 
-   salt, crypt_mech->mech->crypt_token));
+  Debug((DEBUG_DEBUG, "ircd_crypt: checking for tag %s",
+   crypt_mech->mech->crypt_token));
 
   if(0 == ircd_strncmp(crypt_mech->mech->crypt_token, salt, crypt_mech->mech->crypt_token_size))
   {
@@ -245,7 +247,8 @@ crypt_mechs_t* crypt_mech;
    if(NULL == (temp_hashed_pass = crypt_mech->mech->crypt_function(key, mysalt)))
     return NULL;
 
-   Debug((DEBUG_DEBUG, "ircd_crypt: untagged pass is %s", temp_hashed_pass));
+   Debug((DEBUG_DEBUG, "ircd_crypt: untagged pass is %u bytes",
+          (unsigned int)strlen(temp_hashed_pass)));
 
    /* ok, now we need to prefix the password we just got back
       with the right tag */
@@ -259,7 +262,8 @@ crypt_mechs_t* crypt_mech;
    ircd_strncpy(hashed_pass, crypt_mech->mech->crypt_token,
     crypt_mech->mech->crypt_token_size + 1);
    ircd_strncpy(hashed_pass + crypt_mech->mech->crypt_token_size, temp_hashed_pass, strlen(temp_hashed_pass) + 1);
-   Debug((DEBUG_DEBUG, "ircd_crypt: tagged pass is %s", hashed_pass));
+   Debug((DEBUG_DEBUG, "ircd_crypt: tagged pass is %u bytes",
+          (unsigned int)strlen(hashed_pass)));
   } else {
    Debug((DEBUG_DEBUG, "ircd_crypt: will try next mechanism at 0x%X", 
     crypt_mech->next));

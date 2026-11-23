@@ -95,7 +95,7 @@ unsigned long l;
  assert(NULL != key);
  assert(NULL != salt);
 
- Debug((DEBUG_DEBUG, "ircd_crypt_smd5: key = %s", key));
+ Debug((DEBUG_DEBUG, "ircd_crypt_smd5: key = [hidden]"));
  Debug((DEBUG_DEBUG, "ircd_crypt_smd5: salt = %s", salt));
 
  /* Refine the Salt first */

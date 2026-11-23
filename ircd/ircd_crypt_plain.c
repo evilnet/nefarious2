@@ -49,8 +49,8 @@ const char* ircd_crypt_plain(const char* key, const char* salt)
   assert(NULL != salt);
   assert(NULL != key);
 
- Debug((DEBUG_DEBUG, "ircd_crypt_plain: key is %s", key));
- Debug((DEBUG_DEBUG, "ircd_crypt_plain: salt is %s", salt));
+ /* The "salt" here is the stored password itself. */
+ Debug((DEBUG_DEBUG, "ircd_crypt_plain: key = [hidden], salt = [hidden]"));
 
   /* yes, that's it.  we just send key back out again, 
      pointless I know */
