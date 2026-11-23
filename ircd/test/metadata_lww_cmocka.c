@@ -1249,9 +1249,34 @@ static void test_notify_vis(void **state)
   assert_int_equal(0, md_notify_vis(&priv, &set, 0));    /* a live write: its own */
 }
 
+/* An account's tombstones are bounded without ever dropping one: a write
+ * (SET or DELETE) of a key name the account has no row for -- neither a
+ * live value nor a tombstone -- is refused once the account holds
+ * MD_TOMBSTONE_FACTOR x METADATA_MAX_KEYS tombstones; a write of a key it
+ * has a row for adds no name and always goes. */
+static void test_tombstone_room(void **state)
+{
+  (void)state;
+  assert_int_equal(MD_TOMBSTONE_FACTOR, 4);
+  /* a new name, under the bound */
+  assert_int_equal(md_tombstone_room(0, 0, 20), 1);
+  assert_int_equal(md_tombstone_room(0, 79, 20), 1);
+  /* a new name at or past it */
+  assert_int_equal(md_tombstone_room(0, 80, 20), 0);
+  assert_int_equal(md_tombstone_room(0, 500, 20), 0);
+  /* a name the account has: a live key deleted, a tombstone re-set */
+  assert_int_equal(md_tombstone_room(1, 80, 20), 1);
+  assert_int_equal(md_tombstone_room(1, 500, 20), 1);
+  /* no keys allowed at all (0, or a negative value read as 0) */
+  assert_int_equal(md_tombstone_room(0, 0, 0), 0);
+  assert_int_equal(md_tombstone_room(0, 0, -5), 0);
+  assert_int_equal(md_tombstone_room(1, 0, 0), 1);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test(test_tombstone_room),
     cmocka_unit_test(test_stamp_roundtrip),
     cmocka_unit_test(test_same_content),
     cmocka_unit_test(test_row_unchanged),

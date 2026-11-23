@@ -471,6 +471,16 @@ extern int metadata_count_channel(struct Channel *chptr);
  */
 extern int metadata_account_count_keys(const char *account);
 
+/** Count an account's tombstones (deleted keys' clock rows), excluding
+ * server-managed keys, for the bound on them (md_tombstone_room).
+ * Bounded: stops counting at @a stop_at.
+ * @param[in] account Account name.
+ * @param[in] stop_at Stop once this many are counted.
+ * @return Number of tombstones (at most @a stop_at), or 0 on storage
+ *         unavailable/error.
+ */
+extern int metadata_account_count_tombstones(const char *account, int stop_at);
+
 /** Test whether a metadata key is server-managed.
  * Server-managed keys live under the reserved prefix (draft/persistence/...).
  * They are written exclusively by server-side logic, never

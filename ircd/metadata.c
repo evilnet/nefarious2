@@ -1416,6 +1416,62 @@ int metadata_account_count_keys(const char *account)
   return count;
 }
 
+/** See include/metadata.h.  Walks the account's clock rows (one per key
+ * ever written, live or deleted), the same prefix walk as
+ * metadata_account_count_keys(). */
+int metadata_account_count_tombstones(const char *account, int stop_at)
+{
+  struct db_iter *it;
+  char prefix[CHANNELLEN + 2];
+  int prefixlen;
+  int count = 0;
+  int rc;
+
+  if (!metadata_lmdb_available || !account || stop_at <= 0)
+    return 0;
+
+  prefixlen = strlen(account);
+  if (prefixlen > CHANNELLEN)
+    return 0;
+  db_casefold_bytes(prefix, account, prefixlen);   /* folded, like the keys */
+  prefix[prefixlen++] = KEY_SEP;
+
+  it = db_iter_open(metadata_db_env, metadata_clock_cf, /*snap=*/NULL);
+  if (!it)
+    return 0;
+
+  for (rc = db_iter_seek(it, prefix, (size_t)prefixlen);
+       rc == DB_OK && db_iter_valid(it) && count < stop_at;
+       rc = db_iter_next(it)) {
+    size_t klen, vlen, kpartlen;
+    const void *rawkey = db_iter_key(it, &klen);
+    const void *vbuf = db_iter_value(it, &vlen);
+    char kbuf[160];   /* draft/persistence/... keys run up to 127 bytes */
+    struct md_stamp st;
+    int tombstone = 0;
+
+    if (klen < (size_t)prefixlen ||
+        memcmp(rawkey, prefix, (size_t)prefixlen) != 0)
+      break;
+    if (md_clock_decode((const char *)vbuf, vlen, &st, &tombstone) != 0
+        || !tombstone)
+      continue;
+
+    kpartlen = klen - (size_t)prefixlen;
+    if (kpartlen >= sizeof(kbuf))
+      continue;
+    memcpy(kbuf, (const char *)rawkey + prefixlen, kpartlen);
+    kbuf[kpartlen] = '\0';
+    if (metadata_key_is_server_managed(kbuf))
+      continue;
+
+    count++;
+  }
+  db_iter_close(it);
+
+  return count;
+}
+
 /** Hydrate a channel's in-memory metadata (chptr->metadata) from the
  * persistent store — the LOAD half of the B3 ±R transition hook
  * (metadata-era2-completion §B3, revived from its long-unwired stub).
@@ -1620,6 +1676,7 @@ int metadata_account_set_permanent(const char *account, const char *key, const c
 struct MetadataEntry *metadata_account_list(const char *account) { return NULL; }
 int metadata_account_clear(const char *account) { return -1; }
 int metadata_account_count_keys(const char *account) { return 0; }
+int metadata_account_count_tombstones(const char *account, int stop_at) { (void)account; (void)stop_at; return 0; }
 int metadata_account_purge_expired(void) { return -1; }
 int metadata_account_foreach_key(void (*cb)(const void *key, size_t klen, void *arg), void *arg) { (void)cb; (void)arg; return -1; }
 int metadata_account_put_versioned(const char *account, const char *key, const char *value, int vis, const struct md_stamp *st) { (void)account; (void)key; (void)value; (void)vis; (void)st; return -1; }
