@@ -106,6 +106,8 @@ struct MetadataEntry;
 #define MBFL_EXCEPTED_QUIET     0x0200 /**< Channel member is ban excepted */
 #define MBFL_EXCEPTVALID_NICK   0x0400 /**< MBFL_EXCEPTED_NICK is valid */
 #define MBFL_EXCEPTED_NICK      0x0800 /**< Channel member is ban excepted */
+#define MBFL_BANCACHE_OPER      0x1000 /**< The valid verdicts were found while
+                                        *   the user was an oper */
 
 /* Channel Visibility macros */
 

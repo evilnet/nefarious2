@@ -813,9 +813,19 @@ iauth_held_cmocka: $(IAUTH_HELD_CMOCKA_OBJS)
 # -ffunction-sections and linked with --gc-sections, so the program keeps
 # client_can_send_to_channel(), member_can_send_to_channel(), find_ban(),
 # make_ban() and what they call; the rest of the ircd they reach is
-# stubbed in the test.  -Wno-address as for auth_recheck.
-CHANNEL_SPEAK_CMOCKA_OBJS = channel_speak_cmocka.o ../match.o ../ircd_string.o \
-	../ircd_snprintf.o ../ircd_alloc.o
+# stubbed in the test.  -Wno-address as for auth_recheck.  The ban cache
+# cases drive the REAL realname handlers (m_setname.c, m_svsinfo.c) and
+# add_mark() (s_conf.c), each compiled here with -ffunction-sections, so
+# only what they reach is linked.
+CHANNEL_SPEAK_REAL = cs_m_setname.o cs_m_svsinfo.o cs_s_conf.o
+cs_m_setname.o: ../m_setname.c
+cs_m_svsinfo.o: ../m_svsinfo.c
+cs_s_conf.o: ../s_conf.c
+${CHANNEL_SPEAK_REAL}:
+	${CC} ${CFLAGS} -Wno-address -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ $<
+
+CHANNEL_SPEAK_CMOCKA_OBJS = channel_speak_cmocka.o ${CHANNEL_SPEAK_REAL} \
+	../match.o ../ircd_string.o ../ircd_snprintf.o ../ircd_alloc.o
 channel_speak_cmocka.o: ${srcdir}/channel_speak_cmocka.c ../channel.c
 	${CC} ${CFLAGS} -Wno-address -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/channel_speak_cmocka.c
 

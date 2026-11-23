@@ -21,6 +21,12 @@
  * x excepted, each verdict checked against an oracle written from the rule,
  * for client_can_send_to_channel() and, where the device is a member, for
  * member_can_send_to_channel() on the device's own membership.
+ *
+ * The ban cache cases: a member's cached verdict follows what its bans
+ * match when that changes -- its other channels (~c), another channel's
+ * lists (~j), its oper status (the oper form of the hidden host), its
+ * realname (~r, by the REAL m_setname(), ms_setname() and ms_svsinfo()),
+ * its marks (~m, ~M, by the REAL add_mark()).
  */
 #include "config.h"
 
@@ -33,6 +39,7 @@
 #include <cmocka.h>
 
 #include "../channel.c"
+#include "handlers.h"
 
 /* ------------------------------------------------------------------ */
 /* The ircd around the predicates                                      */
@@ -54,8 +61,23 @@ int feature_bool(enum Feature feat)
     return feat_apass_cansend;
   return 1;   /* EXTBANS, EXTBAN_*, EXCEPTS: on */
 }
-int feature_int(enum Feature feat) { return 0; }   /* HOST_HIDING_STYLE 0 */
-const char *feature_str(enum Feature feat) { return ""; }
+static int feat_host_hiding_style;     /* 0 but in the oper case */
+int feature_int(enum Feature feat)
+{
+  if (feat == FEAT_HOST_HIDING_STYLE)
+    return feat_host_hiding_style;
+  if (feat == FEAT_EXTBAN_j_MAXDEPTH)
+    return 1;
+  return 0;
+}
+const char *feature_str(enum Feature feat)
+{
+  if (feat == FEAT_HIDDEN_HOST)
+    return "users.example";
+  if (feat == FEAT_HIDDEN_OPERHOST)
+    return "staff.example";
+  return "";
+}
 
 /* A delayed-join reveal: the device cases never ask for one (the device
  * paths reveal nothing, and their cases with reveal on are not delayed);
@@ -151,7 +173,6 @@ const char *generate_msgid_ahead(void)
   return ahead_id;
 }
 uint64_t history_event_time_ms(struct Client *link) { return MINT_MS; }
-int find_mark_match(struct Client *sptr, const char *mask) { return 0; }
 /* The reveal's history row (store_channel_event(), kept with
  * RevealDelayedJoin()): never reached, the reveal is never asked for. */
 int history_is_available(void) { return 0; }
@@ -179,7 +200,60 @@ int rcv_store_open(int require_auth, unsigned int authusers,
 {
   return 0;
 }
-struct Channel *hSeekChannel(const char *name) { return NULL; }
+/* The channels a ~j ban can name. */
+static struct Channel *known_channels[4];
+struct Channel *hSeekChannel(const char *name)
+{
+  int i;
+
+  for (i = 0; i < 4; i++)
+    if (known_channels[i] && !ircd_strcmp(known_channels[i]->chname, name))
+      return known_channels[i];
+  return NULL;
+}
+
+/* The rest of what the realname handlers (m_setname.c, m_svsinfo.c, the
+ * REAL ones) and add_mark() (s_conf.c, the REAL one) reach: what they
+ * send goes nowhere, and the SVSINFO target is the one the case names. */
+static struct Client *svsinfo_target;
+struct Client *findNUser(const char *yxx) { return svsinfo_target; }
+int send_reply(struct Client *to, int reply, ...)
+{
+  fail_msg("a reply was sent (%d)", reply);
+  return 0;
+}
+void send_fail(struct Client *to, const char *command, const char *code,
+               const char *context, const char *description)
+{
+  fail_msg("FAIL %s %s", command, code);
+}
+int need_more_params(struct Client *cptr, const char *cmd)
+{
+  fail_msg("too few parameters for %s", cmd);
+  return 0;
+}
+int protocol_violation(struct Client *cptr, const char *pattern, ...)
+{
+  fail_msg("protocol violation: %s", pattern);
+  return 0;
+}
+void sendcmdto_serv_butone(struct Client *from, const char *cmd,
+                           const char *tok, struct Client *one,
+                           const char *pattern, ...) {}
+void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
+                              const char *tok, struct Client *one,
+                              const char *pattern, ...) {}
+void sendcmdto_one_event(struct Client *from, const char *cmd, const char *tok,
+                         struct Client *to, int answers,
+                         const char *pattern, ...) {}
+void sendcmdto_common_channels_capab_butone(struct Client *from,
+                                            const char *cmd, const char *tok,
+                                            struct Client *one, int require,
+                                            int forbid, const char *pattern,
+                                            ...) {}
+void bounce_emit_alias_update(struct Client *primary, const char *field,
+                              const char *value) {}
+struct SLink *make_link(void) { return calloc(1, sizeof(struct SLink)); }
 
 /* ------------------------------------------------------------------ */
 /* Clients, memberships, channels                                      */
@@ -663,6 +737,190 @@ static void promote_forgets_ban_cache(void **state)
 }
 
 /* ------------------------------------------------------------------ */
+/* The ban cache: what an extended ban matches changes                 */
+/* ------------------------------------------------------------------ */
+
+/** Take @a m off its user's channel list (a PART, as far as the user's
+ * memberships go). */
+static void part(struct fake_client *f, struct Membership *m)
+{
+  struct Membership **pp;
+
+  for (pp = &f->user.channel; *pp; pp = &(*pp)->next_channel)
+    if (*pp == m) {
+      *pp = m->next_channel;
+      return;
+    }
+}
+
+/** A ~c ban matches by the member's other channels (and its status
+ * there), which change without anything happening in this channel: the
+ * verdict follows them, for speaking and for changing nick. */
+static void channel_ban_follows_other_channels(void **state)
+{
+  struct fake_client u;
+  struct Channel *ch = chan_new("#home"), *bad = chan_new("#bad");
+  struct Membership *m, *bm;
+
+  fake_init(&u, "u", "u.host", NULL, 1, 0);
+  m = join(ch, &u, 0);
+  add_ban(&ch->banlist, "~c:#bad", 0);
+  assert_int_equal(member_can_send_to_channel(m, 0), 1);
+  assert_null(find_no_nickchange_channel(&u.cli));
+  bm = join(bad, &u, 0);
+  assert_int_equal(member_can_send_to_channel(m, 0), 0);
+  assert_non_null(find_no_nickchange_channel(&u.cli));
+  part(&u, bm);
+  assert_int_equal(member_can_send_to_channel(m, 0), 1);
+  assert_null(find_no_nickchange_channel(&u.cli));
+
+  /* ~c:@#bad: an op there */
+  ch->banlist = NULL;
+  add_ban(&ch->banlist, "~c:@#bad", 0);
+  bm = join(bad, &u, 0);
+  assert_int_equal(member_can_send_to_channel(m, 0), 1);
+  bm->status |= CHFL_CHANOP;
+  assert_int_equal(member_can_send_to_channel(m, 0), 0);
+  bm->status &= ~CHFL_CHANOP;
+  assert_int_equal(member_can_send_to_channel(m, 0), 1);
+}
+
+/** A ~j ban matches by another channel's list, which changes without
+ * anything happening in this channel: the verdict follows that list, a
+ * ban added there and an exception added there alike. */
+static void join_ban_follows_the_other_list(void **state)
+{
+  struct fake_client u;
+  struct Channel *ch = chan_new("#home"), *list = chan_new("#list");
+  struct Channel *ch2 = chan_new("#home2"), *friends = chan_new("#friends");
+  struct Membership *m, *m2;
+
+  known_channels[0] = list;
+  known_channels[1] = friends;
+  fake_init(&u, "u", "u.host", NULL, 1, 0);
+
+  m = join(ch, &u, 0);
+  add_ban(&ch->banlist, "~j:#list", 0);
+  assert_int_equal(member_can_send_to_channel(m, 0), 1);
+  add_ban(&list->banlist, "u!*@*", 0);
+  assert_int_equal(member_can_send_to_channel(m, 0), 0);
+  list->banlist = NULL;
+  assert_int_equal(member_can_send_to_channel(m, 0), 1);
+
+  /* an exception by another channel's exception list */
+  m2 = join(ch2, &u, 0);
+  add_ban(&ch2->banlist, "u!*@*", 0);
+  add_ban(&ch2->exceptlist, "~j:#friends", 0);
+  assert_int_equal(member_can_send_to_channel(m2, 0), 0);
+  add_ban(&friends->exceptlist, "u!*@*", 0);
+  assert_int_equal(member_can_send_to_channel(m2, 0), 1);
+  friends->exceptlist = NULL;
+  assert_int_equal(member_can_send_to_channel(m2, 0), 0);
+
+  known_channels[0] = known_channels[1] = NULL;
+}
+
+/** Under HOST_HIDING_STYLE 1 (and 3), a ban is also matched against
+ * "<account>.<hidden host>", whose hidden host is HIDDEN_OPERHOST for an
+ * oper.  Becoming an oper, or no longer one, changes what the bans match
+ * even when the host the user shows does not change (it is not +x, so
+ * hide_hostmask() changes nothing): the verdict follows. */
+static void oper_change_rechecks_bans(void **state)
+{
+  struct fake_client u;
+  struct Channel *ch = chan_new("#oper"), *ch2 = chan_new("#user");
+  struct Membership *m, *m2;
+
+  feat_host_hiding_style = 1;
+  fake_init(&u, "u", "u.host", "acct", 1, 0);
+  m = join(ch, &u, 0);
+  m2 = join(ch2, &u, 0);
+  add_ban(&ch->banlist, "*!*@acct.staff.example", 0);
+  add_ban(&ch2->banlist, "*!*@acct.users.example", 0);
+  assert_int_equal(member_can_send_to_channel(m, 0), 1);
+  assert_int_equal(member_can_send_to_channel(m2, 0), 0);
+  SetFlag(&u.cli, FLAG_OPER);
+  assert_int_equal(member_can_send_to_channel(m, 0), 0);
+  assert_int_equal(member_can_send_to_channel(m2, 0), 1);
+  ClrFlag(&u.cli, FLAG_OPER);
+  assert_int_equal(member_can_send_to_channel(m, 0), 1);
+  assert_int_equal(member_can_send_to_channel(m2, 0), 0);
+  feat_host_hiding_style = 0;
+}
+
+/** A ~r ban matches the realname: SETNAME (from the user, or relayed by a
+ * server) and SVSINFO change it, and the verdict follows. */
+static void realname_change_rechecks_bans(void **state)
+{
+  static const char *paths[] = { "SETNAME", "SETNAME from a server", "SVSINFO" };
+  int i, failed = 0;
+
+  cli_connect(&uplink) = &uplink_con;
+  con_client(&uplink_con) = &uplink;
+  cli_status(&uplink) = STAT_SERVER;
+  con_s2s_msgid(&uplink_con)[0] = '\0';
+  for (i = 0; i < 3; i++) {
+    struct fake_client u;
+    struct Channel *ch = chan_new("#rn");
+    struct Membership *m;
+    char name[] = "spam spam spam";
+    char *parv[4];
+
+    fake_init(&u, "u", "u.host", NULL, 1, 0);
+    ircd_strncpy(cli_info(&u.cli), "a nice person", REALLEN + 1);
+    m = join(ch, &u, 0);
+    add_ban(&ch->banlist, "~r:*spam*", 0);
+    assert_int_equal(member_can_send_to_channel(m, 0), 1);
+    switch (i) {
+    case 0:
+      parv[0] = "u"; parv[1] = name; parv[2] = NULL;
+      m_setname(&u.cli, &u.cli, 2, parv);
+      break;
+    case 1:
+      parv[0] = "u"; parv[1] = name; parv[2] = NULL;
+      ms_setname(&uplink, &u.cli, 2, parv);
+      break;
+    case 2:
+      svsinfo_target = &u.cli;
+      parv[0] = "AB"; parv[1] = "ABAAB"; parv[2] = name; parv[3] = NULL;
+      ms_svsinfo(&uplink, &uplink, 3, parv);
+      svsinfo_target = NULL;
+      break;
+    }
+    assert_string_equal(cli_info(&u.cli), "spam spam spam");
+    if (member_can_send_to_channel(m, 0) != 0) {
+      print_message("%s: the realname a ban matches did not silence\n",
+                    paths[i]);
+      failed++;
+    }
+  }
+  assert_int_equal(failed, 0);
+}
+
+/** ~m (any user's marks) and ~M (an unauthenticated user's marks) bans:
+ * a mark given to a registered user (a MARK from another server) changes
+ * what they match, and the verdict follows. */
+static void mark_change_rechecks_bans(void **state)
+{
+  struct fake_client u;
+  struct Channel *ch = chan_new("#mark"), *ch2 = chan_new("#markua");
+  struct Membership *m, *m2;
+
+  fake_init(&u, "u", "u.host", NULL, 1, 0);
+  m = join(ch, &u, 0);
+  m2 = join(ch2, &u, 0);
+  add_ban(&ch->banlist, "~m:dnsbl*", 0);
+  add_ban(&ch2->banlist, "~M:proxy", 0);
+  assert_int_equal(member_can_send_to_channel(m, 0), 1);
+  assert_int_equal(member_can_send_to_channel(m2, 0), 1);
+  add_mark(&u.cli, "dnsbl-tor");
+  assert_int_equal(member_can_send_to_channel(m, 0), 0);
+  assert_int_equal(member_can_send_to_channel(m2, 0), 1);
+  add_mark(&u.cli, "proxy");
+  assert_int_equal(member_can_send_to_channel(m2, 0), 0);
+}
+
+/* ------------------------------------------------------------------ */
 /* The reveal's msgid (N067)                                           */
 /* ------------------------------------------------------------------ */
 
@@ -913,6 +1171,11 @@ int main(void)
     cmocka_unit_test(zombie_device_membership),
     cmocka_unit_test(remote_apass_manager_divergence),
     cmocka_unit_test(promote_forgets_ban_cache),
+    cmocka_unit_test(channel_ban_follows_other_channels),
+    cmocka_unit_test(join_ban_follows_the_other_list),
+    cmocka_unit_test(oper_change_rechecks_bans),
+    cmocka_unit_test(realname_change_rechecks_bans),
+    cmocka_unit_test(mark_change_rechecks_bans),
     cmocka_unit_test(reveal_named_after_the_line),
     cmocka_unit_test(reveal_named_after_the_event_to_come),
     cmocka_unit_test(reveal_named_after_a_given_event),

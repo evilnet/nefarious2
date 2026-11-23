@@ -658,6 +658,44 @@ struct Ban *find_ban(struct Client *cptr, struct Ban *banlist, int extbantype, i
   return found;
 }
 
+/** Whether a verdict on @a list may be kept in a member's ban cache: not
+ * when the list holds a ~c or ~j entry.  Those match by the user's other
+ * channels (and its status there) and by another channel's lists, which
+ * change without anything happening in this channel or to the user, so
+ * nothing would clear the verdict.  Such a list is matched afresh at
+ * every check.
+ * @param[in] list A channel's ban or exception list.
+ * @return Non-zero when a verdict on @a list may be cached. */
+static int ban_list_cacheable(const struct Ban *list)
+{
+  for (; list; list = list->next)
+    if ((list->flags & BAN_EXTENDED)
+        && (list->extban.flags & (EBAN_CHANNEL | EBAN_JOIN)))
+      return 0;
+  return 1;
+}
+
+/** Forget @a member's cached verdicts when its user's oper status is not
+ * the one they were found under.  find_ban() also matches an account
+ * holder by "<account>.<hidden host>" under HOST_HIDING_STYLE 1 and 3,
+ * and that hidden host is HIDDEN_OPERHOST for an oper (OPERHOST_HIDING).
+ * The status changes on several paths (OPER, MODE -o, a bouncer session's
+ * grant), and not all of them change the host the user shows, which is
+ * what clears the cache otherwise (hide_hostmask()).
+ * @param[in] member A local member about to read its cache. */
+static void ban_cache_check_oper(struct Membership *member)
+{
+  unsigned int oper = IsAnOper(member->user) ? MBFL_BANCACHE_OPER : 0;
+
+  if ((member->banflags & MBFL_BANCACHE_OPER) == oper)
+    return;
+  member->banflags &= ~(MBFL_BANVALID | MBFL_BANVALID_QUIET
+                        | MBFL_BANVALID_NICK | MBFL_EXCEPTVALID
+                        | MBFL_EXCEPTVALID_QUIET | MBFL_EXCEPTVALID_NICK
+                        | MBFL_BANCACHE_OPER);
+  member->banflags |= oper;
+}
+
 /**
  * This function returns true if the user is banned on the said channel.
  * This function will check the ban cache if applicable, otherwise will
@@ -669,6 +707,10 @@ struct Ban *find_ban(struct Client *cptr, struct Ban *banlist, int extbantype, i
  */
 static int is_banned(struct Membership* member, int extbantype)
 {
+  if (!ban_list_cacheable(member->channel->banlist))
+    return find_ban(member->user, member->channel->banlist, extbantype, 0) != NULL;
+  ban_cache_check_oper(member);
+
   if (extbantype) {
     if (extbantype == EBAN_NICK) {
       if (IsBanValidNick(member))
@@ -721,6 +763,11 @@ static int is_banned(struct Membership* member, int extbantype)
  */
 static int is_excepted(struct Membership* member, int extbantype)
 {
+  if (!ban_list_cacheable(member->channel->exceptlist))
+    return find_ban(member->user, member->channel->exceptlist,
+                    extbantype | EBAN_EXCEPTLIST, 0) != NULL;
+  ban_cache_check_oper(member);
+
   if (extbantype) {
     if (extbantype == EBAN_NICK) {
       if (IsExceptValidNick(member))

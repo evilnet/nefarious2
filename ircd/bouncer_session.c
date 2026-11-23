@@ -12921,6 +12921,7 @@ static void bounce_repair_realname(struct Client *ghost, const char *realname)
             "exit reason; repaired to \"%s\" from the reviving connection",
             cli_name(ghost), cli_info(ghost), realname);
   ircd_strncpy(cli_info(ghost), realname, REALLEN + 1);
+  member_ban_cache_clear(ghost);        /* ~r bans match it afresh */
   sendcmdto_serv_butone_v3(ghost, CMD_SETNAME, NULL, ":%s", cli_info(ghost));
   sendcmdto_legacy_serv_butone(&me, CMD_SVSINFO, NULL, "%C :%s", ghost,
                                cli_info(ghost));

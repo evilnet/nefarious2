@@ -80,6 +80,7 @@
 #include "config.h"
 
 #include "capab.h"
+#include "channel.h"
 #include "client.h"
 #include "history.h"
 #include "ircd.h"
@@ -161,8 +162,9 @@ int m_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (strcmp(cli_info(sptr), newname) == 0)
     return 0;
 
-  /* Update the realname */
+  /* Update the realname; ~r bans match it afresh */
   ircd_strncpy(cli_info(sptr), newname, REALLEN + 1);
+  member_ban_cache_clear(sptr);
 
   /* Generate msgid BEFORE S2S relay so all servers use the same one */
   {
@@ -253,8 +255,9 @@ int ms_setname(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   if (strcmp(cli_info(sptr), newname) == 0)
     return 0;
 
-  /* Update the realname */
+  /* Update the realname; ~r bans match it afresh */
   ircd_strncpy(cli_info(sptr), newname, REALLEN + 1);
+  member_ban_cache_clear(sptr);
 
   /* Reuse incoming S2S msgid or generate new */
   {
