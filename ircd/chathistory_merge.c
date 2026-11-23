@@ -1539,3 +1539,11 @@ int hm_search_agg_finish(struct hm_search_agg *a, struct HistoryMessage *rows,
   a->rows = NULL;
   return 1;
 }
+
+int hm_fed_slots_admit(int free_slots, int own, int wanted, int own_max,
+                       int reserve)
+{
+  if (wanted <= 0)
+    return 1;
+  return wanted <= own_max - own && free_slots - wanted >= reserve;
+}

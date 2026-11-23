@@ -2768,6 +2768,9 @@ static int chathistory_between(struct Client *sptr, const char *target,
 
 /** Maximum pending federation requests */
 #define MAX_FED_REQUESTS 64
+/** The federation slots a client's SEARCH parts (N013) and REDACT lookups
+ * leave free (hm_fed_slots_admit), for every other client's pages. */
+#define FED_SLOTS_RESERVE (MAX_FED_REQUESTS / 4)
 
 /** Maximum messages collected per request */
 #define MAX_FED_MESSAGES 500
@@ -2874,6 +2877,23 @@ static void fed_request_set_why(struct FedRequest *req, int why, int partial)
 
 /** Global array of pending federation requests */
 static struct FedRequest *fed_requests[MAX_FED_REQUESTS];
+
+/** The federation requests of kind @a cb (their completion callback) that
+ * @a sptr has in flight. */
+static int fed_requests_of(struct Client *sptr,
+                           void (*cb)(struct FedRequest *))
+{
+  char yxx[6];
+  int i, n = 0;
+
+  ircd_snprintf(0, yxx, sizeof(yxx), "%s%s", NumNick(sptr));
+  for (i = 0; i < MAX_FED_REQUESTS; i++)
+    if (fed_requests[i]
+        && fed_requests[i]->completion_cb == cb
+        && 0 == strcmp(fed_requests[i]->client_yxx, yxx))
+      n++;
+  return n;
+}
 
 /** Counter for generating unique request IDs */
 static unsigned long fed_reqid_counter = 0;
@@ -7031,8 +7051,14 @@ static void complete_redact_fed(struct FedRequest *req)
   }
 }
 
+/** The federated REDACT lookups one client may have in flight: as many
+ * as one SEARCH's parts (SEARCH_FED_PARTS_MAX). */
+#define REDACT_FED_MAX 8
+
 /** Start a federated REDACT query (exact message lookup).
  * Sends CH Q X to storage servers and sets up async completion.
+ * A client has at most REDACT_FED_MAX of them in flight, and they leave
+ * FED_SLOTS_RESERVE slots free, as SEARCH's parts do.
  * @param[in] sptr Client requesting the redaction.
  * @param[in] chptr Channel containing the message.
  * @param[in] target Channel name.
@@ -7040,7 +7066,9 @@ static void complete_redact_fed(struct FedRequest *req)
  * @param[in] reason Redaction reason (may be NULL).
  * @param[in] is_chanop Whether requester is chanop.
  * @param[in] is_oper Whether requester is oper.
- * @return 0 on success (query started), -1 on failure.
+ * @return 0 on success (query started), -1 when there is nobody to ask
+ *   (federation off, no storage server), -2 when the client has its share
+ *   of lookups in flight or the slots are down to the reserve.
  */
 int start_redact_fed_query(struct Client *sptr, struct Channel *chptr,
                            const char *target, const char *msgid,
@@ -7052,6 +7080,7 @@ int start_redact_fed_query(struct Client *sptr, struct Channel *chptr,
   char s2s_ref[HISTORY_MSGID_LEN + 2];  /* M<msgid>\0 */
   int i, server_count;
   struct DLink *lp;
+  int free_slots = 0;
 
   /* Check if federation is enabled */
   if (!feature_bool(FEAT_CHATHISTORY_FEDERATION))
@@ -7065,13 +7094,21 @@ int start_redact_fed_query(struct Client *sptr, struct Channel *chptr,
   if (server_count == 0)
     return -1;
 
+  /* Its own bound, and the reserve, as for SEARCH's parts. */
+  for (i = 0; i < MAX_FED_REQUESTS; i++)
+    if (!fed_requests[i])
+      free_slots++;
+  if (!hm_fed_slots_admit(free_slots, fed_requests_of(sptr, complete_redact_fed),
+                          1, REDACT_FED_MAX, FED_SLOTS_RESERVE))
+    return -2;
+
   /* Find empty slot */
   for (i = 0; i < MAX_FED_REQUESTS; i++) {
     if (!fed_requests[i])
       break;
   }
   if (i >= MAX_FED_REQUESTS)
-    return -1;
+    return -2;
 
   /* Generate request ID */
   ircd_snprintf(0, reqid, sizeof(reqid), "%s%lu",
@@ -7703,10 +7740,6 @@ static int search_row_hook(const struct HistoryMessage *msg, int reverse,
  * 512-byte P10 body cap bounds them: SEARCH_SEL_MAX leaves room for the
  * fixed fields. */
 #define SEARCH_SEL_MAX 380
-/** The federation slots a SEARCH without `in` leaves free (N013): its
- * per-channel parts stop there, and the remaining channels are searched
- * on this server only. */
-#define SEARCH_FED_RESERVE (MAX_FED_REQUESTS / 4)
 /** The most channels one SEARCH without `in` federates (N013): each part
  * asks every storage server for a scan of its own, so the parts are
  * few; the remaining channels are searched on this server only. */
@@ -8188,22 +8221,6 @@ static int search_fed_line_fits(struct Client *sptr, const char *target,
                       cli_yxx(cli_user(sptr)->server), cli_yxx(sptr),
                       requester_type_mask(sptr), sel);
   return len >= 0 && 6 /* "<YY> CH " */ + (size_t)len + 4 < 510;
-}
-
-/** The parts of SEARCHes without `in` that @a sptr has in flight (N013):
- * each is a scan on every storage server. */
-static int search_agg_parts_of(struct Client *sptr)
-{
-  char yxx[6];
-  int i, n = 0;
-
-  ircd_snprintf(0, yxx, sizeof(yxx), "%s%s", NumNick(sptr));
-  for (i = 0; i < MAX_FED_REQUESTS; i++)
-    if (fed_requests[i]
-        && fed_requests[i]->completion_cb == complete_search_agg_part
-        && 0 == strcmp(fed_requests[i]->client_yxx, yxx))
-      n++;
-  return n;
 }
 
 /** Fan a SEARCH out to every storage server for @a target.  Wire:
@@ -10046,7 +10063,7 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
    * last part is in.  The parts are bounded so one search cannot take the
    * slots every other page and search federates through, nor make every
    * peer scan once per channel: at most SEARCH_FED_PARTS_MAX of them, and
-   * never below SEARCH_FED_RESERVE free slots.  Past those, a channel is
+   * never below FED_SLOTS_RESERVE free slots.  Past those, a channel is
    * searched here only.  The parts are also counted per client, across
    * its searches: one that cannot have the parts it would get on an idle
    * server is refused, not answered from this store alone as if that
@@ -10055,7 +10072,7 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     struct Membership *member;
     struct SearchAgg *agg;
     int free_slots = 0, parts_left = SEARCH_FED_PARTS_MAX;
-    int parts_wanted = 0;
+    int parts_wanted = 0, own_parts;
     time_t query_time = after_unix[0] ? (time_t)strtoul(after_unix, NULL, 10) : 0;
 
     /* A channel whose line cannot fit refuses the search, as with `in`
@@ -10085,10 +10102,12 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                                  sizeof(lookup_target)) == 0
             && count_storage_servers(lookup_target, query_time) > 0)
           parts_wanted++;
-    parts_left -= search_agg_parts_of(sptr);
-    if (parts_wanted > 0
-        && (parts_wanted > parts_left
-            || free_slots - parts_wanted < SEARCH_FED_RESERVE)) {
+    /* The parts of SEARCHes without `in` it has in flight: each is a scan
+     * on every storage server. */
+    own_parts = fed_requests_of(sptr, complete_search_agg_part);
+    parts_left -= own_parts;
+    if (!hm_fed_slots_admit(free_slots, own_parts, parts_wanted,
+                            SEARCH_FED_PARTS_MAX, FED_SLOTS_RESERVE)) {
       send_fail(sptr, "SEARCH", "TEMPORARILY_UNAVAILABLE", "*",
                 "Too many searches in progress, try again shortly");
       return 0;
@@ -10116,7 +10135,7 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         rows = NULL;
         count = 0;
       }
-      if (parts_left > 0 && free_slots > SEARCH_FED_RESERVE) {
+      if (parts_left > 0 && free_slots > FED_SLOTS_RESERVE) {
         req = start_fed_search(sptr, lookup_target, member->channel->chname,
                                before_unix, after_unix, limit, &sm, rows, count);
       }

@@ -53,10 +53,13 @@ static int redacted_rows;       /* history_redact_message() calls */
 static int stored_rows;         /* history_store_message() calls */
 static int live_lookups, raw_lookups;
 static int lookup_fails;        /* the store cannot be read */
+static int no_store;            /* this server keeps no history */
+static int fed_answer = -1;     /* start_redact_fed_query()'s answer */
+static int fed_queries;
 
 int history_is_available(void)
 {
-  return 1;
+  return !no_store;
 }
 
 static int lookup(int found, struct HistoryMessage **msg)
@@ -164,6 +167,16 @@ void send_fail(struct Client *to, const char *command, const char *code,
   fails_sent++;
 }
 
+int start_redact_fed_query(struct Client *sptr, struct Channel *chptr,
+                           const char *target, const char *msgid,
+                           const char *reason, int is_chanop, int is_oper)
+{
+  (void)sptr; (void)chptr; (void)target; (void)msgid; (void)reason;
+  (void)is_chanop; (void)is_oper;
+  fed_queries++;
+  return fed_answer;
+}
+
 /* Run "REDACT #c <msgid>" from a client; @a oper and @a chanop set who it
  * is.  Anything past the authorization -- a stored row, the fan-out, the
  * relay -- fails the case (redact_judge_stubs.c) or is counted. */
@@ -200,7 +213,8 @@ static int reset(void **state)
   (void)state;
   row_stored = row_live = 0;
   redacted_rows = stored_rows = live_lookups = raw_lookups = 0;
-  lookup_fails = fails_sent = 0;
+  lookup_fails = fails_sent = no_store = fed_queries = 0;
+  fed_answer = -1;
   last_fail[0] = '\0';
   return 0;
 }
@@ -270,6 +284,38 @@ static void local_redact_refused_when_the_row_cannot_be_read(void **state)
   assert_int_equal(stored_rows, 0);
 }
 
+/* A message not held here is looked up on the storage servers.  When the
+ * client has its share of those lookups out already, or the shared slots
+ * are down to the reserve (start_redact_fed_query() answers -2), the
+ * REDACT is refused as busy, not answered "not found" -- the message may
+ * well exist -- with a store and without one. */
+static void local_redact_busy_when_the_lookup_is_refused(void **state)
+{
+  (void)state;
+  fed_answer = -2;
+
+  local_redact(0, 0, "m1");               /* a local miss */
+  assert_int_equal(fed_queries, 1);
+  assert_int_equal(fails_sent, 1);
+  assert_string_equal(last_fail, "TEMPORARILY_UNAVAILABLE");
+
+  no_store = 1;                           /* no store at all */
+  local_redact(0, 0, "m1");
+  assert_int_equal(fed_queries, 2);
+  assert_int_equal(fails_sent, 2);
+  assert_string_equal(last_fail, "TEMPORARILY_UNAVAILABLE");
+
+  /* No lookup possible (no federation, no storage server): not found. */
+  fed_answer = -1;
+  no_store = 0;
+  local_redact(0, 0, "m1");
+  assert_string_equal(last_fail, "UNKNOWN_MSGID");
+  no_store = 1;
+  local_redact(0, 0, "m1");
+  assert_string_equal(last_fail, "UNKNOWN_MSGID");
+  assert_int_equal(stored_rows, 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -277,6 +323,7 @@ int main(void)
     cmocka_unit_test_setup(previous_incarnation_row_is_an_orphan, reset),
     cmocka_unit_test_setup(catchup_row_leaves_previous_incarnation_alone, reset),
     cmocka_unit_test_setup(local_redact_refused_when_the_row_cannot_be_read, reset),
+    cmocka_unit_test_setup(local_redact_busy_when_the_lookup_is_refused, reset),
   };
 
   return cmocka_run_group_tests_name("redact_judge", tests, NULL, NULL);

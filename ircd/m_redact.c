@@ -259,12 +259,18 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
        * channel message reaches only the servers with a member -- so the
        * row may live on a storage peer: ask them (CH Q X), as a server
        * with no store does.  complete_redact_fed (m_chathistory.c)
-       * authorizes under the same rule and answers the requester. */
-      if (start_redact_fed_query(sptr, chptr, target, msgid, reason,
-                                 is_chanop, is_oper) == 0)
+       * authorizes under the same rule and answers the requester.  Too
+       * many lookups in flight: busy, not "not found". */
+      int fq = start_redact_fed_query(sptr, chptr, target, msgid, reason,
+                                      is_chanop, is_oper);
+      if (fq == 0)
         return 0;
-      send_fail(sptr, "REDACT", "UNKNOWN_MSGID", fail_ctx,
-                "Message not found");
+      if (fq == -2)
+        send_fail(sptr, "REDACT", "TEMPORARILY_UNAVAILABLE", fail_ctx,
+                  "Too many redactions in progress, try again shortly");
+      else
+        send_fail(sptr, "REDACT", "UNKNOWN_MSGID", fail_ctx,
+                  "Message not found");
       return 0;
     } else if (rc < 0) {
       /* The store could not be read: the row the authorization needs (its
@@ -348,18 +354,21 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     /* No local history — try federated lookup via CH Q X.
      * Storage servers will return the message metadata so we can
      * validate authorization before propagating the REDACT. */
-    if (start_redact_fed_query(sptr, chptr, target, msgid, reason,
-                               is_chanop, is_oper) == 0) {
+    int fq = start_redact_fed_query(sptr, chptr, target, msgid, reason,
+                                    is_chanop, is_oper);
+    char fail_ctx[BUFSIZE];
+
+    if (fq == 0) {
       /* Federation query started — completion callback handles the rest */
       return 0;
     }
-    /* Federation not available or failed to start */
-    {
-      char fail_ctx[BUFSIZE];
-      ircd_snprintf(0, fail_ctx, sizeof(fail_ctx), "%s %s", target, msgid);
+    ircd_snprintf(0, fail_ctx, sizeof(fail_ctx), "%s %s", target, msgid);
+    if (fq == -2)   /* too many lookups in flight */
+      send_fail(sptr, "REDACT", "TEMPORARILY_UNAVAILABLE", fail_ctx,
+                "Too many redactions in progress, try again shortly");
+    else            /* federation not available */
       send_fail(sptr, "REDACT", "UNKNOWN_MSGID", fail_ctx,
                 "Message history is not available on this server");
-    }
     return 0;
   }
 

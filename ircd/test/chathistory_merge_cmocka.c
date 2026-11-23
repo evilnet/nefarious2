@@ -2185,6 +2185,29 @@ static void test_search_agg_part_freed_and_empty(void **state)
 }
 
 
+/* A client's federated lookups take the shared slot table only within its
+ * own bound and never below the reserve: SEARCH's parts and REDACT's
+ * lookups alike.  Shown with SEARCH's numbers (64 slots, 8 per client, 16
+ * kept free). */
+static void test_fed_slots_admit_own_bound_and_reserve(void **state)
+{
+  (void)state;
+  /* Nothing wanted is never refused, even with nothing free. */
+  assert_int_equal(hm_fed_slots_admit(0, 8, 0, 8, 16), 1);
+  /* An idle table: up to the client's bound, not past it. */
+  assert_int_equal(hm_fed_slots_admit(64, 0, 8, 8, 16), 1);
+  assert_int_equal(hm_fed_slots_admit(64, 0, 9, 8, 16), 0);
+  /* What the client has in flight counts against its bound. */
+  assert_int_equal(hm_fed_slots_admit(64, 7, 1, 8, 16), 1);
+  assert_int_equal(hm_fed_slots_admit(64, 8, 1, 8, 16), 0);
+  assert_int_equal(hm_fed_slots_admit(64, 3, 6, 8, 16), 0);
+  /* The reserve: the last slots above it may be taken, none below. */
+  assert_int_equal(hm_fed_slots_admit(17, 0, 1, 8, 16), 1);
+  assert_int_equal(hm_fed_slots_admit(16, 0, 1, 8, 16), 0);
+  assert_int_equal(hm_fed_slots_admit(20, 0, 5, 8, 16), 0);
+  assert_int_equal(hm_fed_slots_admit(0, 0, 1, 8, 16), 0);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -2260,6 +2283,7 @@ int main(void)
     cmocka_unit_test(test_keep_newest),
     cmocka_unit_test(test_search_agg_hold_and_limit),
     cmocka_unit_test(test_search_agg_part_freed_and_empty),
+    cmocka_unit_test(test_fed_slots_admit_own_bound_and_reserve),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

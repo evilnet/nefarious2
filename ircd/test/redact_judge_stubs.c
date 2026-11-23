@@ -3,8 +3,8 @@
  * never reaches: the sends past the authorization, the store writes'
  * helpers, the integer features.  Kept apart from the test, out of reach
  * of the headers that declare them; each fails the case if called.  (The
- * channel lookups, feature_bool() and send_fail() are the test's own: a
- * local REDACT reaches them before it is refused.)
+ * channel lookups, feature_bool(), send_fail() and start_redact_fed_query()
+ * are the test's own: a local REDACT reaches them before it is refused.)
  */
 #include <stdarg.h>
 #include <stddef.h>
@@ -35,4 +35,3 @@ NEVER(sendcmdto_set_client_event)
 NEVER(sendcmdto_set_client_msgid)
 NEVER(sendcmdto_set_s2s_tags)
 NEVER(sendcmdto_want_s2s_tags)
-NEVER(start_redact_fed_query)

@@ -491,4 +491,14 @@ extern int hm_search_agg_finish(struct hm_search_agg *a,
                                 struct HistoryMessage *rows,
                                 struct HistoryMessage **out);
 
+/** May a client's federated lookup take @a wanted more of the shared
+ * federation slots?  Only within its own bound -- what it has in flight
+ * (@a own) plus @a wanted at most @a own_max -- and never so that fewer
+ * than @a reserve slots stay free (of the @a free_slots free now), so one
+ * client cannot take the slots every other client's pages go through.
+ * Nothing wanted is always admitted.
+ * @return 1 when admitted, else 0. */
+extern int hm_fed_slots_admit(int free_slots, int own, int wanted,
+                              int own_max, int reserve);
+
 #endif /* INCLUDED_chathistory_merge_h */

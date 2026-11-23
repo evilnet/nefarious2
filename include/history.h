@@ -998,7 +998,9 @@ extern void chathistory_fed_cleanup_link(struct Client *link);
  * @param[in] reason Redaction reason (may be NULL).
  * @param[in] is_chanop Whether requester is chanop.
  * @param[in] is_oper Whether requester is oper.
- * @return 0 on success (query started), -1 on failure.
+ * @return 0 on success (query started), -1 when there is nobody to ask,
+ *   -2 when the client has its share of lookups in flight or the shared
+ *   federation slots are down to their reserve (busy: try again).
  */
 extern int start_redact_fed_query(struct Client *sptr, struct Channel *chptr,
                                   const char *target, const char *msgid,
