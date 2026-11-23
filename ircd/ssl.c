@@ -254,6 +254,58 @@ int ssl_verify_callback(int preverify_ok, X509_STORE_CTX *cert)
   return 1;
 }
 
+/** Empty this thread's OpenSSL error queue.
+ *
+ * SSL_get_error() reports any error already queued on the thread as
+ * SSL_ERROR_SSL (SSL_ERROR_SYSCALL for a system-library one) BEFORE it
+ * looks at the would-block state.  An error some earlier OpenSSL call left
+ * behind -- a teardown's SSL_shutdown(), an unchecked SSL_write(), a
+ * failed cipher list -- then turns a TLS server link's ordinary
+ * SSL_ERROR_WANT_WRITE under a send backlog into a fatal write error, and
+ * the link is dropped.  SSL_get_error(3): the queue must be empty before
+ * the I/O or handshake call whose result is passed to it.  So this is
+ * called immediately before every such call, and after a teardown or a
+ * failure nobody reads, so it leaves nothing behind.  Under DEBUGMODE what
+ * it drops is logged, which names any caller that still leaves errors.
+ * @param[in] where Where it was called, for the debug log.
+ */
+void ssl_clear_errors(const char *where)
+{
+#ifdef DEBUGMODE
+  unsigned long err;
+  char ebuf[256];
+
+  while ((err = ERR_get_error())) {
+    ERR_error_string_n(err, ebuf, sizeof(ebuf));
+    Debug((DEBUG_DEBUG, "SSL: queued OpenSSL error dropped (%s): %s",
+           where, ebuf));
+  }
+#else
+  (void)where;
+  ERR_clear_error();
+#endif
+}
+
+/** Report the first queued OpenSSL error in @a ebuf and empty the queue
+ * (the rest is detail, for DEBUGMODE), so nothing is left behind for the
+ * next SSL_get_error().  ERR_error_string() wants a 256-byte buffer: the
+ * bounded form is used.
+ * @return 1 if an error was queued. */
+static int ssl_take_error(char *ebuf, size_t len)
+{
+  unsigned long err = ERR_get_error();
+  unsigned long more;
+  char estr[256];
+
+  if (err)
+    ERR_error_string_n(err, ebuf, len);
+  while ((more = ERR_get_error())) {
+    ERR_error_string_n(more, estr, sizeof(estr));
+    Debug((DEBUG_ERROR, "  Error Queue: %lu -- %s", more, estr));
+  }
+  return err != 0;
+}
+
 void ssl_abort(struct Client *cptr)
 {
   Debug((DEBUG_DEBUG, "SSL: aborted"));
@@ -269,6 +321,7 @@ int ssl_accept(struct Client *cptr)
   if (!IsSSLNeedAccept(cptr))
     return -1;
 
+  ssl_clear_errors("before SSL_accept");
   if ((r = SSL_accept(cli_socket(cptr).ssl)) <= 0) {
     unsigned long err = SSL_get_error(cli_socket(cptr).ssl, r);
 
@@ -337,6 +390,7 @@ void ssl_add_connection(struct Listener *listener, int fd)
 
   if (!(ssl = SSL_new(ssl_server_ctx))) {
     Debug((DEBUG_DEBUG, "SSL_new failed"));
+    ssl_clear_errors("after SSL_new");
     close(fd);
     return;
   }
@@ -348,24 +402,22 @@ void ssl_add_connection(struct Listener *listener, int fd)
 
 void ssl_doerror(struct Client *cptr)
 {
-  unsigned long err = 0;
   char ebuf[120];
 
-  memset(&ebuf, 0, 120);
-  err = ERR_get_error();
-  ERR_error_string(err, (char *)&ebuf);
+  memset(&ebuf, 0, sizeof(ebuf));
+  if (!ssl_take_error(ebuf, sizeof(ebuf)))
+    ERR_error_string_n(0, ebuf, sizeof(ebuf));
 
   sendto_opmask_butone(0, SNO_TCPCOMMON, "SSL Error for client %s: %s", cli_name(cptr), ebuf);
 }
 
 void ssl_doerror_anon(void)
 {
-  unsigned long err = 0;
   char ebuf[120];
 
-  memset(&ebuf, 0, 120);
-  err = ERR_get_error();
-  ERR_error_string(err, (char *)&ebuf);
+  memset(&ebuf, 0, sizeof(ebuf));
+  if (!ssl_take_error(ebuf, sizeof(ebuf)))
+    ERR_error_string_n(0, ebuf, sizeof(ebuf));
 
   sendto_opmask_butone(0, SNO_TCPCOMMON, "SSL Error for unknown client: %s", ebuf);
 }
@@ -392,7 +444,7 @@ IOResult ssl_recv(struct Socket *socketh, struct Client *cptr, char* buf,
   *count_out = 0;
   errno = 0;
 
-  ERR_clear_error();
+  ssl_clear_errors("before SSL_read");
   res = SSL_read(socketh->ssl, buf, length);
   switch (SSL_get_error(socketh->ssl, res)) {
   case SSL_ERROR_NONE:
@@ -409,6 +461,7 @@ IOResult ssl_recv(struct Socket *socketh, struct Client *cptr, char* buf,
     break;
   case SSL_ERROR_ZERO_RETURN: /* close_notify received */
     SSL_shutdown(socketh->ssl); /* Send close_notify back */
+    ssl_clear_errors("after SSL_shutdown");
     break;
   }
 
@@ -453,6 +506,7 @@ IOResult ssl_sendv(struct Socket *socketh, struct Client *cptr, struct MsgQ* buf
 
   count = msgq_mapiov(buf, iov, IOV_MAX, count_in);
   for (k = 0; k < count; k++) {
+    ssl_clear_errors("before SSL_write");
     res = SSL_write(socketh->ssl, iov[k].iov_base, iov[k].iov_len);
     ssl_err = SSL_get_error(socketh->ssl, res);
     Debug((DEBUG_DEBUG, "SSL_write returned %d, error code %d.", res, ssl_err));
@@ -502,6 +556,7 @@ IOResult ssl_sendv(struct Socket *socketh, struct Client *cptr, struct MsgQ* buf
       */
     case SSL_ERROR_ZERO_RETURN:
       SSL_shutdown(socketh->ssl);
+      ssl_clear_errors("after SSL_shutdown");
       return IO_FAILURE;
     default:
       Debug((DEBUG_DEBUG, "SSL_write return fell through - errno %d returning retval %d", errno, retval));
@@ -545,6 +600,7 @@ int ssl_murder(void *ssl, int fd, const char *buf)
     if (buf)
       SSL_write((SSL *) ssl, buf, strlen(buf));
     SSL_free((SSL *) ssl);
+    ssl_clear_errors("after ssl_murder");  /* the unchecked SSL_write */
   }
   close(fd);
   return 0;
@@ -585,6 +641,7 @@ int ssl_connect(struct Socket* sock, struct ConfItem *aconf)
     {
       if (SSL_set_cipher_list(sock->ssl, aconf->sslciphers) == 0)
       {
+        ssl_clear_errors("after SSL_set_cipher_list");
         return -2;
       }
     }
@@ -592,17 +649,23 @@ int ssl_connect(struct Socket* sock, struct ConfItem *aconf)
     ssl_set_nonblocking(sock->ssl);
   }
 
+  ssl_clear_errors("before SSL_connect");
   r = SSL_connect(sock->ssl);
   if (r<=0) {
     if ((SSL_get_error(sock->ssl, r) == SSL_ERROR_WANT_WRITE) || (SSL_get_error(sock->ssl, r) == SSL_ERROR_WANT_READ))
       return 0; /* Needs to call SSL_connect() again */
     else if (SSL_get_error(sock->ssl, r) == SSL_ERROR_SSL) {
-      unsigned long e = ERR_get_error();
-      sendto_opmask_butone(0, SNO_TCPCOMMON, "SSL Error for connection attempt: %s", ERR_error_string(e, NULL));
+      char ebuf[256];
+
+      /* The first reason is reported; the rest must not stay queued. */
+      if (!ssl_take_error(ebuf, sizeof(ebuf)))
+        ERR_error_string_n(0, ebuf, sizeof(ebuf));
+      sendto_opmask_butone(0, SNO_TCPCOMMON, "SSL Error for connection attempt: %s", ebuf);
       return -1; /* Fatal error */
     }
     else {
       sendto_opmask_butone(0, SNO_TCPCOMMON, "Unknown SSL error for connection attempt (%d)", SSL_get_error(sock->ssl, r));
+      ssl_clear_errors("after SSL_connect");
       return -1; /* Fatal error */
     }
   }
@@ -624,6 +687,7 @@ char* ssl_get_fingerprint(SSL *ssl)
 
   if (!X509_digest(cert, digest, md, &n))
   {
+    ssl_clear_errors("after X509_digest");
     X509_free(cert);
     return NULL;
   }
@@ -655,6 +719,10 @@ int ssl_smart_shutdown(SSL *ssl)
             break;
     }
 
+    /* A teardown routinely fails (a peer that is gone, or that closed
+     * without its close_notify), and the failure stays queued: leave
+     * nothing for the next connection's SSL_get_error(). */
+    ssl_clear_errors("after SSL_shutdown");
     return rc;
 }
 
@@ -711,13 +779,13 @@ const char* ssl_get_verify_result(SSL *ssl)
 
 void sslfail(char *txt)
 {
-  unsigned long err = ERR_get_error();
   char string[120];
 
-  if (!err) {
+  /* ssl_take_error() empties the queue: a certificate, key or cipher list
+   * that failed to load left more than one reason behind. */
+  if (!ssl_take_error(string, sizeof(string))) {
     Debug((DEBUG_DEBUG, "%s: poof", txt));
   } else {
-    ERR_error_string(err, string);
     Debug((DEBUG_FATAL, "%s: %s", txt, string));
   }
 }

@@ -20,7 +20,8 @@ TESTPROGS = \
 	ircd_match_t \
 	ircd_string_t \
 	services_reply_t \
-	parse_line_t
+	parse_line_t \
+	ssl_io_t
 
 DEP_SRC = \
 	ban_cache_t.c \
@@ -37,6 +38,7 @@ DEP_SRC = \
 	ircd_string_t.c \
 	services_reply_t.c \
 	parse_line_t.c \
+	ssl_io_t.c \
 	test_stub.c
 
 all: ${TESTPROGS}
@@ -136,6 +138,18 @@ handler_stubs.c: ${top_srcdir}/include/handlers.h
 PARSE_LINE_T_OBJS = parse_line_t.o handler_stubs.o ../parse.o ../ircd_string.o
 parse_line_t: $(PARSE_LINE_T_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(PARSE_LINE_T_OBJS)
+
+# The OpenSSL error queue around TLS I/O: the real ssl_connect(),
+# ssl_accept(), ssl_sendv(), ssl_recv() and teardown over a socketpair.
+# ssl.c is included, compiled with -ffunction-sections and linked with
+# --gc-sections, so only what they reach is kept; the rest of the server
+# they reach is stubbed in the test.  It links the server's libraries
+# (OpenSSL, when the server is built with it).
+SSL_IO_T_OBJS = ssl_io_t.o test_stub.o ../ircd_string.o
+ssl_io_t.o: ${srcdir}/ssl_io_t.c ../ssl.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/ssl_io_t.c
+ssl_io_t: $(SSL_IO_T_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(SSL_IO_T_OBJS) @LIBS@
 
 .c.o:
 	${CC} ${CFLAGS} ${CPPFLAGS} -c $< -o $@
