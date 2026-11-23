@@ -826,7 +826,7 @@ size_t ircd_keyvalue_line_len(size_t server_len, size_t viewer_len,
        + 1 + vis_len + 2 + value_len;
 }
 
-/** Upper-case ranges of the scripts folded by ircd_utf8_strcasestr, sorted.
+/** Upper-case ranges of the scripts folded by ircd_utf8_needle_find, sorted.
  * delta != 0: every code point in the range lowers by adding delta.
  * delta == 0: upper and lower alternate, lo is upper and lo + 1 its lower. */
 static const struct {
@@ -901,46 +901,81 @@ static unsigned int utf8_fold_next(const char **s)
   return UTF8_RAW_BYTE | p[0];
 }
 
-/** Whether \a n, folded, is a prefix of \a h, folded. */
-static int utf8_folded_prefix(const char *h, const char *n)
+/** Fold \a needle once for ircd_utf8_needle_find(): its units, and for
+ * each unit the longest proper prefix of the needle up to it that is also
+ * a suffix there (the Knuth-Morris-Pratt table).
+ * @param[out] nd The folded needle.
+ * @param[in] needle Text to find; empty matches at the start.
+ * @return 0, or -1 when it holds more than IRCD_UTF8_NEEDLE_MAX units
+ * (\a nd is then the empty needle).
+ */
+int ircd_utf8_needle_init(struct Utf8Needle* nd, const char* needle)
 {
-  while (*n) {
-    if (!*h || utf8_fold_next(&h) != utf8_fold_next(&n))
-      return 0;
+  const char *s = needle;
+  unsigned int n = 0, i, k = 0;
+
+  nd->len = 0;
+  nd->bytes = 0;
+  while (*s) {
+    if (n >= IRCD_UTF8_NEEDLE_MAX) {
+      nd->bytes = 0;
+      return -1;
+    }
+    nd->unit[n++] = utf8_fold_next(&s);
   }
-  return 1;
+  nd->len = n;
+  nd->bytes = (size_t)(s - needle);
+  if (n)
+    nd->fail[0] = 0;
+  for (i = 1; i < n; i++) {
+    while (k > 0 && nd->unit[i] != nd->unit[k])
+      k = nd->fail[k - 1];
+    if (nd->unit[i] == nd->unit[k])
+      k++;
+    nd->fail[i] = (unsigned short)k;
+  }
+  return 0;
 }
 
 /** Case-insensitive substring search for UTF-8 text.  ASCII follows the
  * server casemapping; Latin, Greek, Cyrillic and Armenian fold one to one.
  * Not folded: multi-character folds (U+00DF against "ss"), U+1E9E, U+0130,
  * and every other script.
+ *
+ * Each unit of \a hay is read and folded once, and the needle's table
+ * says where a partial match resumes, so the cost is linear in the length
+ * of \a hay whatever the needle (#161: trying the needle again at every
+ * start cost the text's length times the needle's).  It finds what that
+ * did: units are read from the start of the text, and an ASCII byte is
+ * always a unit of its own, so the units compared are the same ones.  A
+ * match spans the needle's byte count: equal folded units are read from
+ * as many bytes (ASCII and stray bytes one, two-byte sequences fold within
+ * U+0080..U+07FF, and 0xE1 sequences within U+1000..U+1FFF).
+ * @param[in] nd The needle (ircd_utf8_needle_init()).
  * @param[in] hay Text to scan.
- * @param[in] needle Text to find; empty matches at the start.
  * @return Start of the first match in \a hay, or NULL.
  */
-const char* ircd_utf8_strcasestr(const char* hay, const char* needle)
+const char* ircd_utf8_needle_find(const struct Utf8Needle* nd, const char* hay)
 {
-  const char *rest = needle;
-  unsigned int first;
+  const char *p = hay;
+  unsigned int k = 0, c;
 
-  if (!*needle)
+  if (!nd->len)
     return hay;
-  first = utf8_fold_next(&rest);
-  if (first < 0x80) {
-    /* An ASCII unit only ever equals an ASCII byte, and no sequence holds
-     * one, so bytes will do until one matches. */
-    for (; *hay; hay++)
-      if ((unsigned char)ToLower(*hay) == first
-          && utf8_folded_prefix(hay + 1, rest))
-        return hay;
-    return NULL;
-  }
-  while (*hay) {
-    const char *start = hay;
-
-    if (utf8_fold_next(&hay) == first && utf8_folded_prefix(hay, rest))
-      return start;
+  while (*p) {
+    /* Nothing matched yet and the needle starts with ASCII: only a byte
+     * that folds to it can start a match, so bytes will do until one. */
+    if (k == 0 && nd->unit[0] < 0x80) {
+      while (*p && (unsigned char)ToLower(*p) != nd->unit[0])
+        p++;
+      if (!*p)
+        break;
+    }
+    c = utf8_fold_next(&p);
+    while (k > 0 && nd->unit[k] != c)
+      k = nd->fail[k - 1];
+    if (nd->unit[k] == c && ++k == nd->len)
+      return p - nd->bytes;
   }
   return NULL;
 }

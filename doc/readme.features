@@ -1000,8 +1000,9 @@ next restart.  0 or less means the default; more than 64 means 64.
 
 Two things run there.  Password checks (OPER, SETHOST, WEBIRC) are
 hashed on a worker.  And a storage server's answer to another server's
-SEARCH is scanned there: each scan reads up to 50,000 history rows, and
-one SEARCH without `in=` asks for up to eight of them.  The scans take
+SEARCH is scanned there: each scan reads up to 50,000 history rows and
+32 MiB of message text, and one SEARCH without `in=` asks for up to
+eight of them.  The scans take
 one worker fewer than the pool has (a pool of one: that one), at most
 eight.  That is a bound on a password check's wait, not a worker kept
 free: a check waits behind the checks already there and behind at most

@@ -195,6 +195,8 @@ static const struct Row few_rows[] = {
 static const struct Row *rows;    /**< NULL: nrows made-up rows, AB-1 up */
 static int nrows;
 static int hay_rows;              /**< the oldest this many of them match nothing */
+static size_t hay_len;            /**< 0: a hay row says "hay"; else this many bytes */
+static int rows_read;             /**< rows the walk read */
 static int walks;                 /**< history_query_before() calls */
 static int walk_fails;            /**< the next walk returns -1 */
 static const char *redacted_id;   /**< this row is redacted ... */
@@ -279,8 +281,16 @@ static void row_fill(struct HistoryMessage *m, int i)
     snprintf(m->timestamp, sizeof(m->timestamp), "%d.000", 1700000001 + i);
     m->type = HISTORY_PRIVMSG;
     strcpy(m->sender, "ann!a@h");
-    strcpy(m->content, i < hay_rows ? "hay" : "needle");
+    if (i >= hay_rows)
+      strcpy(m->content, "needle");
+    else if (!hay_len)
+      strcpy(m->content, "hay");
+    else {
+      memset(m->content, 'h', hay_len);
+      m->content[hay_len] = '\0';
+    }
   }
+  rows_read++;
 }
 
 /** The walk: newest first through the filter's hook, the newest @a limit
@@ -475,6 +485,8 @@ static int setup(void **state)
   rows = few_rows;
   nrows = (int)(sizeof(few_rows) / sizeof(few_rows[0]));
   hay_rows = 0;
+  hay_len = 0;
+  rows_read = 0;
   walks = walk_fails = freed_rows = 0;
   redacted_id = unread_id = NULL;
   memset(&seen, 0, sizeof(seen));
@@ -752,6 +764,56 @@ static void done_with_T_when_the_budget_cut_the_scan(void **state)
   assert_all_given_back();
 }
 
+/** #161: the budget is also bytes.  Rows of 4000 bytes, more of them
+ * than the byte budget reads and far fewer than the row budget: the scan
+ * ends when the bytes run out, with rows to spare, and says so with T as
+ * when the row budget runs out. */
+static void done_with_T_when_the_byte_budget_cut_the_scan(void **state)
+{
+  struct SearchJob *sj;
+
+  assert_true(4000 < HISTORY_CONTENT_LEN);
+  rows = NULL;
+  hay_len = 4000;
+  nrows = (int)(SEARCH_SCAN_BYTES / 4000) + 1000;
+  assert_true(nrows < SEARCH_SCAN_MAX);
+  hay_rows = nrows - 3;
+  q_s("#chan", "1800000000.000", "50", "*", "*", "0", "text=needle");
+  sj = the_job();
+  worker_runs();
+  assert_int_equal(sj->count, 3);
+  assert_int_equal(sj->truncated, 1);
+  assert_true(sj->budget_left > 0);
+  /* The bytes read: the budget, then the row that found it spent. */
+  assert_true(rows_read <= (int)(SEARCH_SCAN_BYTES / 4000) + 5);
+  assert_true(rows_read < nrows);
+  callback_runs();
+  assert_int_equal(nlines, 4);
+  assert_string_equal(lines[3], "E CD7 3 T");
+  assert_all_given_back();
+}
+
+/** An ordinary search -- the whole row budget of 200-byte rows -- is
+ * not cut by the byte budget. */
+static void ordinary_rows_are_not_cut_by_the_byte_budget(void **state)
+{
+  struct SearchJob *sj;
+
+  rows = NULL;
+  hay_len = 200;
+  nrows = SEARCH_SCAN_MAX;
+  hay_rows = nrows - 3;
+  q_s("#chan", "1800000000.000", "50", "*", "*", "0", "text=needle");
+  sj = the_job();
+  worker_runs();
+  assert_int_equal(rows_read, nrows);
+  assert_int_equal(sj->count, 3);
+  assert_int_equal(sj->truncated, 0);
+  callback_runs();
+  assert_string_equal(lines[3], "E CD7 3");
+  assert_all_given_back();
+}
+
 /** The store could not be read: E 0 U, no row, and the one log line a
  * failed read leaves (the worker's own are dropped). */
 static void done_with_a_store_error_says_U(void **state)
@@ -876,6 +938,8 @@ int main(void)
     cmocka_unit_test_setup_teardown(a_presence_that_fails_closed_answers_empty, setup, teardown),
     cmocka_unit_test_setup_teardown(done_hides_a_redacted_match, setup, teardown),
     cmocka_unit_test_setup_teardown(done_with_T_when_the_budget_cut_the_scan, setup, teardown),
+    cmocka_unit_test_setup_teardown(done_with_T_when_the_byte_budget_cut_the_scan, setup, teardown),
+    cmocka_unit_test_setup_teardown(ordinary_rows_are_not_cut_by_the_byte_budget, setup, teardown),
     cmocka_unit_test_setup_teardown(done_with_a_store_error_says_U, setup, teardown),
     cmocka_unit_test_setup_teardown(without_a_view_the_answer_is_U, setup, teardown),
     cmocka_unit_test_setup_teardown(without_a_pool_the_line_is_answered_at_once, setup, teardown),

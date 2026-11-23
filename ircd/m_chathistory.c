@@ -7637,6 +7637,13 @@ int chathistory_auto_replay_fed(struct Client *sptr, time_t since_time, int limi
 
 /** Raw rows one SEARCH may examine, over every channel it covers. */
 #define SEARCH_SCAN_MAX 50000
+/** Message bytes one SEARCH may read, over every channel it covers
+ * (#161).  The row budget alone let each row cost its length, and a
+ * multiline row is up to MULTILINE_MAX_BYTES long; this bounds the bytes
+ * a scan reads and matches.  A whole row budget of single-line messages
+ * (at most about 510 bytes each, 25 MB) stays under it, so only
+ * multiline rows can end a scan by bytes. */
+#define SEARCH_SCAN_BYTES (32u << 20)
 
 struct SearchMatch {
   /** The presence hook to run first, when strict presence opened one. */
@@ -7645,7 +7652,12 @@ struct SearchMatch {
   void *presence_ctx;
   char from[NICKLEN + 1];   /**< sender nick to match, or empty */
   const char *text;         /**< substring to match, or NULL */
+  struct Utf8Needle needle; /**< @a text, folded once (search_set_text) */
   int64_t after_ms;         /**< stop below this (0 = no floor) */
+  /** Message bytes the walks may still read (SEARCH_SCAN_BYTES at the
+   * start of a SEARCH, spent across its channels). */
+  size_t bytes_left;
+  int bytes_out;            /**< the byte budget ended this walk */
   const char *target;       /**< the walk's store key (search_walk sets it) */
   struct HistoryView *view; /**< the walk's view, or NULL (search_walk sets it) */
   int redact_unread;        /**< matches dropped: their redaction lookup failed */
@@ -7679,17 +7691,45 @@ static int search_hides(struct HistoryView *view, const char *target,
   return 1;
 }
 
-/** Walk hook: the presence decision first (it may seek), then the
- * window floor, the row type, the selectors and last the redaction. */
+/** Set @a sm's text selector to @a text (NULL or empty: none), folded
+ * once for every row of the walks.  -1 for a text longer than the matcher
+ * holds (IRCD_UTF8_NEEDLE_MAX units, more than one server line carries). */
+static int search_set_text(struct SearchMatch *sm, const char *text)
+{
+  sm->text = text && text[0] ? text : NULL;
+  if (sm->text && ircd_utf8_needle_init(&sm->needle, sm->text) != 0) {
+    sm->text = NULL;
+    return -1;
+  }
+  return 0;
+}
+
+/** Walk hook: the window floor, the byte budget, the presence decision
+ * (it may seek), the row type, the selectors and last the redaction. */
 static int search_row_hook(const struct HistoryMessage *msg, int reverse,
                            void *ctx, int64_t *skip_to)
 {
   struct SearchMatch *sm = (struct SearchMatch *)ctx;
   int64_t t = (int64_t)history_parse_ms(msg->timestamp);
+  const char *body;
+  size_t len;
 
   /* The walk is newest to oldest: below the floor nothing further counts. */
   if (sm->after_ms && t && t < sm->after_ms)
     return -1;
+
+  /* The byte budget (#161).  Every row read is charged its message body,
+   * whether or not it is matched: the walk read and copied that much, and
+   * the text match reads it once more (ircd_utf8_needle_find, linear in
+   * the body).  A row that finds the budget spent ends the walk, as the
+   * row budget does -- search_walk() reports either as a cut scan. */
+  if (!sm->bytes_left) {
+    sm->bytes_out = 1;
+    return -1;
+  }
+  body = msg->dyn_content ? msg->dyn_content : msg->content;
+  len = msg->dyn_content ? msg->dyn_content_len : strlen(msg->content);
+  sm->bytes_left -= len < sm->bytes_left ? len : sm->bytes_left;
 
   if (sm->presence_fn) {
     int v = sm->presence_fn(msg, reverse, sm->presence_ctx, skip_to);
@@ -7707,11 +7747,8 @@ static int search_row_hook(const struct HistoryMessage *msg, int reverse,
       return 0;
   }
 
-  if (sm->text) {
-    const char *body = msg->dyn_content ? msg->dyn_content : msg->content;
-    if (!body || !body[0] || !ircd_utf8_strcasestr(body, sm->text))
-      return 0;
-  }
+  if (sm->text && (!body || !body[0] || !ircd_utf8_needle_find(&sm->needle, body)))
+    return 0;
 
   /* A redacted message is never a match.  A page hides it by attaching
    * its REDACT child and filtering the list; this walk never admits a
@@ -7723,7 +7760,7 @@ static int search_row_hook(const struct HistoryMessage *msg, int reverse,
    * one db_get and one deserialize per child (replies and reactions are
    * children too, not only REDACTs) -- plus a snapshot of its own, where a
    * page shares one across its rows.  Every row checked is a scanned row,
-   * so the scan budget (SEARCH_SCAN_MAX) bounds how many checks a walk
+   * so the row budget (SEARCH_SCAN_MAX) bounds how many checks a walk
    * makes -- not what one check costs. */
   if (search_hides(sm->view, sm->target, msg->msgid, &sm->redact_unread))
     return 0;
@@ -7770,11 +7807,12 @@ static void search_sel_unescape(char *v)
 
 /** The search walk shared by the local path and the S2S responder: BEFORE
  * from @a before_unix, the match hook chained behind @a base's presence
- * hook (if any), @a base's type mask and veto, @a *budget raw rows; the
- * newest @a limit unredacted matches in @a *out (the hook drops a redacted
- * one inside the walk: a list filter afterwards would find no REDACT row
- * to filter by, and could only return fewer than @a limit).
- * @a *truncated is set when the scan budget cut the window short.
+ * hook (if any), @a base's type mask and veto, @a *budget raw rows and
+ * @a sm's bytes_left message bytes; the newest @a limit unredacted
+ * matches in @a *out (the hook drops a redacted one inside the walk: a
+ * list filter afterwards would find no REDACT row to filter by, and could
+ * only return fewer than @a limit).  @a *truncated is set when either
+ * budget cut the window short.
  *
  * The responder runs this on a thread pool worker (struct SearchJob), so
  * the walk and everything under it -- search_row_hook, the presence hook,
@@ -7791,9 +7829,10 @@ static int search_walk(const char *lookup_target, const char *before_unix,
   int count;
 
   *out = NULL;
-  if (*budget <= 0)
+  if (*budget <= 0 || !sm->bytes_left)
     return 0;
   memset(&filter, 0, sizeof(filter));
+  sm->bytes_out = 0;
   sm->presence_fn = base && base->fn ? base->fn : NULL;
   sm->presence_ctx = base && base->fn ? base->ctx : NULL;
   sm->target = lookup_target;
@@ -7813,7 +7852,7 @@ static int search_walk(const char *lookup_target, const char *before_unix,
                                before_unix, limit, out, &filter);
   *budget -= filter.scanned;
   if (truncated)
-    *truncated = filter.truncated;
+    *truncated = filter.truncated || sm->bytes_out;
   if (count < 0)
     return -1;
   return count;
@@ -7842,7 +7881,7 @@ static int search_one_target(struct Client *sptr, const char *lookup_target,
   int count;
 
   *out = NULL;
-  if (*budget <= 0)
+  if (*budget <= 0 || !sm->bytes_left)
     return 0;
 
   if (open_query_presence(sptr, lookup_target, 0, &pf) < 0)
@@ -7870,8 +7909,10 @@ static int search_one_target(struct Client *sptr, const char *lookup_target,
 /* ---------------------------------------------------------------- */
 
 /** One federated SEARCH this server answers (CH Q <target> S ...): the
- * scan of up to SEARCH_SCAN_MAX rows as a store job (store_job.h), so it
- * runs on a thread pool worker while the main loop goes on.  A SEARCH
+ * scan of up to SEARCH_SCAN_MAX rows and SEARCH_SCAN_BYTES message bytes
+ * (a budget of its own, whatever the asking server spent) as a store job
+ * (store_job.h), so it runs on a thread pool worker while the main loop
+ * goes on.  A SEARCH
  * without `in` asks for up to SEARCH_FED_PARTS_MAX of these in a row; on
  * the main loop they were about a quarter of a second each at the full
  * budget.
@@ -7888,7 +7929,7 @@ static int search_one_target(struct Client *sptr, const char *lookup_target,
  * meantime still hides its message, and so does a redaction a trim has
  * deleted, with the message, in the meantime.  The worker reads the job and
  * the store and nothing else (search_walk).  search_job_done() sends the
- * answer from the main thread: the rows, then E with T when the budget
+ * answer from the main thread: the rows, then E with T when a budget
  * cut the scan short, or E 0 U when the store could not be read -- the
  * lines the synchronous responder sent, later.  One job holds at most
  * MAX_FED_MESSAGES rows (the limit is cut to that when the line
@@ -7926,6 +7967,7 @@ static void search_job_run(struct StoreJob *job)
   struct SearchJob *sj = (struct SearchJob *)job;
   int budget = SEARCH_SCAN_MAX;
 
+  sj->sm.bytes_left = SEARCH_SCAN_BYTES;
   sj->count = search_walk(sj->target, sj->before, sj->limit, &sj->sm, &budget,
                           &sj->base, &sj->rows, &sj->truncated);
   sj->budget_left = budget;
@@ -8944,6 +8986,14 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
               ssm->text = tok + 5;
           }
         }
+        /* Never for a text one line carries (IRCD_UTF8_NEEDLE_MAX): it
+         * cannot be searched as asked, so the answer is partial. */
+        if (search_set_text(ssm, ssm->text) != 0) {
+          MyFree(sj);
+          presence_query_filter_close(fed_pf);
+          sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s 0 U", reqid);
+          return 0;
+        }
         /* A nick longer than ours: no row here can match it, as the
          * requester's own check (m_search) would have said. */
         if (bad_from) {
@@ -9835,10 +9885,11 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
  * A redacted message is never a match (search_row_hook): it is dropped
  * inside the walk, so it takes no slot of `limit`; a storage peer's rows
  * get the same check before the merge.  There is no index: search is
- * bounded by a scan budget of SEARCH_SCAN_MAX raw rows per request,
- * spent across the channels searched when `in` is absent; a client
- * wanting more asks narrower windows.  Without `in`, the channels the
- * requester is in are searched (private conversations need `in=<nick>`:
+ * bounded by a scan budget of SEARCH_SCAN_MAX raw rows and
+ * SEARCH_SCAN_BYTES message bytes per request, spent across the channels
+ * searched when `in` is absent, and the text match is linear in what it
+ * reads; a client wanting more asks narrower windows.  Without `in`, the
+ * channels the requester is in are searched (private conversations need `in=<nick>`:
  * their keyspace is not enumerable per requester).
  *
  * Where the scans run.  The requester's own server scans its store here,
@@ -9881,6 +9932,7 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   }
 
   memset(&sm, 0, sizeof(sm));
+  sm.bytes_left = SEARCH_SCAN_BYTES;
   before_unix[0] = '\0';
   after_unix[0] = '\0';
 
@@ -9996,7 +10048,7 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     size_t n = 0;
     if (sm.from[0]) { search_sel_escape(sm.from, esc, sizeof(esc)); n += 5 + strlen(esc) + 1; }
     if (sm.text) { search_sel_escape(sm.text, esc, sizeof(esc)); n += 5 + strlen(esc); }
-    if (n > SEARCH_SEL_MAX) {
+    if (n > SEARCH_SEL_MAX || search_set_text(&sm, sm.text) != 0) {
       send_fail(sptr, "SEARCH", "INVALID_PARAMS", "text", "Selectors too long");
       return 0;
     }

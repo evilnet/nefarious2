@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
 #include <cmocka.h>
 
 #include "ircd_defs.h"
@@ -1002,16 +1003,25 @@ static void test_json_escape_truncates_cleanly(void **state)
   assert_string_equal(ircd_json_escape(buf, sizeof(buf), "ab\"cd"), "ab");
 }
 
-/* --- ircd_utf8_strcasestr --- */
+/* --- ircd_utf8_needle_init / ircd_utf8_needle_find --- */
+
+/** The matcher as SEARCH runs it: the needle folded once, then the text. */
+static const char *casestr(const char *hay, const char *needle)
+{
+  static struct Utf8Needle nd;
+
+  assert_int_equal(ircd_utf8_needle_init(&nd, needle), 0);
+  return ircd_utf8_needle_find(&nd, hay);
+}
 
 static void assert_finds(const char *hay, const char *needle)
 {
-  assert_non_null(ircd_utf8_strcasestr(hay, needle));
+  assert_non_null(casestr(hay, needle));
 }
 
 static void assert_misses(const char *hay, const char *needle)
 {
-  assert_null(ircd_utf8_strcasestr(hay, needle));
+  assert_null(casestr(hay, needle));
 }
 
 static void test_utf8_strcasestr_folds_scripts(void **state)
@@ -1070,15 +1080,232 @@ static void test_utf8_strcasestr_ascii_needle_high_bytes(void **state)
   for (i = 0; i < 128; i++)
     hay[i] = (char)(0x80 + i);
   memcpy(hay + 128, "Xy", 3);
-  assert_ptr_equal(hay + 128, ircd_utf8_strcasestr(hay, "xY"));
-  assert_ptr_equal(hay + 128, ircd_utf8_strcasestr(hay, "X"));
-  assert_null(ircd_utf8_strcasestr(hay, "z"));
+  assert_ptr_equal(hay + 128, casestr(hay, "xY"));
+  assert_ptr_equal(hay + 128, casestr(hay, "X"));
+  assert_null(casestr(hay, "z"));
   /* No high byte folds onto an ASCII one. */
   hay[128] = '\0';
   for (i = 1; i < 128; i++) {
     char needle[2] = { (char)i, '\0' };
-    assert_null(ircd_utf8_strcasestr(hay, needle));
+    assert_null(casestr(hay, needle));
   }
+}
+
+/* The scan the matcher replaced (#161), kept here as the reference: it
+ * tried the needle again at every start, so a text of "aaaa..." against
+ * "aaa...az" cost the text's length times the needle's.  The new one must
+ * find exactly what this found, at the same place. */
+static const struct { unsigned short lo, hi; short delta; } ref_fold_ranges[] = {
+  { 0x00C0, 0x00D6, 32 }, { 0x00D8, 0x00DE, 32 },
+  { 0x0100, 0x012F, 0 }, { 0x0132, 0x0137, 0 }, { 0x0139, 0x0148, 0 },
+  { 0x014A, 0x0177, 0 }, { 0x0178, 0x0178, -121 }, { 0x0179, 0x017E, 0 },
+  { 0x01A0, 0x01A5, 0 }, { 0x01AF, 0x01B0, 0 }, { 0x01CD, 0x01DC, 0 },
+  { 0x01DE, 0x01EF, 0 }, { 0x01F8, 0x021F, 0 }, { 0x0222, 0x0233, 0 },
+  { 0x0386, 0x0386, 38 }, { 0x0388, 0x038A, 37 }, { 0x038C, 0x038C, 64 },
+  { 0x038E, 0x038F, 63 }, { 0x0391, 0x03A1, 32 }, { 0x03A3, 0x03AB, 32 },
+  { 0x03C2, 0x03C2, 1 },
+  { 0x0400, 0x040F, 80 }, { 0x0410, 0x042F, 32 }, { 0x0460, 0x0481, 0 },
+  { 0x048A, 0x04BF, 0 }, { 0x04C0, 0x04C0, 15 }, { 0x04C1, 0x04CE, 0 },
+  { 0x04D0, 0x052F, 0 },
+  { 0x0531, 0x0556, 48 },
+  { 0x1E00, 0x1E95, 0 }, { 0x1EA0, 0x1EFF, 0 },
+};
+
+static unsigned int ref_fold(unsigned int cp)
+{
+  size_t lo = 0, hi = sizeof(ref_fold_ranges) / sizeof(ref_fold_ranges[0]);
+
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+
+    if (cp < ref_fold_ranges[mid].lo)
+      hi = mid;
+    else if (cp > ref_fold_ranges[mid].hi)
+      lo = mid + 1;
+    else if (ref_fold_ranges[mid].delta)
+      return cp + ref_fold_ranges[mid].delta;
+    else
+      return ((cp - ref_fold_ranges[mid].lo) & 1) ? cp : cp + 1;
+  }
+  return cp;
+}
+
+#define REF_CONT(c) (((unsigned char)(c) & 0xC0) == 0x80)
+
+static unsigned int ref_fold_next(const char **s)
+{
+  const unsigned char *p = (const unsigned char *)*s;
+
+  if (p[0] < 0x80) {
+    *s += 1;
+    return (unsigned char)ToLower(p[0]);
+  }
+  if (p[0] >= 0xC2 && p[0] <= 0xDF && REF_CONT(p[1])) {
+    *s += 2;
+    return ref_fold(((p[0] & 0x1Fu) << 6) | (p[1] & 0x3Fu));
+  }
+  if (p[0] == 0xE1 && REF_CONT(p[1]) && REF_CONT(p[2])) {
+    *s += 3;
+    return ref_fold(0x1000u | ((p[1] & 0x3Fu) << 6) | (p[2] & 0x3Fu));
+  }
+  *s += 1;
+  return 0x110000u | p[0];
+}
+
+static int ref_prefix(const char *h, const char *n)
+{
+  while (*n) {
+    if (!*h || ref_fold_next(&h) != ref_fold_next(&n))
+      return 0;
+  }
+  return 1;
+}
+
+static const char *ref_strcasestr(const char *hay, const char *needle)
+{
+  const char *rest = needle;
+  unsigned int first;
+
+  if (!*needle)
+    return hay;
+  first = ref_fold_next(&rest);
+  if (first < 0x80) {
+    for (; *hay; hay++)
+      if ((unsigned char)ToLower(*hay) == first && ref_prefix(hay + 1, rest))
+        return hay;
+    return NULL;
+  }
+  while (*hay) {
+    const char *start = hay;
+
+    if (ref_fold_next(&hay) == first && ref_prefix(hay, rest))
+      return start;
+  }
+  return NULL;
+}
+
+/** Pieces the texts are made of: ASCII the casemapping folds, sequences
+ * that fold, ones that do not, and cut or stray bytes. */
+static const char *const pieces[] = {
+  "a", "A", "b", "z", "[", "{", "~", "^",
+  "\xC3\x89", "\xC3\xA9", "\xC3", "\xA9", "\xCF\x82", "\xCF\x83", "\xCE\xA3",
+  "\xD0\x9F", "\xD0\xBF", "\xE1\xBA\xA0", "\xE1\xBA\xA1", "\xE1", "\xE1\xBA",
+  "\xE4\xBD\xA0", "\xF0\x9F\x98\x80", "\xFF", "\xC4\xB0", "i",
+};
+
+static unsigned long lcg = 12345;
+static unsigned int rnd(unsigned int n)
+{
+  lcg = lcg * 6364136223846793005UL + 1442695040888963407UL;
+  return (unsigned int)((lcg >> 33) % n);
+}
+
+static void random_text(char *buf, size_t size, unsigned int pieces_max,
+                        unsigned int alphabet)
+{
+  unsigned int n = rnd(pieces_max + 1), i;
+  size_t len = 0;
+
+  buf[0] = '\0';
+  for (i = 0; i < n; i++) {
+    const char *p = pieces[rnd(alphabet)];
+    size_t l = strlen(p);
+
+    if (len + l + 1 > size)
+      break;
+    memcpy(buf + len, p, l + 1);
+    len += l;
+  }
+}
+
+static void test_utf8_needle_finds_what_the_old_scan_found(void **state)
+{
+  const unsigned int all = sizeof(pieces) / sizeof(pieces[0]);
+  char hay[256], needle[64];
+  int i;
+
+  (void)state;
+  for (i = 0; i < 200000; i++) {
+    const char *want, *got;
+
+    random_text(hay, sizeof(hay), 40, i & 1 ? all : 6);
+    if (i % 3 == 0 && hay[0]) {
+      /* a slice of the text itself, cut at any byte */
+      size_t len = strlen(hay), at = rnd((unsigned int)len), n = 1 + rnd(8);
+
+      if (n > len - at)
+        n = len - at;
+      memcpy(needle, hay + at, n);
+      needle[n] = '\0';
+    } else
+      random_text(needle, sizeof(needle), 4, i & 2 ? all : 6);
+    want = ref_strcasestr(hay, needle);
+    got = casestr(hay, needle);
+    if (want != got)
+      fail_msg("text \"%s\" needle \"%s\": the old scan says %ld, the new %ld",
+               hay, needle, want ? (long)(want - hay) : -1L,
+               got ? (long)(got - hay) : -1L);
+  }
+}
+
+/** CPU milliseconds for @a reps searches of @a needle in @a hay. */
+static double find_ms(const char *hay, const char *needle, int reps)
+{
+  clock_t t0 = clock();
+  int i;
+
+  for (i = 0; i < reps; i++)
+    assert_null(casestr(hay, needle));
+  return (double)(clock() - t0) * 1000.0 / CLOCKS_PER_SEC;
+}
+
+/* #161: the work is proportional to the text, whatever the needle.  The
+ * worst needle for a scan that starts over at every position -- the text
+ * repeated, then one unit that is not there -- must cost about what a
+ * needle whose first unit never matches costs, not its length times that.
+ * Measured as a ratio, so a slow machine or a sanitizer moves both. */
+static void test_utf8_needle_find_is_linear(void **state)
+{
+  enum { TEXT = 64 * 1024, NEEDLE = 375 };
+  char *hay = malloc(TEXT + 1);
+  char worst[NEEDLE + 1], plain[NEEDLE + 2];
+  double t_plain, t_worst;
+  int reps = 1;
+
+  (void)state;
+  assert_non_null(hay);
+  memset(hay, 'a', TEXT);
+  hay[TEXT] = '\0';
+  memset(worst, 'A', NEEDLE - 1);
+  strcpy(worst + NEEDLE - 1, "z");
+  /* A first unit the text never holds, a sequence so no byte scan helps. */
+  memcpy(plain, "\xC3\xA9", 2);
+  memset(plain + 2, 'a', NEEDLE - 2);
+  strcpy(plain + NEEDLE - 1, "z");
+
+  /* Enough repetitions for the clock to see the easy case. */
+  while ((t_plain = find_ms(hay, plain, reps)) < 5.0 && reps < (1 << 20))
+    reps *= 2;
+  t_worst = find_ms(hay, worst, reps);
+  free(hay);
+  if (t_worst > 20.0 * t_plain)
+    fail_msg("worst needle %.1f ms against %.1f ms for the plain one (%d runs): "
+             "the cost grows with the needle", t_worst, t_plain, reps);
+}
+
+/* A needle longer than the matcher holds is refused, not cut. */
+static void test_utf8_needle_too_long(void **state)
+{
+  static struct Utf8Needle nd;
+  char needle[IRCD_UTF8_NEEDLE_MAX + 2];
+
+  (void)state;
+  memset(needle, 'x', IRCD_UTF8_NEEDLE_MAX);
+  needle[IRCD_UTF8_NEEDLE_MAX] = '\0';
+  assert_int_equal(ircd_utf8_needle_init(&nd, needle), 0);
+  needle[IRCD_UTF8_NEEDLE_MAX] = 'x';
+  needle[IRCD_UTF8_NEEDLE_MAX + 1] = '\0';
+  assert_int_equal(ircd_utf8_needle_init(&nd, needle), -1);
 }
 
 static void test_utf8_strcasestr_edges(void **state)
@@ -1086,9 +1313,9 @@ static void test_utf8_strcasestr_edges(void **state)
   const char *hay = "ab\xD0\xBF";
 
   (void)state;
-  assert_ptr_equal(hay, ircd_utf8_strcasestr(hay, ""));
-  assert_ptr_equal(hay + 2, ircd_utf8_strcasestr(hay, "\xD0\x9F"));
-  assert_null(ircd_utf8_strcasestr("", "a"));
+  assert_ptr_equal(hay, casestr(hay, ""));
+  assert_ptr_equal(hay + 2, casestr(hay, "\xD0\x9F"));
+  assert_null(casestr("", "a"));
   assert_misses("ab", "abc");                  /* needle outlasts the text */
   assert_misses("abd", "abc");                 /* mismatch on the last unit */
   /* Truncated and invalid sequences compare as bytes and stop at the NUL. */
@@ -2267,6 +2494,9 @@ int main(void)
         cmocka_unit_test(test_utf8_strcasestr_no_false_hits_from_bytes),
         cmocka_unit_test(test_utf8_strcasestr_ascii_needle_high_bytes),
         cmocka_unit_test(test_utf8_strcasestr_edges),
+        cmocka_unit_test(test_utf8_needle_finds_what_the_old_scan_found),
+        cmocka_unit_test(test_utf8_needle_find_is_linear),
+        cmocka_unit_test(test_utf8_needle_too_long),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

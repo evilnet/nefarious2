@@ -61,7 +61,20 @@ extern size_t ircd_keyvalue_line_len(size_t server_len, size_t viewer_len,
                                      size_t target_len, size_t key_len,
                                      size_t vis_len, size_t value_len);
 extern int ircd_text_mentions(const char* text, const char* nick);
-extern const char* ircd_utf8_strcasestr(const char* hay, const char* needle);
+/** The most units (characters, or stray bytes) a Utf8Needle holds: a
+ * SEARCH text, which one 512-byte server line carries, always fits. */
+#define IRCD_UTF8_NEEDLE_MAX 512
+/** A needle for ircd_utf8_needle_find(), folded once
+ * (ircd_utf8_needle_init()). */
+struct Utf8Needle {
+  unsigned int len;                         /**< units */
+  size_t bytes;                             /**< bytes a match spans */
+  unsigned int unit[IRCD_UTF8_NEEDLE_MAX];  /**< the folded units */
+  unsigned short fail[IRCD_UTF8_NEEDLE_MAX];/**< longest border of unit[0..i] */
+};
+extern int ircd_utf8_needle_init(struct Utf8Needle* nd, const char* needle);
+extern const char* ircd_utf8_needle_find(const struct Utf8Needle* nd,
+                                         const char* hay);
 extern char* ircd_json_escape(char* dst, size_t dstlen, const char* src);
 extern char* ircd_tag_value_unescape(char* s);
 extern int         unique_name_vector(char* names, char token,
