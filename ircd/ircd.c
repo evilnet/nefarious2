@@ -831,8 +831,8 @@ void metadata_purge_restart_timer(void)
 
 /** Periodic callback to purge expired metadata.
  * Runs at METADATA_PURGE_FREQUENCY to enforce METADATA_CACHE_TTL on
- * cache rows and METADATA_TOMBSTONE_TTL on tombstones (the CLEAR floor
- * included).  Each purge checks its own setting inside
+ * cache rows and METADATA_TOMBSTONE_TTL (never less than STALE_AFTER) on
+ * tombstones (the CLEAR floor included).  Each purge checks its own setting inside
  * metadata_account_purge_expired(): a cache TTL of 0 must not keep the
  * tombstones forever.
  * Era-2 note: the cache-row half reclaims only pre-era-2 legacy TTL rows

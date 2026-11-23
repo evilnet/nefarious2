@@ -1445,7 +1445,7 @@ metadata_prereg_cmocka: $(METADATA_PREREG_CMOCKA_OBJS)
 # test_stub.o supplies log_write; the rest of the ircd is the test's.
 METADATA_STORE_CMOCKA_OBJS = metadata_store_cmocka.o test_stub.o ../metadata.o \
 	../metadata_lww.o ../metadata_prereg.o ../db_casefold.o ../ircd_compress.o \
-	../ircd_string.o ../ircd_snprintf.o ../ircd_alloc.o fake_db.o
+	../ircd_string.o ../ircd_snprintf.o ../ircd_alloc.o ../stale.o fake_db.o
 metadata_store_cmocka: $(METADATA_STORE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--wrap=db_env_open -Wl,--wrap=db_iter_next $(METADATA_STORE_CMOCKA_OBJS) $(CMOCKA_LIBS) $(ZSTD_LIBS)
 

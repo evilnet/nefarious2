@@ -9,6 +9,10 @@
  *  - metadata_account_purge_expired(): each purge it runs is governed by
  *    its own setting -- the tombstones by METADATA_TOMBSTONE_TTL, whatever
  *    METADATA_CACHE_TTL says.
+ *  - the tombstones and the CLEAR floor live at least STALE_AFTER (the
+ *    stale-data limit, stale_lifetime()) whatever METADATA_TOMBSTONE_TTL
+ *    says, so a server back within the limit can still be told of the
+ *    deletions it missed; METADATA_TOMBSTONE_TTL 0 still keeps them.
  *
  * metadata_lmdb_init() opens its environment with db_env_open(), which
  * the fake refuses (it has no on-disk env): the link wraps it
@@ -40,6 +44,7 @@
 #include "metadata.h"
 #include "metadata_lww.h"
 #include "metadata_sync.h"
+#include "stale.h"
 
 /* ------------------------------------------------------------------ */
 /* The settings and the clock                                          */
@@ -48,6 +53,7 @@
 time_t CurrentTime = 1700000000;
 static int cache_ttl;             /**< METADATA_CACHE_TTL */
 static int tombstone_ttl;         /**< METADATA_TOMBSTONE_TTL */
+static int stale_after;           /**< STALE_AFTER */
 
 int feature_int(enum Feature feat)
 {
@@ -60,6 +66,9 @@ int feature_int(enum Feature feat)
 }
 
 int feature_bool(enum Feature feat) { return 0; }
+
+/* ircd_features.c's accessor: the setting, clamped as it is there. */
+time_t stale_limit(void) { return stale_limit_clamp(stale_after); }
 
 /* ------------------------------------------------------------------ */
 /* The store                                                           */
@@ -159,6 +168,8 @@ static int setup(void **state)
 {
   cache_ttl = 0;
   tombstone_ttl = 0;
+  stale_after = 60;   /* the smallest limit; the cases below that need
+                       * another set it */
   env = NULL;
   assert_int_equal(metadata_lmdb_init("unused"), 0);
   assert_non_null(env);
@@ -347,6 +358,93 @@ static void cache_rows_go_by_the_cache_ttl(void **state)
   assert_int_equal(fake_db_rows(md), 1);
 }
 
+/* ------------------------------------------------------------------ */
+/* STALE_AFTER: the tombstones and the floor live at least the limit    */
+/* ------------------------------------------------------------------ */
+
+#define DAY 86400
+
+/** A tombstone younger than the limit is kept, though older than a
+ * shorter METADATA_TOMBSTONE_TTL; one older than both is purged. */
+static void a_tombstone_lives_at_least_the_limit(void **state)
+{
+  struct db_cf *clock = cf_named("metadata_clock");
+
+  tombstone_ttl = 3600;
+  stale_after = 14 * DAY;
+  put_clock("kim", "avatar", (uint64_t)(CurrentTime - 7200) * 1000, 1);
+  put_clock("kim", "url", (uint64_t)(CurrentTime - 13 * DAY) * 1000, 1);
+  put_clock("kim", "$cleared", (uint64_t)(CurrentTime - 13 * DAY) * 1000, 1);
+  put_clock("kim", "bio", (uint64_t)(CurrentTime - 15 * DAY) * 1000, 1);
+  put_clock("kim", "$x", (uint64_t)(CurrentTime - 15 * DAY) * 1000, 1);
+  assert_int_equal(metadata_account_purge_expired(), 2);
+  assert_int_equal(fake_db_rows(clock), 3);
+}
+
+/** A METADATA_TOMBSTONE_TTL longer than the limit is kept as it is. */
+static void a_longer_tombstone_ttl_is_kept(void **state)
+{
+  struct db_cf *clock = cf_named("metadata_clock");
+
+  tombstone_ttl = 30 * DAY;
+  stale_after = 14 * DAY;
+  put_clock("lee", "avatar", (uint64_t)(CurrentTime - 20 * DAY) * 1000, 1);
+  put_clock("lee", "url", (uint64_t)(CurrentTime - 31 * DAY) * 1000, 1);
+  assert_int_equal(metadata_account_purge_expired(), 1);
+  assert_int_equal(fake_db_rows(clock), 1);
+}
+
+/** METADATA_TOMBSTONE_TTL 0 still keeps them all, whatever the limit. */
+static void tombstone_ttl_0_keeps_them_past_the_limit(void **state)
+{
+  struct db_cf *clock = cf_named("metadata_clock");
+
+  tombstone_ttl = 0;
+  stale_after = 60;
+  put_clock("max", "avatar", (uint64_t)(CurrentTime - 100 * DAY) * 1000, 1);
+  assert_int_equal(metadata_account_purge_expired(), 0);
+  assert_int_equal(fake_db_rows(clock), 1);
+}
+
+/** A limit set below a minute is read as a minute. */
+static void a_limit_below_a_minute_is_a_minute(void **state)
+{
+  struct db_cf *clock = cf_named("metadata_clock");
+
+  tombstone_ttl = 1;
+  stale_after = 1;
+  put_clock("ned", "avatar", (uint64_t)(CurrentTime - 30) * 1000, 1);
+  put_clock("ned", "url", (uint64_t)(CurrentTime - 61) * 1000, 1);
+  assert_int_equal(metadata_account_purge_expired(), 1);
+  assert_int_equal(fake_db_rows(clock), 1);
+}
+
+/** The CLEAR floor is in force for as long as its tombstone lives: past a
+ * shorter METADATA_TOMBSTONE_TTL while younger than the limit, and it
+ * still turns an older live write into a deletion; past both, neither. */
+static void the_clear_floor_lives_at_least_the_limit(void **state)
+{
+  struct md_stamp floor;
+  struct md_version in;
+
+  tombstone_ttl = 3600;
+  stale_after = 14 * DAY;
+  put_clock("oz", "$cleared", (uint64_t)(CurrentTime - 13 * DAY) * 1000, 1);
+  assert_true(metadata_account_floor_in_force("oz"));
+  memset(&in, 0, sizeof(in));
+  in.st.ms = (uint64_t)(CurrentTime - 20 * DAY) * 1000;
+  in.st.node = 2;
+  assert_true(metadata_floor_converts("oz", "avatar", &in, &floor));
+
+  put_clock("pat", "$cleared", (uint64_t)(CurrentTime - 15 * DAY) * 1000, 1);
+  assert_false(metadata_account_floor_in_force("pat"));
+  assert_false(metadata_floor_converts("pat", "avatar", &in, &floor));
+
+  /* METADATA_TOMBSTONE_TTL 0: for ever. */
+  tombstone_ttl = 0;
+  assert_true(metadata_account_floor_in_force("pat"));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -362,6 +460,11 @@ int main(void)
     cmocka_unit_test_setup_teardown(tombstones_are_purged_with_the_cache_expiry_off, setup, teardown),
     cmocka_unit_test_setup_teardown(tombstone_ttl_0_keeps_them, setup, teardown),
     cmocka_unit_test_setup_teardown(cache_rows_go_by_the_cache_ttl, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_tombstone_lives_at_least_the_limit, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_longer_tombstone_ttl_is_kept, setup, teardown),
+    cmocka_unit_test_setup_teardown(tombstone_ttl_0_keeps_them_past_the_limit, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_limit_below_a_minute_is_a_minute, setup, teardown),
+    cmocka_unit_test_setup_teardown(the_clear_floor_lives_at_least_the_limit, setup, teardown),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

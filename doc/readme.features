@@ -2353,6 +2353,19 @@ FAKELAG_ACCOUNT_TIME
 The window, in seconds, over which an account may draw at most
 FAKELAG_BORROW (1 to 3600).
 
+METADATA_TOMBSTONE_TTL
+ * Type: integer
+ * Default: 2592000
+
+How long, in seconds, a deleted metadata key's deletion record (and an
+account's record of its last METADATA CLEAR) is kept before it is
+purged.  The default is 30 days.  The record is what stops another
+server, one that missed the deletion, from bringing the old value back
+when it relinks.  The lifetime used is never shorter than STALE_AFTER: a
+shorter value here is read as STALE_AFTER, so a server back within that
+limit can still be told of every deletion it missed.  0 keeps the
+records for ever.
+
 STALE_AFTER
  * Type: integer
  * Default: 1209600
@@ -2363,6 +2376,11 @@ about an absent server is kept for ever: once it has been gone longer
 than this, the rest of the network forgets it, and the state it stored
 before it left (history, metadata) is stale.  Within the limit the
 other servers keep what a returning server needs to catch up.
+
+This server uses it for:
+
+ * Deletion records: metadata deletion records are kept at least this
+   long, whatever METADATA_TOMBSTONE_TTL says.
 
 Every server of a network should use the same value: a server that
 forgets sooner than its peers can answer a returning server with less

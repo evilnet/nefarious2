@@ -58,6 +58,7 @@
 #include "s_stats.h"
 #include "s_user.h"
 #include "send.h"
+#include "stale.h"
 #include "struct.h"
 
 #include <limits.h>
@@ -1506,24 +1507,36 @@ void metadata_channel_load(struct Channel *chptr)
   free_entry_list(list);
 }
 
-/** Delete metadata_clock_cf tombstones ("D" rows) older than
- * FEAT_METADATA_TOMBSTONE_TTL: a tombstone's job is to beat a stale
+/** How long a tombstone (the CLEAR floor included) lives, in seconds:
+ * METADATA_TOMBSTONE_TTL, never less than the stale-data limit
+ * (STALE_AFTER), so a server back within the limit can still be told of
+ * every deletion it missed.  0: for ever (METADATA_TOMBSTONE_TTL 0 or
+ * less). */
+static time_t tombstone_lifetime(void)
+{
+  return stale_lifetime((time_t)feature_int(FEAT_METADATA_TOMBSTONE_TTL),
+                        stale_limit());
+}
+
+/** Delete metadata_clock_cf tombstones ("D" rows) older than their
+ * lifetime (tombstone_lifetime()): a tombstone's job is to beat a stale
  * re-sync of the value it replaced, and that job is done once no peer
- * can plausibly still be offering the old value.  A tombstone's value
- * row is already gone (metadata_write_versioned / metadata_account_clear
- * never leave one behind), so this only ever deletes from
- * metadata_clock_cf.
+ * can plausibly still be offering the old value -- a peer away longer
+ * than the stale-data limit treats what it stored as stale.  A
+ * tombstone's value row is already gone (metadata_write_versioned /
+ * metadata_account_clear never leave one behind), so this only ever
+ * deletes from metadata_clock_cf.
  * @return Number of tombstones purged, or -1 on error.
  */
 static int metadata_account_purge_old_tombstones(void)
 {
   struct db_iter *it;
   struct db_writebatch *wb;
-  int tombstone_ttl;
+  time_t tombstone_ttl;
   int purged = 0;
   int rc;
 
-  tombstone_ttl = feature_int(FEAT_METADATA_TOMBSTONE_TTL);
+  tombstone_ttl = tombstone_lifetime();
   if (tombstone_ttl <= 0)
     return 0; /* disabled: tombstones live forever */
 
@@ -1571,7 +1584,7 @@ static int metadata_account_purge_old_tombstones(void)
 
 /** Purge expired metadata entries from LMDB.
  * Called periodically to enforce METADATA_CACHE_TTL (and, since W4,
- * METADATA_TOMBSTONE_TTL).
+ * METADATA_TOMBSTONE_TTL, never less than STALE_AFTER).
  * LEGACY-AGER ONLY as of era-2 (P0-P2; writer survey 2026-07-25): no live
  * code path mints new TTL-stamped rows — every reachable non-NULL write is
  * metadata_account_set_permanent (ts=0). This sweep exists solely to
@@ -2556,11 +2569,11 @@ void metadata_account_floor_raise(const char *account, const struct md_stamp *tc
               "metadata: could not record the CLEAR floor of %s", account);
 }
 
-/** The floor's life: the tombstones' (METADATA_TOMBSTONE_TTL; 0 or less:
- * forever, as the purge reads it). */
+/** The floor's life: the tombstones' (tombstone_lifetime(); 0: forever,
+ * as the purge reads it). */
 static uint64_t floor_ttl(void)
 {
-  int ttl = feature_int(FEAT_METADATA_TOMBSTONE_TTL);
+  time_t ttl = tombstone_lifetime();
 
   return ttl > 0 ? (uint64_t)ttl : 0;
 }

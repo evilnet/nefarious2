@@ -352,7 +352,7 @@ extern int metadata_key_clearable(const char *key);
 
 /** The account's CLEAR floor (owner, 2026-11-13): the stamp of its latest
  * CLEAR, kept in its store as an internal tombstone row, purged with the
- * tombstones (METADATA_TOMBSTONE_TTL).
+ * tombstones (METADATA_TOMBSTONE_TTL, never sooner than STALE_AFTER).
  * @return 1 and @a out set when there is one. */
 extern int metadata_account_floor_get(const char *account, struct md_stamp *out);
 

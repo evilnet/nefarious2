@@ -465,7 +465,7 @@ enum Feature {
   FEAT_METADATA_DB_NORDAHEAD,
   FEAT_METADATA_CACHE_TTL,  /* Expiration TTL - data deleted when expired */
   FEAT_METADATA_PURGE_FREQUENCY,
-  FEAT_METADATA_TOMBSTONE_TTL,  /* seconds a D clock row (tombstone) lives before purge */
+  FEAT_METADATA_TOMBSTONE_TTL,  /* seconds a D clock row (tombstone) lives before purge; never less than STALE_AFTER */
   FEAT_STALE_AFTER,  /* seconds an absent server is remembered; stale_limit() */
 #ifdef USE_ZSTD
   FEAT_COMPRESS_THRESHOLD,

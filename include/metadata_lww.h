@@ -158,7 +158,8 @@ extern int md_notify_vis(const struct md_version *old,
  * held by a server this one did not reach, does not come back.
  *
  * Is @a floor (NULL: none) in force at @a now_s?  It expires with the
- * tombstones (METADATA_TOMBSTONE_TTL, @a ttl_s; 0: never), measured from
+ * tombstones (@a ttl_s: METADATA_TOMBSTONE_TTL, never less than
+ * STALE_AFTER; 0: never), measured from
  * its own time, as the tombstone purge measures them.
  * @return 1 if in force. */
 extern int md_floor_in_force(const struct md_stamp *floor, uint64_t now_s,
