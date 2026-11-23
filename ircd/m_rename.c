@@ -115,6 +115,7 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
                             const char *oldname, const char *newname,
                             const char *reason, time_t expires);
 static struct RelocateTombstone *relocate_tombstone_find(const char *name);
+static int relocate_room_for(struct Client *sptr, const char *oldname);
 static void relocate_tombstone_renamed(const char *oldname,
                                        struct Channel *chptr);
 static void relocate_target_renamed(const char *oldname, const char *newname,
@@ -547,6 +548,12 @@ void pending_rename_complete(struct PendingRename *pr)
    * pr->newname rather than chptr->chname. */
   if (rename_is_consent()) {
     time_t expires = relocate_local_deadline();
+
+    /* The requester may have used up its share during the round-trip. */
+    if (!relocate_room_for(pr->client, pr->oldname)) {
+      pending_rename_remove(pr);
+      return;
+    }
 
     /* chptr may be gone when this returns (a deadline of "now"). */
     if (relocate_execute(pr->client, chptr, pr->oldname, pr->newname,
@@ -1185,6 +1192,13 @@ struct RelocateTombstone {
                                          that channel will have (the old
                                          channel's): one of another timestamp
                                          under the name is a stranger's */
+  char issuer[NUMNICKLEN + 1];      /**< Numeric of the user whose relocation
+                                         made the record (a bouncer alias's
+                                         primary), for the bound on one
+                                         user's relocations in grace
+                                         (relocate_room_for()).  Empty for a
+                                         record built from a burst
+                                         announcement or a crossing's loser */
 };
 
 /** Global tombstone list. */
@@ -1194,6 +1208,40 @@ static void relocate_tombstone_expire_cb(struct Event *ev);
 static void relocate_tombstone_sweep(struct RelocateTombstone *ts);
 static void relocate_tombstone_end(struct RelocateTombstone *ts, int dissolve);
 static void relocate_withdraw_redirect(struct Channel *chptr);
+
+/** May @a sptr, a local user, make one more relocation?  Its own
+ * relocations in grace are bounded by MAXCHANNELS -- as many channels as
+ * it can be in, each relocated once -- and every record this server holds,
+ * a peer's included, by RELOCATE_MAX_RECORDS (relocate_room()).  When it
+ * may not, the refusal is sent for @a oldname.  Only a relocation made
+ * here is judged: one from another server is always applied.
+ * @param[in] sptr The requester (an alias counts as its primary, the
+ *                 issuer relocate_execute() records).
+ * @param[in] oldname The channel to be relocated, for the FAIL.
+ * @return 1 when it may, 0 when refused.
+ */
+static int relocate_room_for(struct Client *sptr, const char *oldname)
+{
+  struct RelocateTombstone *ts;
+  struct Client *issuer = sptr;
+  char key[NUMNICKLEN + 1];
+  int records = 0, mine = 0;
+
+  if (IsUser(issuer) && IsBouncerAlias(issuer) && cli_alias_primary(issuer))
+    issuer = cli_alias_primary(issuer);
+  ircd_snprintf(0, key, sizeof(key), "%s%s", NumNick(issuer));
+  for (ts = relocate_tombstones; ts; ts = ts->next) {
+    records++;
+    if (0 == strcmp(ts->issuer, key))
+      mine++;
+  }
+  if (relocate_room(records, mine, feature_int(FEAT_MAXCHANNELSPERUSER))
+      == RELOCATE_ROOM_OK)
+    return 1;
+  send_fail(sptr, "RENAME", "TEMPORARILY_UNAVAILABLE", oldname,
+            "Too many relocations in progress, try again later");
+  return 0;
+}
 
 /** Find a record by its (old) channel name, case-insensitively -- any
  * record, one that is still waiting for its channel included.  For the
@@ -2693,6 +2741,8 @@ static int relocate_execute(struct Client *sptr, struct Channel *chptr,
   if (ts) {
     ts->target_ts = newchan->creationtime;
     ircd_strncpy(ts->issued, newname_buf, sizeof(ts->issued));
+    if (IsUser(sptr))
+      ircd_snprintf(0, ts->issuer, sizeof(ts->issuer), "%s%s", NumNick(sptr));
   }
 
   /* A tombstone that pointed at oldname must now point at newname_buf --
@@ -4119,6 +4169,12 @@ int m_rename(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       return 0;
     }
   }
+
+  /* A relocation keeps a record on every server for its grace: refuse one
+   * past the bounds on them before anything is asked or moved (a
+   * registered channel's is judged again when services answer). */
+  if (rename_is_consent() && !relocate_room_for(sptr, oldname))
+    return 0;
 
   /* Registered channels (+R): authority is the channel's founder/access list,
    * which lives in services, not here.  We must ask services.

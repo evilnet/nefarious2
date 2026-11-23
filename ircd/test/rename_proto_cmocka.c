@@ -974,9 +974,32 @@ static void announced_timestamp_newer_than_ours_is_another_channel(void **state)
   assert_false(relocate_announce_ts_matches(500000, 0));
 }
 
+/* A relocation is made only while there is room for its record: under its
+ * issuer's bound and under the bound on all records this server holds. */
+static void relocation_room_bounds_the_issuer_and_the_records(void **state)
+{
+  (void)state;
+  assert_int_equal(relocate_room(0, 0, 20), RELOCATE_ROOM_OK);
+  assert_int_equal(relocate_room(RELOCATE_MAX_RECORDS - 1, 19, 20),
+                   RELOCATE_ROOM_OK);
+  /* the issuer's own: at its bound, refused, however few records there are */
+  assert_int_equal(relocate_room(20, 20, 20), RELOCATE_ROOM_ISSUER_FULL);
+  assert_int_equal(relocate_room(3, 1, 1), RELOCATE_ROOM_ISSUER_FULL);
+  /* every record here, whoever made it (a peer's included) */
+  assert_int_equal(relocate_room(RELOCATE_MAX_RECORDS, 0, 20),
+                   RELOCATE_ROOM_FULL);
+  assert_int_equal(relocate_room(RELOCATE_MAX_RECORDS + 7, 0, 20),
+                   RELOCATE_ROOM_FULL);
+  /* no issuer bound (a bound of 0 or less): only the records' */
+  assert_int_equal(relocate_room(10, 50, 0), RELOCATE_ROOM_OK);
+  assert_int_equal(relocate_room(RELOCATE_MAX_RECORDS, 50, 0),
+                   RELOCATE_ROOM_FULL);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test(relocation_room_bounds_the_issuer_and_the_records),
     cmocka_unit_test(format_two_character_numeric),
     cmocka_unit_test(format_one_character_numeric),
     cmocka_unit_test(format_largest_value_fits_the_documented_buffer),

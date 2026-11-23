@@ -390,3 +390,12 @@ relocate_announce_decide(const struct RelocateAnnounceFacts *facts)
   return facts->same_target ? RELOCATE_ANNOUNCE_MERGE
                             : RELOCATE_ANNOUNCE_CROSS;
 }
+
+enum RelocateRoom relocate_room(int records, int by_issuer, int issuer_max)
+{
+  if (issuer_max > 0 && by_issuer >= issuer_max)
+    return RELOCATE_ROOM_ISSUER_FULL;
+  if (records >= RELOCATE_MAX_RECORDS)
+    return RELOCATE_ROOM_FULL;
+  return RELOCATE_ROOM_OK;
+}

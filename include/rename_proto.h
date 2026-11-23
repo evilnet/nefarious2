@@ -479,4 +479,28 @@ enum RelocateAnnounceVerdict {
 extern enum RelocateAnnounceVerdict
 relocate_announce_decide(const struct RelocateAnnounceFacts *facts);
 
+/** The most relocation records (tombstones, and records waiting for their
+ * channel) a server keeps before it refuses to make another relocation of
+ * its own.  Every server holds every relocation's record for its grace and
+ * looks them up on every JOIN, so their number is bounded.  A relocation
+ * from another server is applied whatever the count: refusing it would
+ * leave this server out of step with the rest of the network. */
+#define RELOCATE_MAX_RECORDS 1000
+
+/** May a local user make one more relocation? */
+enum RelocateRoom {
+  RELOCATE_ROOM_OK,             /**< Yes */
+  RELOCATE_ROOM_ISSUER_FULL,    /**< The user has its share in grace already */
+  RELOCATE_ROOM_FULL            /**< This server holds RELOCATE_MAX_RECORDS */
+};
+
+/** Decide whether a local user may make one more relocation.
+ * @param[in] records Relocation records this server holds, from anyone.
+ * @param[in] by_issuer Those this user made.
+ * @param[in] issuer_max A user's bound (MAXCHANNELS); 0 or less: none.
+ * @return The verdict.
+ */
+extern enum RelocateRoom relocate_room(int records, int by_issuer,
+                                       int issuer_max);
+
 #endif /* INCLUDED_rename_proto_h */

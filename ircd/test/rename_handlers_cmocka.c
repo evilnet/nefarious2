@@ -271,6 +271,7 @@ static int feat_rename_consent;
 static int feat_channellen;
 static int feat_utf8_only;
 static int feat_relocate_grace;
+static int feat_maxchannels;
 
 /* --- timers: recorded, fired by hand --- */
 
@@ -376,6 +377,7 @@ static int world_setup(void **state)
   feat_channellen = CHANNELLEN;
   feat_utf8_only = 0;
   feat_relocate_grace = 900;
+  feat_maxchannels = 20;
   CurrentTime = 1000000;
   TSoffset = 0;
   return 0;
@@ -464,6 +466,7 @@ int feature_int(enum Feature feat)
   switch (feat) {
   case FEAT_CHANNELLEN: return feat_channellen;
   case FEAT_RELOCATE_GRACE: return feat_relocate_grace;
+  case FEAT_MAXCHANNELSPERUSER: return feat_maxchannels;
   default: return 0;
   }
 }
@@ -3077,6 +3080,105 @@ static void relocation_carries_its_deadline(void **state)
   /* armed for the same instant on this server's own clock */
   assert_int_equal(timers_at(1000900), 1);
   assert_non_null(strstr(sent_to(bob, 0), "this channel closes in 15 minutes."));
+}
+
+/* One user's relocations in their grace are bounded by MAXCHANNELS: a
+ * relocation past it is refused as busy -- nothing is moved, no record is
+ * kept, no RN goes out -- while another user's goes through, and the user
+ * may relocate again once one of theirs has dissolved.  A chain (the
+ * issuer moves with the channel and relocates it again) counts each
+ * step. */
+static void relocations_per_issuer_are_bounded(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  struct Client *bob = user_on(&me, "bob", "AAC");
+  (void)state;
+
+  feat_rename_consent = 1;
+  feat_maxchannels = 2;
+  plain_channel("#a1", alice);
+  plain_channel("#a2", alice);
+  plain_channel("#b1", bob);
+
+  client_rename(alice, "#a1", "#n1", "");
+  client_rename(alice, "#n1", "#n2", "");       /* the chain: alice is in #n1 */
+  assert_int_equal(sent_count_to(peer), 2);
+  forget();
+
+  client_rename(alice, "#a2", "#n3", "");
+  assert_string_equal(sent_to(alice, 0),
+                      "FAIL RENAME TEMPORARILY_UNAVAILABLE #a2 :Too many "
+                      "relocations in progress, try again later");
+  assert_int_equal(sent_count_to(peer), 0);
+  assert_null(channel_named("#n3"));
+  assert_non_null(member_of(channel_named("#a2"), alice));
+  assert_int_equal(timers_at(1000900), 2);      /* no third record */
+
+  client_rename(bob, "#b1", "#m1", "");
+  assert_string_equal(sent_to(peer, 0), "ACAAC RN #b1 #m1 C 1000900 :");
+  forget();
+
+  advance(900);                                 /* alice's two dissolve */
+  forget();
+  client_rename(alice, "#a2", "#n3", "");
+  assert_string_equal(sent_to(peer, 0), "ACAAB RN #a2 #n3 C 1001800 :");
+}
+
+/* A registered channel's relocation is refused before services are asked
+ * when its issuer is at the bound, and again when the approval comes back
+ * after the issuer reached the bound meanwhile. */
+static void relocations_per_issuer_are_bounded_through_services(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *x3 = linked("x3.services", "AX", "sr");
+  struct Client *alice = user_on(&me, "alice", "AAB");
+  char cookie[64];
+  (void)state;
+
+  feat_rename_consent = 1;
+  feat_maxchannels = 1;
+  registered_channel("#reg", alice);
+  plain_channel("#a1", alice);
+  registered_channel("#reg2", alice);
+
+  client_rename(alice, "#reg", "#new", "why");  /* asked: alice has none yet */
+  snprintf(cookie, sizeof(cookie), "%s", cookie_of(sent_to(x3, 0)));
+  client_rename(alice, "#a1", "#n1", "");       /* her one, meanwhile */
+  forget();
+
+  assert_int_equal(account_line(x3, x3, 3, cookie, "A", "RENAME"), 1);
+  assert_string_equal(sent_to(alice, 0),
+                      "FAIL RENAME TEMPORARILY_UNAVAILABLE #reg :Too many "
+                      "relocations in progress, try again later");
+  assert_int_equal(sent_count_to(peer), 0);
+  assert_null(channel_named("#new"));
+  forget();
+
+  client_rename(alice, "#reg2", "#new2", "");   /* not even asked */
+  assert_string_equal(sent_to(alice, 0),
+                      "FAIL RENAME TEMPORARILY_UNAVAILABLE #reg2 :Too many "
+                      "relocations in progress, try again later");
+  assert_int_equal(sent_count_to(x3), 0);
+}
+
+/* A relocation that comes from another server is applied whatever this
+ * server's bounds say: its issuer's server judged it, and refusing it here
+ * would split the network over the channel. */
+static void relocation_from_a_peer_is_not_bounded_here(void **state)
+{
+  struct Client *peer = linked("peer.example", "Bj", "v");
+  struct Client *bob = user_on(peer, "bob", "AAC");
+  (void)state;
+
+  feat_maxchannels = 1;
+  channel_at("#o1", 500000, bob);
+  channel_at("#o2", 500000, bob);
+  server_relocate(peer, bob, "#o1", "#p1", "1000900", "");
+  server_relocate(peer, bob, "#o2", "#p2", "1000900", "");
+  assert_non_null(channel_named("#p1"));
+  assert_non_null(channel_named("#p2"));
+  assert_int_equal(timers_at(1000900), 2);
 }
 
 /* An empty reason is still sent: the trailing parameter is what makes the
@@ -7419,6 +7521,9 @@ int main(void)
     T(same_relocation_twice_after_the_target_was_renamed),
     T(same_relocation_twice_across_a_chain_in_either_order),
     T(crossing_winner_made_after_a_timestamp_correction),
+    T(relocations_per_issuer_are_bounded),
+    T(relocations_per_issuer_are_bounded_through_services),
+    T(relocation_from_a_peer_is_not_bounded_here),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
