@@ -385,6 +385,45 @@ int main(void)
     feat_host_hiding_style = 0;
   }
 
+  /* An extended ban whose mask is nick!user@host (~q, ~n) matches a user
+   * only when both parts match, the host part as a plain ban's does: the
+   * host name, or the address for an address mask.  (The host part was
+   * ignored: "~q:*!*@some.host" silenced everyone.) */
+  {
+    static const struct { const char *ban; const char *except; int silenced; } cases[] = {
+      { "~q:*!*@other.host",      NULL, 0 },   /* another host */
+      { "~q:*!*@u.host",          NULL, 1 },
+      { "~q:*!*@*.host",          NULL, 1 },
+      { "~q:nobody!*@*",          NULL, 0 },   /* another nick */
+      { "~q:nobody!*@u.host",     NULL, 0 },
+      { "~q:u!*@u.host",          NULL, 1 },
+      { "~q:u!*@other.host",      NULL, 0 },
+      { "~q:*!*@10.0.0.0/8",      NULL, 1 },   /* the address */
+      { "~q:*!*@192.168.0.0/16",  NULL, 0 },
+      { "~q:*!*@u.host", "~q:*!*@other.host", 1 },  /* an exception for another host */
+      { "~q:*!*@u.host", "~q:*!*@u.host",     0 },
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+      struct fake_client u;
+      struct Channel *ch = chan_new("#xb");
+      struct Membership *m;
+
+      user_init(&u, "u", "u.host", NULL);
+      CHECK(ircd_aton(&cli_ip(&u.cli), "10.1.2.3"), "the address is set", "");
+      m = join(ch, &u, 0);
+      add_ban(&ch->banlist, cases[i].ban);
+      if (cases[i].except) {
+        add_ban(&ch->exceptlist, cases[i].except);
+        if (ch->exceptlist)
+          ch->exceptlist->flags |= BAN_EXCEPTION;
+      }
+      CHECK((SPEAKS(m) ? 0 : 1) == cases[i].silenced,
+            cases[i].silenced ? "silenced by" : "not silenced by", cases[i].ban);
+    }
+  }
+
   printf("%d checks, %d failed\n", checks, failures);
   return failures ? 1 : 0;
 }
