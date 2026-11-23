@@ -85,6 +85,7 @@
 #include "channel.h"
 #include "chathistory_presence.h"
 #include "client.h"
+#include "destruct_event.h"
 #include "hash.h"
 #include "history.h"
 #include "ircd.h"
@@ -524,6 +525,9 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   struct BurstRelay relay;
   struct NetRiderKick *riders = NULL;   /* this BURST's Net Rider KICKs */
   int nriders = 0, riders_max = 0;
+  unsigned int wiped_exmode = 0;        /* our extended modes, at a TS loss */
+  int lost_persist = 0;                 /* our +z went at a TS loss */
+  unsigned int wipe_exmode = ~0u;       /* the extended modes a TS loss takes */
 
   /* A channel's state from a server (its own, or relayed): a BURST from
    * a user would be applied and relayed with the user as its source. */
@@ -730,9 +734,21 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
      * Accepted; keeping them needs an incarnation stamp on the record. */
     history_recv_reset(chptr);
 #endif
+    /* +z is taken only from a BURST that could set it again: mode_parse()
+     * takes +z from a server only while that server is in its netburst,
+     * or from services.  Every server a netburst's BURST reaches, directly
+     * or relayed, has its source in its netburst, so the winner's +z comes
+     * back below; a BURST sent outside a netburst (the bouncer's mode
+     * BURST) cannot set it, and our +z is left as it is, as it always was.
+     * Whether +z held the channel open is noted before a relocation
+     * tombstone's record takes its own +z off (just below): a channel left
+     * empty without it then needs a destruct event, once the BURST is
+     * taken in. */
+    if (!IsBurst(sptr) && !IsService(sptr))
+      wipe_exmode &= ~EXMODE_PERSIST;
+    lost_persist = !!(chptr->mode.exmode & wipe_exmode & EXMODE_PERSIST);
     /* Our channel of this name lost: a relocation tombstone held for it
-     * is over (its record, the +z the wipe-out below leaves alone, and
-     * its redirect). */
+     * is over (its record, its +z and its redirect). */
     if (chptr->creationtime)
       relocate_tombstone_ts_lost(chptr);
     chptr->creationtime = timestamp;
@@ -741,9 +757,16 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 		 MODEBUF_DEST_CHANNEL | MODEBUF_DEST_NOKEY);
     modebuf_mode(mbuf, MODE_DEL | chptr->mode.mode); /* wipeout modes */
     chptr->mode.mode &= MODE_BURSTADDED | MODE_WASDELJOINS;
-    /* mode.exmode (+H/+P and friends) is deliberately NOT wiped here: a
-     * pre-#114 legacy winner has no letters for the fork-only extended
-     * modes and could not have meant to clear them. */
+    /* The extended modes go with the rest (#168): the BURST's mode string
+     * sets the winner's again, every one of them (channel_modes() bursts
+     * them all).  Kept, they were the loser's on top of the winner's here
+     * and nowhere else, and the next netjoin at equal timestamps spread
+     * them.  Like the classic modes, they are wiped here and on every
+     * other server the BURST reaches, each of which finds its own copy
+     * younger: nothing is sent to any server for it. */
+    wiped_exmode = chptr->mode.exmode & wipe_exmode;
+    modebuf_exmode(mbuf, MODE_DEL | wiped_exmode);
+    chptr->mode.exmode &= ~wiped_exmode;
 
     /* wipeout any limit and keys that are set */
     parse_flags |= (MODE_PARSE_SET | MODE_PARSE_WIPEOUT);
@@ -1037,10 +1060,22 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     } /* switch (*parv[param]) */
   } /* while (param < parc) */
 
+  /* A +H or +P the TS loss took re-decides the receive window (R43), once
+   * the winner's are back: mode_parse() saw only what the BURST set. */
+  if (wiped_exmode)
+    channel_store_modes_changed(chptr, wiped_exmode);
+
+  /* A channel the TS loss took +z off, which the winner's modes, applied
+   * by now, do not hold open either, gets what a -z gets in mode_parse():
+   * when nobody is in it, a destruct event.  Left as it was, nothing would
+   * ever remove it.  A member joining in the meantime cancels it. */
+  if (lost_persist && !(chptr->mode.exmode & EXMODE_PERSIST) && chptr->users == 0)
+    schedule_destruct_event_1m(chptr);
+
   /* The Net Rider KICKs (made only when our TS lost), stored now: under
    * the surviving incarnation, taken above, and after the BURST's modes
-   * are applied, so channel_store_kick() sees the winning side's +P too
-   * (our exmodes are kept at a TS loss, and the BURST adds its own). */
+   * are applied, so channel_store_kick() sees the winning side's +P and
+   * not ours (the TS loss wiped our extended modes). */
 #ifdef USE_ROCKSDB
   {
     int nr;

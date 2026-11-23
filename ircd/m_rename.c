@@ -3752,9 +3752,11 @@ static void relocate_announced(const char *oldname, time_t chan_ts,
  * creation timestamp for its name (ms_burst(), ms_join()): the channel of
  * that name is another server's from here on.  A tombstone held for the
  * losing channel is over, at once and on every server that loses alike:
- * its record is dropped, and so are its two marks, neither of which the
- * wipe-out can be relied on to take -- +z is an extended mode, which both
- * wipe-outs leave alone, and ms_join()'s does not clear a redirect either.
+ * its record is dropped, and so are its two marks: the redirect, which
+ * ms_join()'s wipe-out does not clear, and the +z, which both wipe-outs
+ * also take after this (#168) but which is the record's to withdraw here.
+ * A channel ms_burst() leaves empty without +z is given a destruct event
+ * there, whichever of the two took it.
  * Left on, they would make an ordinary channel a tombstone that nobody
  * will ever dissolve.  The redirect goes only when it is still the
  * record's own.  When the winning channel is itself a tombstone, its BURST

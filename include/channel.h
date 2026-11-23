@@ -688,6 +688,7 @@ extern void modebuf_init(struct ModeBuf *mbuf, struct Client *source,
 			 struct Client *connect, struct Channel *chan,
 			 unsigned int dest);
 extern void modebuf_mode(struct ModeBuf *mbuf, unsigned int mode);
+extern void modebuf_exmode(struct ModeBuf *mbuf, unsigned int mode);
 extern void modebuf_mode_uint(struct ModeBuf *mbuf, unsigned int mode,
 			      unsigned int uint);
 extern void modebuf_mode_string(struct ModeBuf *mbuf, unsigned int mode,

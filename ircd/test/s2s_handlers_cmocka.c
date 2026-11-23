@@ -2,12 +2,12 @@
  * s2s_handlers_cmocka.c - server-to-server handlers against a fake network.
  *
  * Links the REAL handler objects (m_burst.o, m_destruct.o, m_endburst.o,
- * m_svsnick.o, m_svsquit.o, m_topic.o), with numnicks.o,
+ * m_join.o, m_svsnick.o, m_svsquit.o, m_topic.o), with numnicks.o,
  * match.o and the ircd's own printf, so every line asserted below is the
  * line the handler would put on the wire.  What sits underneath the
  * handlers is stubbed: the send layer records instead of sending, the
  * channel table is a list, and mode_parse() / the modebuf only count what
- * a BURST's mode string uses up.
+ * a BURST's mode string uses up and apply its extended modes.
  *
  * Lines reach a handler split the way parse_server() splits them: parv[0]
  * is the source, a parameter starting with ':' takes the rest of the line.
@@ -317,6 +317,24 @@ static int feat_excepts;
 static const char *fake_modes;  /* what modebuf_extract() reports */
 static int ban_invalidations, except_invalidations;
 
+/* What the last flushed modebuf held of the extended modes, and where it
+ * was going: the channel's local members (MODEBUF_DEST_CHANNEL), the
+ * opers (HACK), the servers (MODEBUF_DEST_SERVER). */
+static unsigned int flushed_exrem, flushed_exadd, flushed_dest;
+static int nflushes;
+
+/* channel_store_modes_changed() calls: the extended modes before, and the
+ * channel's when it was called. */
+static int nstore_changed;
+static unsigned int store_changed_old, store_changed_new;
+
+/* schedule_destruct_event_1m() calls. */
+static int destructs_scheduled;
+
+/* The channels a server's JOIN put its user in (joinbuf_join()). */
+static struct Channel *joined[MAXREC];
+static int njoined;
+
 /* --- the source of a line, as parse_server() splits it --- */
 
 #define MAXARGS (MAXPARA + 2)
@@ -382,6 +400,12 @@ static int world_setup(void **state)
   feat_excepts = 0;
   nsasl_linked = 0;
   sasl_linked_by = NULL;
+  flushed_exrem = flushed_exadd = flushed_dest = 0;
+  nflushes = 0;
+  nstore_changed = 0;
+  store_changed_old = store_changed_new = 0;
+  njoined = 0;
+  destructs_scheduled = 0;
 
   memset(&me, 0, sizeof(me));
   memset(&me_con, 0, sizeof(me_con));
@@ -899,9 +923,27 @@ void modebuf_mode_string(struct ModeBuf *mbuf, unsigned int mode,
     MyFree(string);
 }
 
+/* The extended modes a modebuf holds, as the real modebuf_exmode() keeps
+ * them: an add cancels a pending removal and the other way round. */
+void modebuf_exmode(struct ModeBuf *mbuf, unsigned int mode)
+{
+  unsigned int bits = mode & ~(MODE_ADD | MODE_DEL);
+
+  if (mode & MODE_ADD) {
+    mbuf->mb_exrem &= ~bits;
+    mbuf->mb_exadd |= bits;
+  } else {
+    mbuf->mb_exadd &= ~bits;
+    mbuf->mb_exrem |= bits;
+  }
+}
+
 int modebuf_flush(struct ModeBuf *mbuf)
 {
-  (void)mbuf;
+  flushed_exrem = mbuf->mb_exrem;
+  flushed_exadd = mbuf->mb_exadd;
+  flushed_dest = mbuf->mb_dest;
+  nflushes++;
   return 0;
 }
 
@@ -911,18 +953,42 @@ void modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
   strcpy(buf, fake_modes);
 }
 
+/* channel.h's extended modes and their letters, as channel.c's tables
+ * have them (every one of them goes in a BURST: channel_modes()). */
+static const struct { unsigned int flag; char letter; } exmode_letters[] = {
+  { EXMODE_ADMINONLY, 'a' }, { EXMODE_OPERONLY, 'O' },
+  { EXMODE_REGMODERATED, 'M' }, { EXMODE_NONOTICES, 'N' },
+  { EXMODE_PERSIST, 'z' }, { EXMODE_SSLONLY, 'Z' },
+  { EXMODE_NOQUITPARTS, 'Q' }, { EXMODE_NOCTCPS, 'C' },
+  { EXMODE_NOMULTITARG, 'T' }, { EXMODE_NOCOLOR, 'c' },
+  { EXMODE_STRIPCOLOR, 'S' }, { EXMODE_PUBLICHISTORY, 'H' },
+  { EXMODE_NOSTORAGE, 'P' },
+};
+
+static unsigned int exmode_of(char letter)
+{
+  size_t i;
+  for (i = 0; i < sizeof(exmode_letters) / sizeof(exmode_letters[0]); i++)
+    if (exmode_letters[i].letter == letter)
+      return exmode_letters[i].flag;
+  return 0;
+}
+
 /* How many parameters the real mode_parse() takes in a BURST
  * (MODE_PARSE_BURST: one mode string): the string, and one for every
  * letter channel.c's mode_parse() hands a parameter to while adding --
  * the prefixes o h v, the lists b e, the keys k A U, and l L, which
- * take theirs only when added.  The modes themselves are not applied. */
+ * take theirs only when added.  Of the modes themselves only the extended
+ * ones are applied, as the real one applies them with MODE_PARSE_SET: set
+ * on the channel, and the ones it did not have added to the modebuf. */
 int mode_parse(struct ModeBuf *mbuf, struct Client *cptr,
                struct Client *sptr, struct Channel *chptr, int parc,
                char *parv[], unsigned int flags, struct Membership *member)
 {
   const char *p;
   int used = 1, adding = 1;
-  (void)mbuf; (void)cptr; (void)sptr; (void)chptr; (void)flags; (void)member;
+  unsigned int exadd = 0;
+  (void)cptr; (void)member;
 
   for (p = parv[0]; *p; p++) {
     switch (*p) {
@@ -937,9 +1003,31 @@ int mode_parse(struct ModeBuf *mbuf, struct Client *cptr,
       if (used < parc)
         used++;
       break;
+    case 'z':
+      /* channel.c takes +z from a server only while it is in its
+       * netburst, or from services. */
+      if (adding && (IsBurst(sptr) || IsService(sptr)))
+        exadd |= EXMODE_PERSIST;
+      break;
+    default:
+      if (adding)
+        exadd |= exmode_of(*p);
+      break;
     }
   }
+  if (mbuf && (flags & MODE_PARSE_SET)) {
+    if (exadd & ~chptr->mode.exmode)
+      modebuf_exmode(mbuf, MODE_ADD | (exadd & ~chptr->mode.exmode));
+    chptr->mode.exmode |= exadd;
+  }
   return used;
+}
+
+void channel_store_modes_changed(struct Channel *chptr, unsigned int old_exmode)
+{
+  nstore_changed++;
+  store_changed_old = old_exmode;
+  store_changed_new = chptr->mode.exmode;
 }
 
 /* --- for m_topic.o: no storage, everybody may talk --- */
@@ -1153,10 +1241,141 @@ void remove_destruct_event(struct Channel *chptr)
   (void)chptr;
 }
 
+void schedule_destruct_event_1m(struct Channel *chptr)
+{
+  (void)chptr;
+  destructs_scheduled++;
+}
+
 void modebuf_mode_uint(struct ModeBuf *mbuf, unsigned int mode,
                        unsigned int uint)
 {
   (void)mbuf; (void)mode; (void)uint;
+}
+
+/* --- for m_join.o: ms_join() as far as a server's JOIN takes it; the
+ * joinbuf records the channels, and m_join()'s own needs are inert --- */
+
+void joinbuf_init(struct JoinBuf *jbuf, struct Client *source,
+                  struct Client *connect, unsigned int type, char *comment,
+                  time_t create)
+{
+  memset(jbuf, 0, sizeof(*jbuf));
+  jbuf->jb_source = source;
+  jbuf->jb_connect = connect;
+  jbuf->jb_type = type;
+  jbuf->jb_comment = comment;
+  jbuf->jb_create = create;
+}
+
+void joinbuf_join(struct JoinBuf *jbuf, struct Channel *chan,
+                  unsigned int flags)
+{
+  (void)jbuf; (void)flags;
+  assert_true(njoined < MAXREC);
+  joined[njoined++] = chan;
+}
+
+int joinbuf_flush(struct JoinBuf *jbuf)
+{
+  (void)jbuf;
+  return 0;
+}
+
+int joinbuf_load_s2s_msgids(struct Client *cptr, char out[][16], int max)
+{
+  int i;
+  (void)cptr;
+  for (i = 0; i < max; i++)
+    out[i][0] = '\0';
+  return 0;
+}
+
+void remove_user_from_channel(struct Client *sptr, struct Channel *chptr)
+{
+  (void)sptr; (void)chptr;
+}
+
+void bounce_visibility_membership(const char *alias_full, const char *channel,
+                                  int add)
+{
+  (void)alias_full; (void)channel; (void)add;
+}
+
+int check_target_limit(struct Client *sptr, void *target, const char *name,
+                       int created)
+{
+  (void)sptr; (void)target; (void)name; (void)created;
+  return 0;
+}
+
+void del_invite(struct Client *cptr, struct Channel *chptr)
+{
+  (void)cptr; (void)chptr;
+}
+
+void do_names(struct Client *sptr, struct Channel *chptr, int filter)
+{
+  (void)sptr; (void)chptr; (void)filter;
+}
+
+struct Ban *find_ban(struct Client *cptr, struct Ban *banlist, int extbantype,
+                     int level)
+{
+  (void)cptr; (void)banlist; (void)extbantype; (void)level;
+  return NULL;
+}
+
+unsigned int get_client_maxchans(struct Client *acptr)
+{
+  (void)acptr;
+  return 0;
+}
+
+struct Gline *gline_find(char *userhost, unsigned int flags)
+{
+  (void)userhost; (void)flags;
+  return NULL;
+}
+
+int IsInvited(struct Client *cptr, const void *chptr)
+{
+  (void)cptr; (void)chptr;
+  return 0;
+}
+
+int persistence_profile_channels_add(const char *account, const char *profile,
+                                     const char *channel)
+{
+  (void)account; (void)profile; (void)channel;
+  return 0;
+}
+
+int persistence_profile_channels_effective(const char *account,
+                                           const char *profile, char *out,
+                                           size_t out_len)
+{
+  (void)account; (void)profile;
+  if (out_len)
+    out[0] = '\0';
+  return 0;
+}
+
+void relocate_follow(struct Client *cptr, struct Client *sptr,
+                     struct Channel *chptr)
+{
+  (void)cptr; (void)sptr; (void)chptr;
+}
+
+int relocate_join_verdict(struct Channel *chptr)
+{
+  (void)chptr;
+  return 0;
+}
+
+void send_markread_on_join(struct Client *cptr, const char *channel)
+{
+  (void)cptr; (void)channel;
 }
 
 /* ====================================================================
@@ -1566,6 +1785,318 @@ static void test_burst_netride_every_parameter_letter(void **state)
 }
 
 /* ====================================================================
+ * A timestamp loss takes the extended modes too (#168)
+ *
+ * The network: this server (AB) has #x; the BURST comes from AC with
+ * alice in it; AD and AE are our other links.  A link in its netburst
+ * (FLAG_BURST: the BURST is the other end's own) makes this server an end
+ * of the new link; otherwise the BURST was relayed to us.
+ * ==================================================================== */
+
+static struct Client *xa_ac, *xa_ad, *xa_ae;
+
+/** Our #x, created at @a ts with the extended modes @a exmode, and the
+ * links; @a bursting: the BURST comes over a link in its netburst. */
+static struct Channel *exmode_world(time_t ts, unsigned int exmode,
+                                    int bursting)
+{
+  struct Channel *ch;
+
+  xa_ac = linked("leafa.test", "AC", 1);
+  xa_ad = linked("leafb.test", "AD", 0);
+  xa_ae = linked("leafc.test", "AE", 1);
+  if (bursting)
+    SetBurst(xa_ac);
+  remote_user(xa_ac, "alice", "ACAAA");
+  ch = fake_channel("#x");
+  ch->creationtime = ts;
+  ch->mode.exmode = exmode;
+  return ch;
+}
+
+/** How many lines to @a to are server MODEs ("<source> M ..."). */
+static int modes_to(struct Client *to)
+{
+  int i, n = 0;
+  for (i = 0; i < sent_count_to(to); i++)
+    if (strstr(sent_to(to, i), " M "))
+      n++;
+  return n;
+}
+
+/** Nothing went to the BURST's own link, and the other links got the
+ * relayed BURST of #x at @a ts and nothing else. */
+static void assert_only_the_relay(unsigned long ts)
+{
+  assert_int_equal(sent_count_to(xa_ac), 0);
+  assert_burst_lines(xa_ae, "#x", ts);
+  assert_burst_lines(xa_ad, "#x", ts);
+}
+
+/* The loser: every extended mode goes, the winner's come back; the local
+ * members are told of the ones that went (the wipe-out's modebuf). */
+static void test_burst_ts_loss_wipes_exmodes(void **state)
+{
+  struct Channel *ch;
+  (void)state;
+
+  ch = exmode_world(2000000, EXMODE_NOCTCPS | EXMODE_NONOTICES
+                    | EXMODE_PUBLICHISTORY, 1);
+
+  deliver(ms_burst, xa_ac, xa_ac, "#x 999000 +nt ACAAA:o");
+
+  assert_int_equal(ch->creationtime, 999000);
+  assert_int_equal(ch->mode.exmode, 0);
+  assert_int_equal(flushed_exrem, EXMODE_NOCTCPS | EXMODE_NONOTICES
+                   | EXMODE_PUBLICHISTORY);
+  assert_true(flushed_dest & MODEBUF_DEST_CHANNEL);
+  assert_false(flushed_dest & MODEBUF_DEST_SERVER);
+}
+
+static void test_burst_ts_loss_keeps_the_winners_exmodes(void **state)
+{
+  struct Channel *ch;
+  (void)state;
+
+  ch = exmode_world(2000000, EXMODE_NOCTCPS | EXMODE_NONOTICES, 1);
+
+  deliver(ms_burst, xa_ac, xa_ac, "#x 999000 +ntC ACAAA:o");
+
+  assert_int_equal(ch->mode.exmode, EXMODE_NOCTCPS);
+  /* The members see -N, and +C restated with the winner's modes, as the
+   * classic modes are at a TS loss (the wipe-out, then the BURST's). */
+  assert_int_equal(flushed_exrem, EXMODE_NONOTICES);
+  assert_int_equal(flushed_exadd, EXMODE_NOCTCPS);
+}
+
+/* Nothing goes to any server but the relayed BURST: every server that
+ * gets the BURST, directly or relayed, sees its copy is younger and wipes
+ * by itself, as it does the classic modes.  At the end of the new link and
+ * on a server the BURST was relayed to alike. */
+static void test_burst_ts_loss_sends_nothing_but_the_relay(void **state)
+{
+  (void)state;
+
+  exmode_world(2000000, EXMODE_NOCTCPS | EXMODE_NONOTICES
+               | EXMODE_PUBLICHISTORY, 1);
+  deliver(ms_burst, xa_ac, xa_ac, "#x 999000 +ntC ACAAA:o");
+  assert_only_the_relay(999000);
+
+  world_teardown(NULL);
+  world_setup(NULL);
+  exmode_world(2000000, EXMODE_NOCTCPS | EXMODE_NONOTICES, 0);
+  deliver(ms_burst, xa_ac, xa_ac, "#x 999000 +ntC ACAAA:o");
+  assert_only_the_relay(999000);
+}
+
+/* The winner (our copy is older): the loser's mode letters, classic and
+ * extended, are not applied (mode_parse() without a modebuf sets nothing),
+ * and nothing goes to any server but the relay of its members. */
+static void test_burst_ts_win_sends_nothing_but_the_relay(void **state)
+{
+  struct Channel *ch;
+  (void)state;
+
+  ch = exmode_world(999000, EXMODE_NOCTCPS, 1);
+
+  deliver(ms_burst, xa_ac, xa_ac, "#x 2000000 +ntCNH ACAAA:o");
+
+  assert_int_equal(ch->creationtime, 999000);
+  assert_int_equal(ch->mode.exmode, EXMODE_NOCTCPS);
+  assert_only_the_relay(999000);
+}
+
+/* The receive window is decided again for a +P or +H that went (R43):
+ * the channel's modes are the winner's by then. */
+static void test_burst_ts_loss_redecides_the_receive_window(void **state)
+{
+  struct Channel *ch;
+  (void)state;
+
+  ch = exmode_world(2000000, EXMODE_NOSTORAGE, 1);
+
+  deliver(ms_burst, xa_ac, xa_ac, "#x 999000 +nt ACAAA:o");
+
+  assert_int_equal(ch->mode.exmode, 0);
+  assert_true(nstore_changed > 0);
+  assert_int_equal(store_changed_old & EXMODE_NOSTORAGE, EXMODE_NOSTORAGE);
+  assert_int_equal(store_changed_new, 0);
+}
+
+/* Every extended mode: all of ours go and the members are told of each;
+ * a winner that has them all sets them all again. */
+static void test_burst_ts_every_exmode_letter(void **state)
+{
+  struct Channel *ch;
+  unsigned int all = 0;
+  size_t i;
+  (void)state;
+
+  for (i = 0; i < sizeof(exmode_letters) / sizeof(exmode_letters[0]); i++)
+    all |= exmode_letters[i].flag;
+
+  ch = exmode_world(2000000, all, 1);
+  deliver(ms_burst, xa_ac, xa_ac, "#x 999000 +nt ACAAA:o");
+  assert_int_equal(ch->mode.exmode, 0);
+  assert_int_equal(flushed_exrem, all);
+
+  world_teardown(NULL);
+  world_setup(NULL);
+  ch = exmode_world(2000000, all, 1);
+  deliver(ms_burst, xa_ac, xa_ac, "#x 999000 +aOMNzZQCTcSHP ACAAA:o");
+  assert_int_equal(ch->mode.exmode, all);
+  assert_int_equal(flushed_exrem, 0);
+}
+
+/* +z (persist).  A server takes +z only from a server in its netburst,
+ * or from services (channel.c, mode_parse()): every server a netburst's
+ * BURST reaches, directly or relayed, has its source in its netburst, so
+ * a winner's +z always comes back; a BURST sent outside a netburst (the
+ * bouncer's mode BURST) cannot set it.  The wipe-out takes our +z only
+ * from a BURST that could set it again. */
+
+/* A +z channel losing to a +z winner keeps +z and is not scheduled for
+ * destruction: over the new link, and relayed from two hops away. */
+static void test_burst_ts_loss_persist_winner_keeps_it(void **state)
+{
+  struct Channel *ch;
+  struct Client *far;
+  (void)state;
+
+  ch = exmode_world(2000000, EXMODE_PERSIST | EXMODE_NOCTCPS, 1);
+  deliver(ms_burst, xa_ac, xa_ac, "#x 999000 +ntz");
+  assert_int_equal(ch->mode.exmode, EXMODE_PERSIST);
+  assert_int_equal(ch->users, 0);
+  assert_int_equal(destructs_scheduled, 0);
+
+  world_teardown(NULL);
+  world_setup(NULL);
+  ch = exmode_world(2000000, EXMODE_PERSIST | EXMODE_NOCTCPS, 0);
+  far = behind(xa_ac, "far.test", "AF");
+  SetBurst(far);                /* introduced in its netburst ("J") */
+  deliver(ms_burst, xa_ac, far, "#x 999000 +ntz");
+  assert_int_equal(ch->mode.exmode, EXMODE_PERSIST);
+  assert_int_equal(destructs_scheduled, 0);
+}
+
+/* A +z channel losing to a winner without +z ends without it and, empty,
+ * is given the destruct event a -z on an empty channel gets. */
+static void test_burst_ts_loss_persist_empty_channel_destructs(void **state)
+{
+  struct Channel *ch;
+  (void)state;
+
+  ch = exmode_world(2000000, EXMODE_PERSIST | EXMODE_NOCTCPS, 1);
+  deliver(ms_burst, xa_ac, xa_ac, "#x 999000 +nt");
+
+  assert_int_equal(ch->mode.exmode, 0);
+  assert_int_equal(ch->users, 0);
+  assert_int_equal(destructs_scheduled, 1);
+  assert_only_the_relay(999000);
+}
+
+/* ... but not with members. */
+static void test_burst_ts_loss_persist_occupied_not_scheduled(void **state)
+{
+  struct Channel *ch;
+  (void)state;
+
+  ch = exmode_world(2000000, EXMODE_PERSIST, 1);
+  deliver(ms_burst, xa_ac, xa_ac, "#x 999000 +nt ACAAA:o");
+  assert_int_equal(ch->mode.exmode, 0);
+  assert_int_equal(ch->users, 1);
+  assert_int_equal(destructs_scheduled, 0);
+}
+
+/* A BURST outside a netburst, whose source cannot set +z: our +z is left
+ * as it is, whether that BURST shows +z or not, and nothing is scheduled.
+ * Taken, it could not come back, and an empty channel the winner holds
+ * open would be destroyed. */
+static void test_burst_ts_loss_persist_kept_when_the_burst_cannot_set_it(void **state)
+{
+  struct Channel *ch;
+  (void)state;
+
+  ch = exmode_world(2000000, EXMODE_PERSIST | EXMODE_NOCTCPS, 0);
+  deliver(ms_burst, xa_ac, xa_ac, "#x 999000 +ntz");
+  assert_int_equal(ch->mode.exmode, EXMODE_PERSIST);
+  assert_int_equal(flushed_exrem, EXMODE_NOCTCPS);
+  assert_int_equal(destructs_scheduled, 0);
+
+  world_teardown(NULL);
+  world_setup(NULL);
+  ch = exmode_world(2000000, EXMODE_PERSIST | EXMODE_NOCTCPS, 0);
+  deliver(ms_burst, xa_ac, xa_ac, "#x 999000 +nt");
+  assert_int_equal(ch->mode.exmode, EXMODE_PERSIST);
+  assert_int_equal(destructs_scheduled, 0);
+}
+
+/* A JOIN with an older timestamp: ms_join()'s wipe-out takes the
+ * extended modes as well, tells the local members and the opers (HACK(3))
+ * and sends no MODE to any server: each server that gets the JOIN decides
+ * alone. */
+static void test_join_older_ts_wipes_exmodes(void **state)
+{
+  struct Channel *ch;
+  struct Client *alice;
+  (void)state;
+
+  ch = exmode_world(2000000, EXMODE_NOCTCPS | EXMODE_NOSTORAGE, 0);
+  alice = hSeekClient("alice", STAT_USER);
+
+  deliver(ms_join, xa_ac, alice, "#x 999000");
+
+  assert_int_equal(njoined, 1);
+  assert_ptr_equal(joined[0], ch);
+  assert_int_equal(ch->creationtime, 999000);
+  assert_int_equal(ch->mode.exmode, 0);
+  assert_int_equal(flushed_exrem, EXMODE_NOCTCPS | EXMODE_NOSTORAGE);
+  assert_true(flushed_dest & MODEBUF_DEST_CHANNEL);
+  assert_true(flushed_dest & MODEBUF_DEST_HACK3);
+  assert_false(flushed_dest & MODEBUF_DEST_SERVER);
+  assert_true(nstore_changed > 0);
+  assert_int_equal(store_changed_new, 0);
+  assert_int_equal(modes_to(xa_ae) + modes_to(xa_ad) + modes_to(xa_ac), 0);
+}
+
+/* +z stays at a JOIN's wipe-out: nothing in a JOIN can set it again (a
+ * BURST's mode string can, which is why ms_burst() takes it), and it is
+ * services' to set and to take. */
+static void test_join_older_ts_leaves_persist(void **state)
+{
+  struct Channel *ch;
+  struct Client *alice;
+  (void)state;
+
+  ch = exmode_world(2000000, EXMODE_NOCTCPS | EXMODE_PERSIST, 0);
+  alice = hSeekClient("alice", STAT_USER);
+
+  deliver(ms_join, xa_ac, alice, "#x 999000");
+
+  assert_int_equal(ch->creationtime, 999000);
+  assert_int_equal(ch->mode.exmode, EXMODE_PERSIST);
+  assert_int_equal(flushed_exrem, EXMODE_NOCTCPS);
+}
+
+/* The control: a JOIN at the channel's own timestamp into a channel with
+ * members leaves its modes alone. */
+static void test_join_same_ts_keeps_exmodes(void **state)
+{
+  struct Channel *ch;
+  struct Client *alice;
+  (void)state;
+
+  ch = exmode_world(999000, EXMODE_NOCTCPS, 0);
+  add_member(ch, remote_user(xa_ad, "bob", "ADAAA"), 0, 0);
+  alice = hSeekClient("alice", STAT_USER);
+
+  deliver(ms_join, xa_ac, alice, "#x 999000");
+
+  assert_int_equal(ch->mode.exmode, EXMODE_NOCTCPS);
+  assert_int_equal(nflushes, 0);
+}
+
+/* ====================================================================
  * SVSNICK
  * ==================================================================== */
 
@@ -1932,6 +2463,19 @@ int main(void)
     T(test_burst_netride_limit_redirect_key),
     T(test_burst_netride_redirect_other_key_kicks),
     T(test_burst_netride_every_parameter_letter),
+    T(test_burst_ts_loss_wipes_exmodes),
+    T(test_burst_ts_loss_keeps_the_winners_exmodes),
+    T(test_burst_ts_loss_sends_nothing_but_the_relay),
+    T(test_burst_ts_win_sends_nothing_but_the_relay),
+    T(test_burst_ts_loss_redecides_the_receive_window),
+    T(test_burst_ts_every_exmode_letter),
+    T(test_burst_ts_loss_persist_winner_keeps_it),
+    T(test_burst_ts_loss_persist_empty_channel_destructs),
+    T(test_burst_ts_loss_persist_occupied_not_scheduled),
+    T(test_burst_ts_loss_persist_kept_when_the_burst_cannot_set_it),
+    T(test_join_older_ts_wipes_exmodes),
+    T(test_join_older_ts_leaves_persist),
+    T(test_join_same_ts_keeps_exmodes),
     T(test_svsnick_from_services),
     T(test_svsnick_mints_one_event),
     T(test_svsnick_adopts_the_lines_event),

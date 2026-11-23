@@ -628,8 +628,8 @@ int ms_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         time_t old_ts = chptr->creationtime;
 
         /* The channel is wiped below for another timestamp: a relocation
-         * tombstone held for it is over -- its record, and the +z and the
-         * redirect, neither of which this wipe-out takes. */
+         * tombstone held for it is over -- its record, its +z and the
+         * redirect, which this wipe-out does not take. */
         if (old_ts && old_ts != creation)
           relocate_tombstone_ts_lost(chptr);
 
@@ -643,9 +643,18 @@ int ms_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
         modebuf_mode(&mbuf, MODE_DEL | chptr->mode.mode);
         chptr->mode.mode &= MODE_BURSTADDED | MODE_WASDELJOINS;
-        /* mode.exmode (+H/+P and friends) is deliberately NOT wiped here:
-         * a pre-#114 legacy winner has no letters for the fork-only
-         * extended modes and could not have meant to clear them. */
+        /* The extended modes go too (#168), as the classic ones do: every
+         * server the JOIN reaches does this wipe-out on its own, and no
+         * server is told.  All but +z: nothing in a JOIN can set it again
+         * (a BURST's mode string can, so ms_burst() takes it), and it is
+         * services' to set and to take. */
+        if (chptr->mode.exmode & ~EXMODE_PERSIST) {
+          unsigned int old_exmode = chptr->mode.exmode & ~EXMODE_PERSIST;
+
+          modebuf_exmode(&mbuf, MODE_DEL | old_exmode);
+          chptr->mode.exmode &= EXMODE_PERSIST;
+          channel_store_modes_changed(chptr, old_exmode);   /* ±H/±P: R43 */
+        }
 
         if (chptr->mode.limit) {
           modebuf_mode_uint(&mbuf, MODE_DEL | MODE_LIMIT, chptr->mode.limit);
