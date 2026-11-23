@@ -14,6 +14,7 @@
 #include "send.h"
 #include "websocket.h"
 #include "ml_content.h"
+#include "history.h"      /* history_message_is_redacted */
 #include "client.h"       /* cli_name, me */
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -661,6 +662,18 @@ static void paste_unescape_brackets(char *s)
   *w = '\0';
 }
 
+/** Is a paste's text to be withheld?  When its message has been redacted
+ * -- the content stays in the store, the REDACT row hides it from every
+ * read -- and also when the check cannot tell (a store error): fail
+ * closed, as SEARCH hides such a row.
+ * @param[in] target The content's stored target: the history store key.
+ * @param[in] msgid The message.
+ * @return 1 to answer as if the paste did not exist, 0 to serve it. */
+static int paste_withheld(const char *target, const char *msgid)
+{
+  return history_message_is_redacted(target, msgid) != 0;
+}
+
 static int paste_validate_paste_id(const char *paste_id)
 {
   const char *p;
@@ -832,6 +845,14 @@ static void paste_handle_request(struct paste_conn *conn)
   /* Look up content by msgid */
   buf = ml_content_get(msgid, &content_len, &sender, &target);
   if (!buf) {
+    paste_send_error(conn, 404, "Paste not found or expired");
+    return;
+  }
+
+  /* A redacted message's text is not served (nor one whose redaction
+   * cannot be checked): the same answer as a paste that does not exist. */
+  if (paste_withheld(target, msgid)) {
+    MyFree(buf);
     paste_send_error(conn, 404, "Paste not found or expired");
     return;
   }

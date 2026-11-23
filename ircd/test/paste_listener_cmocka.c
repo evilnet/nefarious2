@@ -167,18 +167,41 @@ void send_queued(struct Client *to)
   (void)to;
 }
 
+/* The store: one paste, "m1-secret", of message m1 in #chan, whose
+ * redaction check answers what the case sets. */
+static int redacted_answer;     /* history_message_is_redacted()'s answer */
+static int redacted_asks;
+static char asked_target[64], asked_msgid[64];
+
+int history_message_is_redacted(const char *target, const char *msgid)
+{
+  redacted_asks++;
+  snprintf(asked_target, sizeof(asked_target), "%s", target);
+  snprintf(asked_msgid, sizeof(asked_msgid), "%s", msgid);
+  return redacted_answer;
+}
+
 #ifdef USE_ROCKSDB
 const char *ml_content_paste_lookup(const char *paste_id)
 {
-  (void)paste_id;
-  return NULL;
+  return 0 == strcmp(paste_id, "m1-secret") ? "m1" : NULL;
 }
 
 char *ml_content_get(const char *msgid, size_t *content_len_out,
                      const char **sender_out, const char **target_out)
 {
-  (void)msgid; (void)content_len_out; (void)sender_out; (void)target_out;
-  return NULL;
+  static const char row[] = "n!u@h\0#chan\0first\x1Fsecond";
+  char *buf;
+
+  if (strcmp(msgid, "m1") != 0)
+    return NULL;
+  buf = malloc(sizeof(row));
+  assert_non_null(buf);
+  memcpy(buf, row, sizeof(row));
+  *sender_out = buf;
+  *target_out = buf + strlen(buf) + 1;
+  *content_len_out = sizeof(row) - 1 - (strlen(buf) + 1) - (strlen("#chan") + 1);
+  return buf;
 }
 #endif
 
@@ -479,6 +502,8 @@ static int case_setup(void **state)
   promoted_fd = fed_len = fed_frees = -1;
   promoted_ssl = NULL;
   refuse_promote = refused_promotes = promoted_on_closed = 0;
+  redacted_answer = redacted_asks = 0;
+  asked_target[0] = asked_msgid[0] = '\0';
   return 0;
 }
 
@@ -646,6 +671,82 @@ static void served_request_frees_the_conn_after_its_reply(void **state)
   assert_conn_gone();
 }
 
+/* A paste is withheld when its message is redacted, and when the
+ * redaction check cannot answer (fail closed, as SEARCH hides such a
+ * row).  The check is asked under the content's stored target -- the
+ * history store key -- and the message's msgid. */
+static void paste_withheld_when_redacted_or_unknown(void **state)
+{
+  (void)state;
+  redacted_answer = 0;
+  assert_int_equal(paste_withheld("#chan", "m1"), 0);
+  assert_string_equal(asked_target, "#chan");
+  assert_string_equal(asked_msgid, "m1");
+  redacted_answer = 1;
+  assert_int_equal(paste_withheld("#chan", "m1"), 1);
+  redacted_answer = -1;
+  assert_int_equal(paste_withheld("#chan", "m1"), 1);
+}
+
+#ifdef USE_ROCKSDB
+/** GET the store's one paste; @return the reply. */
+static const char *fetch_paste(void)
+{
+  static char reply[4096];
+  int i;
+
+  paste_open();
+  tls_connect();
+  tls_send("GET /p/m1-secret HTTP/1.1\r\nHost: paste.test\r\n\r\n");
+  for (i = 0; i < 10 && !conn_frees; i++)
+    engine_pass();
+  tls_read_all(reply, sizeof(reply));
+  assert_conn_gone();
+  return reply;
+}
+
+/* A message that is not redacted is served (the case the others are
+ * measured against: the paste and its URL work). */
+static void unredacted_paste_is_served(void **state)
+{
+  const char *reply;
+
+  (void)state;
+  redacted_answer = 0;
+  reply = fetch_paste();
+  assert_non_null(strstr(reply, "HTTP/1.1 200 OK\r\n"));
+  assert_non_null(strstr(reply, "first\nsecond"));
+  assert_int_equal(redacted_asks, 1);
+  assert_string_equal(asked_target, "#chan");
+  assert_string_equal(asked_msgid, "m1");
+}
+
+/* A redacted message's paste answers 404, as a paste that does not
+ * exist: none of its text goes out. */
+static void redacted_paste_is_not_served(void **state)
+{
+  const char *reply;
+
+  (void)state;
+  redacted_answer = 1;
+  reply = fetch_paste();
+  assert_non_null(strstr(reply, "HTTP/1.1 404 Not Found\r\n"));
+  assert_null(strstr(reply, "first"));
+}
+
+/* So does one whose redaction cannot be checked. */
+static void paste_whose_redaction_is_unknown_is_not_served(void **state)
+{
+  const char *reply;
+
+  (void)state;
+  redacted_answer = -1;
+  reply = fetch_paste();
+  assert_non_null(strstr(reply, "HTTP/1.1 404 Not Found\r\n"));
+  assert_null(strstr(reply, "first"));
+}
+#endif
+
 /* A WebSocket upgrade on a paste port becomes an IRC client on the same
  * descriptor and TLS session.  The paste conn is released first, but its
  * buffered request is replayed afterwards, so the husk must live until the
@@ -806,6 +907,20 @@ int main(void)
     cmocka_unit_test_setup_teardown(
       refused_upgrade_on_a_removed_port_closes_it,
       case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(
+      paste_withheld_when_redacted_or_unknown,
+      case_setup, case_teardown),
+#ifdef USE_ROCKSDB
+    cmocka_unit_test_setup_teardown(
+      unredacted_paste_is_served,
+      case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(
+      redacted_paste_is_not_served,
+      case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(
+      paste_whose_redaction_is_unknown_is_not_served,
+      case_setup, case_teardown),
+#endif
   };
 
   return cmocka_run_group_tests(tests, group_setup, group_teardown);
