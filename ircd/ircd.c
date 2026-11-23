@@ -829,10 +829,15 @@ void metadata_purge_restart_timer(void)
             TT_PERIODIC, interval);
 }
 
-/** Periodic callback to purge expired metadata cache entries.
- * Runs at METADATA_PURGE_FREQUENCY to enforce METADATA_CACHE_TTL.
- * Era-2 note: reclaims only pre-era-2 legacy TTL rows — no live writer
- * mints new ones (see metadata_account_purge_expired's header).
+/** Periodic callback to purge expired metadata.
+ * Runs at METADATA_PURGE_FREQUENCY to enforce METADATA_CACHE_TTL on
+ * cache rows and METADATA_TOMBSTONE_TTL on tombstones (the CLEAR floor
+ * included).  Each purge checks its own setting inside
+ * metadata_account_purge_expired(): a cache TTL of 0 must not keep the
+ * tombstones forever.
+ * Era-2 note: the cache-row half reclaims only pre-era-2 legacy TTL rows
+ * — no live writer mints new ones (see metadata_account_purge_expired's
+ * header).
  * @param[in] ev Timer event (ignored).
  */
 static void metadata_purge_callback(struct Event* ev)
@@ -840,10 +845,6 @@ static void metadata_purge_callback(struct Event* ev)
   (void)ev; /* unused */
 
   if (!metadata_lmdb_is_available())
-    return;
-
-  /* TTL of 0 disables purging */
-  if (feature_int(FEAT_METADATA_CACHE_TTL) <= 0)
     return;
 
   metadata_account_purge_expired();

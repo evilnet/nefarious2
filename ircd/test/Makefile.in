@@ -85,6 +85,7 @@ CMOCKA_TESTPROGS = \
 	sessid_index_cmocka \
 	metadata_lww_cmocka \
 	metadata_prereg_cmocka \
+	metadata_store_cmocka \
 	bouncer_record_cmocka \
 	webpush_line_cmocka \
 	websocket_cmocka \
@@ -207,6 +208,7 @@ DEP_SRC = \
 	sessid_index_cmocka.c \
 	metadata_lww_cmocka.c \
 	metadata_prereg_cmocka.c \
+	metadata_store_cmocka.c \
 	bouncer_record_cmocka.c \
 	webhook_eventlog_cmocka.c \
 	webpush_line_cmocka.c \
@@ -1432,6 +1434,16 @@ metadata_prereg_test.o: ../metadata_prereg.c ../../include/metadata_prereg.h ../
 METADATA_PREREG_CMOCKA_OBJS = metadata_prereg_cmocka.o metadata_prereg_test.o metadata_lww_test.o
 metadata_prereg_cmocka: $(METADATA_PREREG_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(METADATA_PREREG_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# metadata_store tests - the metadata store's periodic purge, on the REAL
+# ../metadata.o over the in-memory storage fake (fake_db.o is the whole
+# db_* backend; db_env_open is wrapped to hand out a fake env).
+# test_stub.o supplies log_write; the rest of the ircd is the test's.
+METADATA_STORE_CMOCKA_OBJS = metadata_store_cmocka.o test_stub.o ../metadata.o \
+	../metadata_lww.o ../metadata_prereg.o ../db_casefold.o ../ircd_compress.o \
+	../ircd_string.o ../ircd_snprintf.o ../ircd_alloc.o fake_db.o
+metadata_store_cmocka: $(METADATA_STORE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--wrap=db_env_open $(METADATA_STORE_CMOCKA_OBJS) $(CMOCKA_LIBS) $(ZSTD_LIBS)
 
 # bouncer_record tests - the record decoder calls nothing in the ircd
 bouncer_record_test.o: ../bouncer_record.c ../../include/bouncer_record.h ../../include/bouncer_session.h
