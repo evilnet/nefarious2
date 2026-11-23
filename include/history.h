@@ -383,7 +383,9 @@ extern void history_recv_peers_linked(int n);
  * floor as it is now (history_live_floor_ms(); none: always) -- the absence
  * table lives in memory, so after a restart this is the only sign that a
  * page over a span never received here may be missing a peer's rows.  0
- * for a server that never had a storage peer, and once one is back. */
+ * for a server that never had a storage peer, once one is back, and once
+ * that time is older than the stale-data limit (STALE_AFTER: the peer is
+ * forgotten, as an open absence is). */
 extern int history_recv_peer_missing(void);
 
 /** @a chptr took another incarnation's TS -- it lost its TS in a burst

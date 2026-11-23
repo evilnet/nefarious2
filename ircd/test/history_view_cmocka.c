@@ -21,6 +21,11 @@
  *    only once the running walks are out of the store, the others never
  *    run, and every view is given back before the store closes.
  *
+ * And, on the same real store, the on-disk mark that this server has had a
+ * storage peer (history_recv_peer_missing): it says one is missing for as
+ * long as the stale-data limit (STALE_AFTER) runs from the last time one
+ * was linked, after a restart too, and no longer.
+ *
  * Built with -fsanitize=thread it is also the data-race check of that
  * path (the Makefile's plain build runs it as an ordinary suite).  The
  * search's own row hook is static in m_chathistory.c; the hook here does
@@ -52,6 +57,7 @@
 #include "ircd_log.h"
 #include "ircd_reply.h"
 #include "send.h"
+#include "stale.h"
 #include "store_job.h"
 #include "thread_pool.h"
 
@@ -103,6 +109,11 @@ struct Channel *GlobalChannelList;
 /** CHATHISTORY_RETENTION, in days; 0 keeps everything (the rows here are
  * stamped 2023, so 1 puts all of them past retention). */
 static int retention_days;
+
+/** STALE_AFTER, in seconds. */
+static int stale_after = 1209600;
+
+time_t stale_limit(void) { main_only(); return stale_limit_clamp(stale_after); }
 
 int feature_int(enum Feature feat)
 {
@@ -694,6 +705,51 @@ static void the_store_closes_after_the_walks_under_way(void **state)
   assert_int_equal(__atomic_load_n(&started_walks, __ATOMIC_SEQ_CST), 2);
 }
 
+/** The storage-peer mark: missing while a storage peer it has had is not
+ * back, up to the stale-data limit from the last time one was linked
+ * (equal included), not after; read back from the store after a restart,
+ * the same. */
+static void the_storage_peer_mark_is_forgotten_after_the_limit(void **state)
+{
+  const uint64_t t0 = 1700000000000ULL;
+  const time_t limit = 14 * 86400;
+
+  (void)state;
+  stale_after = (int)limit;
+  test_hlc.physical_ms = t0;
+  CurrentTime = (time_t)(t0 / 1000);
+  history_recv_peers_linked(1);    /* the mark: now */
+  history_recv_peers_linked(0);    /* it left */
+  assert_true(history_recv_peer_missing());
+
+  test_hlc.physical_ms = t0 + (uint64_t)limit * 1000ULL;
+  CurrentTime = (time_t)(t0 / 1000) + limit;
+  assert_true(history_recv_peer_missing());
+  test_hlc.physical_ms += 1000;
+  CurrentTime++;
+  assert_false(history_recv_peer_missing());
+
+  /* A restart: the mark is read back from the store. */
+  history_shutdown();
+  test_hlc.physical_ms = t0 + 86400000ULL;
+  CurrentTime = (time_t)(t0 / 1000) + 86400;
+  assert_int_equal(history_init(store_dir), 0);
+  assert_true(history_recv_peer_missing());
+  test_hlc.physical_ms = t0 + (uint64_t)(limit + 1) * 1000ULL;
+  CurrentTime = (time_t)(t0 / 1000) + limit + 1;
+  assert_false(history_recv_peer_missing());
+
+  /* The smallest limit is a minute. */
+  stale_after = 1;
+  test_hlc.physical_ms = t0 + 60000ULL;
+  CurrentTime = (time_t)(t0 / 1000) + 60;
+  assert_true(history_recv_peer_missing());
+  test_hlc.physical_ms += 1000;
+  CurrentTime++;
+  assert_false(history_recv_peer_missing());
+  stale_after = 1209600;
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -704,6 +760,8 @@ int main(void)
     cmocka_unit_test_setup_teardown(a_worker_walk_returns_what_the_main_thread_walk_did,
                                     case_setup, case_teardown),
     cmocka_unit_test_setup_teardown(the_store_closes_after_the_walks_under_way,
+                                    case_setup, case_teardown),
+    cmocka_unit_test_setup_teardown(the_storage_peer_mark_is_forgotten_after_the_limit,
                                     case_setup, case_teardown),
   };
 

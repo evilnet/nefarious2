@@ -42,3 +42,12 @@ time_t stale_lifetime(time_t configured_ttl, time_t limit)
     return 0;   /* kept for ever */
   return configured_ttl > limit ? configured_ttl : limit;
 }
+
+int stale_absence_forgotten(time_t start, time_t end, time_t now, time_t limit)
+{
+  /* Back (end set): the absence keeps its own age-out.  A start ahead of
+   * the clock (it went back) is kept rather than forgotten early. */
+  if (start <= 0 || end != 0 || start > now)
+    return 0;
+  return now - start > limit;
+}

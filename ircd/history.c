@@ -61,6 +61,7 @@
 #include "ircd_string.h"
 #include "numeric.h"
 #include "s_debug.h"
+#include "stale.h"
 #include "s_stats.h"
 #include "store_job.h"
 #include "send.h"
@@ -3425,7 +3426,8 @@ static int recv_floor_capping;          /**< the last raise was cut at now (R41)
  * ignores it.  It outlives a restart, which the absence table (memory only)
  * does not: read at boot, it says this server has had a storage peer, so
  * until the first one is back (history_recv_link_up) a page over a span
- * never received here may lack that peer's rows (history_recv_peer_missing).
+ * never received here may lack that peer's rows (history_recv_peer_missing)
+ * -- for at most the stale-data limit (STALE_AFTER) from the row's time.
  * A server that never had a storage peer has none. */
 static const char recv_peer_key[] = "\0recv_peer";
 #define RECV_PEER_KLEN (sizeof(recv_peer_key) - 1)
@@ -3633,6 +3635,13 @@ int history_recv_peer_missing(void)
   uint64_t floor;
 
   if (history_recv_linked || !recv_peer_ms)
+    return 0;
+  /* As an open absence is forgotten (m_chathistory.c absence_forget): a
+   * storage peer not linked for longer than the stale-data limit
+   * (STALE_AFTER) is forgotten, and what it stored is stale by then. */
+  if (stale_absence_forgotten((time_t)(recv_peer_ms / 1000ULL), 0,
+                              (time_t)(history_recv_now_ms() / 1000ULL),
+                              stale_limit()))
     return 0;
   /* As an absence ages out: once every row of the time this server last had
    * a storage peer may be gone here, no page can be missing one of that

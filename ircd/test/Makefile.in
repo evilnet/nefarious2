@@ -87,6 +87,7 @@ CMOCKA_TESTPROGS = \
 	metadata_prereg_cmocka \
 	metadata_store_cmocka \
 	stale_cmocka \
+	chathistory_absence_cmocka \
 	bouncer_record_cmocka \
 	webpush_line_cmocka \
 	websocket_cmocka \
@@ -211,6 +212,7 @@ DEP_SRC = \
 	metadata_prereg_cmocka.c \
 	metadata_store_cmocka.c \
 	stale_cmocka.c \
+	chathistory_absence_cmocka.c \
 	bouncer_record_cmocka.c \
 	webhook_eventlog_cmocka.c \
 	webpush_line_cmocka.c \
@@ -982,7 +984,7 @@ HISTORY_VIEW_CMOCKA_OBJS = history_view_cmocka.o ../history.o ../db_rocksdb.o \
 	../history_trim_codec.o ../history_trim.o ../redact_index.o \
 	../pm_pair_index.o ../chathistory_recv.o ../recv_classify.o \
 	../ircd_compress.o ../ircd_string.o ../ircd_snprintf.o ../ircd_alloc.o \
-	../store_job.o ../thread_pool.o
+	../store_job.o ../thread_pool.o ../stale.o
 history_view_cmocka: $(HISTORY_VIEW_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(HISTORY_VIEW_CMOCKA_OBJS) $(CMOCKA_LIBS) $(ROCKSDB_LIBS) $(ZSTD_LIBS)
 
@@ -996,12 +998,25 @@ history_view_cmocka: $(HISTORY_VIEW_CMOCKA_OBJS)
 # (the ircd's own build has none).
 CHATHISTORY_SEARCH_JOB_CMOCKA_OBJS = chathistory_search_job_cmocka.o \
 	../store_job.o ../chathistory_merge.o ../chathistory_ref.o \
-	../ircd_string.o ../ircd_snprintf.o ../ircd_alloc.o
+	../ircd_string.o ../ircd_snprintf.o ../ircd_alloc.o ../stale.o
 chathistory_search_job_cmocka.o: ${srcdir}/chathistory_search_job_cmocka.c ../m_chathistory.c
 	${CC} ${CFLAGS} -Wno-address -Wno-comment -Wno-unused -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/chathistory_search_job_cmocka.c
 
 chathistory_search_job_cmocka: $(CHATHISTORY_SEARCH_JOB_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(CHATHISTORY_SEARCH_JOB_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS) -lpthread
+
+# chathistory_absence tests - the storage-server absence table and the
+# partial decision over it: an absent store is forgotten after
+# STALE_AFTER.  Built as chathistory_search_job is: the real
+# m_chathistory.c, included and garbage-collected; what the table reaches
+# of the rest of the ircd is the test's.
+CHATHISTORY_ABSENCE_CMOCKA_OBJS = chathistory_absence_cmocka.o \
+	../stale.o ../ircd_alloc.o
+chathistory_absence_cmocka.o: ${srcdir}/chathistory_absence_cmocka.c ../m_chathistory.c
+	${CC} ${CFLAGS} -Wno-address -Wno-comment -Wno-unused -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/chathistory_absence_cmocka.c
+
+chathistory_absence_cmocka: $(CHATHISTORY_ABSENCE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(CHATHISTORY_ABSENCE_CMOCKA_OBJS) $(CMOCKA_LIBS) $(SSL_LIBS) -lpthread
 
 # alloc_nomem tests - an allocation that fails off the main thread never
 # runs the out-of-memory handler (the restart): the other handler says

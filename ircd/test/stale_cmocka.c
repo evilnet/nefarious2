@@ -10,7 +10,9 @@
  *    beyond the allowed skew counts too); a store with no mark is never
  *    stale (it predates the mark, or holds nothing);
  *  - stale_lifetime(): how long a deletion record is kept -- never less
- *    than the limit, and "forever" (0) stays forever.
+ *    than the limit, and "forever" (0) stays forever;
+ *  - stale_absence_forgotten(): an absent server not back within the
+ *    limit is forgotten; one that came back is left to its own rule.
  */
 #include <setjmp.h>
 #include <stdarg.h>
@@ -114,6 +116,39 @@ static void forever_stays_forever(void **state)
   assert_int_equal(stale_lifetime(-30 * DAY, 60), 0);
 }
 
+/* ------------------------------------------------------------------ */
+/* stale_absence_forgotten                                             */
+/* ------------------------------------------------------------------ */
+
+/** An absent server not back within the limit is forgotten. */
+static void an_open_absence_past_the_limit_is_forgotten(void **state)
+{
+  assert_true(stale_absence_forgotten(NOW - LIMIT - 1, 0, NOW, LIMIT));
+  assert_true(stale_absence_forgotten(NOW - 100 * DAY, 0, NOW, LIMIT));
+  assert_false(stale_absence_forgotten(NOW - LIMIT, 0, NOW, LIMIT));
+  assert_false(stale_absence_forgotten(NOW - 60, 0, NOW, LIMIT));
+  assert_false(stale_absence_forgotten(NOW, 0, NOW, LIMIT));
+  /* the smallest limit */
+  assert_false(stale_absence_forgotten(NOW - 60, 0, NOW, 60));
+  assert_true(stale_absence_forgotten(NOW - 61, 0, NOW, 60));
+}
+
+/** One that came back keeps its own rule (it ages out with the store's
+ * history), however old. */
+static void a_closed_absence_is_not_this_rule(void **state)
+{
+  assert_false(stale_absence_forgotten(NOW - 100 * DAY, NOW - 99 * DAY, NOW, LIMIT));
+  assert_false(stale_absence_forgotten(NOW - LIMIT - 1, NOW - 5, NOW, LIMIT));
+}
+
+/** No start: nothing to forget.  A start from the future (the clock went
+ * back): not forgotten. */
+static void nothing_or_the_future_is_not_forgotten(void **state)
+{
+  assert_false(stale_absence_forgotten(0, 0, NOW, LIMIT));
+  assert_false(stale_absence_forgotten(NOW + 10 * DAY, 0, NOW, LIMIT));
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -125,6 +160,9 @@ int main(void)
     cmocka_unit_test(the_boundary_holds_at_the_smallest_limit),
     cmocka_unit_test(a_deletion_record_lives_at_least_the_limit),
     cmocka_unit_test(forever_stays_forever),
+    cmocka_unit_test(an_open_absence_past_the_limit_is_forgotten),
+    cmocka_unit_test(a_closed_absence_is_not_this_rule),
+    cmocka_unit_test(nothing_or_the_future_is_not_forgotten),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

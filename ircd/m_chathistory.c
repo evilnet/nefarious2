@@ -68,6 +68,7 @@ static void rdx_retry_cancel(int idx);
 #include "s_conf.h"
 #include "s_debug.h"
 #include "send.h"
+#include "stale.h"
 #include "store_job.h"
 #include "bouncer_session.h"
 
@@ -1558,7 +1559,18 @@ static struct ChathistoryAd *server_ads[MAX_AD_SERVERS];
  * deleted (retention lowered and raised before age-out caught up, a clock
  * step), and an absence aged out early lets a full PM page over that split
  * -- PM pages never consult the windows -- be answered locally and
- * complete; one kept longer only adds fan-out (R41). */
+ * complete; one kept longer only adds fan-out (R41).
+ *
+ * The one exception: a server still away after the stale-data limit
+ * (STALE_AFTER, stale_limit()) is forgotten -- its OPEN interval is
+ * dropped (stale_absence_forgotten()), so it no longer makes a page
+ * partial, no page fans out for it, and it no longer counts as away
+ * (store_away_now).  What it stored is stale by then.  Every reader of the
+ * table drops it the same way, whenever it is next met (absence_forget),
+ * so a store back after the limit finds nothing to close: no interval
+ * covers the time it was away.  A closed interval keeps the floor rule
+ * above, however old.  Nothing else changes for an interval younger than
+ * the limit. */
 #define MAX_ABSENCES 4
 struct StorageAbsence {
   time_t start;
@@ -1566,15 +1578,28 @@ struct StorageAbsence {
 };
 static struct StorageAbsence *absences[MAX_AD_SERVERS];
 
+/** Is @a a (one interval) a store still away after the stale-data limit
+ * @a limit?  Then it is dropped (the table's comment): returns 1. */
+static int absence_forget(struct StorageAbsence *a, time_t limit)
+{
+  if (!stale_absence_forgotten(a->start, a->end, CurrentTime, limit))
+    return 0;
+  a->start = a->end = 0;
+  return 1;
+}
+
 static void absence_open(int idx)
 {
   struct StorageAbsence *a;
+  time_t limit = stale_limit();
   int i, j;
   if (idx < 0 || idx >= MAX_AD_SERVERS)
     return;
   if (!absences[idx])
     absences[idx] = (struct StorageAbsence *)MyCalloc(MAX_ABSENCES, sizeof(struct StorageAbsence));
   a = absences[idx];
+  for (i = 0; i < MAX_ABSENCES; i++)
+    (void)absence_forget(&a[i], limit);   /* a forgotten one opens anew */
   for (i = 0; i < MAX_ABSENCES; i++)
     if (a[i].start && a[i].end == 0)
       return;   /* already open */
@@ -1598,12 +1623,13 @@ static void absence_open(int idx)
 static void absence_close(int idx)
 {
   struct StorageAbsence *a;
+  time_t limit = stale_limit();
   int i;
   if (idx < 0 || idx >= MAX_AD_SERVERS || !absences[idx])
     return;
   a = absences[idx];
   for (i = 0; i < MAX_ABSENCES; i++)
-    if (a[i].start && a[i].end == 0)
+    if (!absence_forget(&a[i], limit) && a[i].start && a[i].end == 0)
       a[i].end = CurrentTime;
 }
 
@@ -1613,12 +1639,14 @@ static void absence_close(int idx)
  * whose whole end second is at or below this store's floor as it is now
  * (history_live_floor_ms(), never the high-water mark: see the table's
  * comment) is dropped as it is met: no row of its time is left to ask
- * about here. */
+ * about here.  So is an open one older than the stale-data limit
+ * (absence_forget): that server is forgotten. */
 static int absence_overlap(time_t lo, time_t hi, int *open_hit)
 {
   int idx, i, any = 0;
   uint64_t floor_ms = history_live_floor_ms();
   time_t horizon = (time_t)(floor_ms / 1000ULL);
+  time_t limit = stale_limit();
 
   if (lo == 0)
     lo = horizon;
@@ -1630,7 +1658,7 @@ static int absence_overlap(time_t lo, time_t hi, int *open_hit)
     if (!a)
       continue;
     for (i = 0; i < MAX_ABSENCES; i++) {
-      if (!a[i].start)
+      if (!a[i].start || absence_forget(&a[i], limit))
         continue;
       /* Its end is a whole second, inclusive (as the overlap test below
        * reads it): it ages out only once that second's last ms is at or
@@ -1654,7 +1682,9 @@ static int absence_overlap(time_t lo, time_t hi, int *open_hit)
  * table that is still open, or -- after this server restarted, before the
  * first storage peer's burst has ended -- the on-disk mark that it has had
  * one (history_recv_peer_missing): the table lives in memory, so a restart
- * forgets every absence, and the receive windows have not opened. */
+ * forgets every absence, and the receive windows have not opened.  Neither
+ * counts once it is older than the stale-data limit (STALE_AFTER): an
+ * absent store is forgotten then (absence_forget), and the mark agrees. */
 static int storage_peers_linked(void);   /* below, with the ads */
 
 static int store_away_now(void)

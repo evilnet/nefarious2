@@ -1236,6 +1236,7 @@ void replay_start_batch(struct Client *p0, const char *p1, struct HistoryMessage
 void send_isupport_update(void) { never("send_isupport_update"); }
 void sendcmdto_serv_butone_v3(struct Client *p0, const char *p1, const char *p2, struct Client *p3, const char *p4, ...) { never("sendcmdto_serv_butone_v3"); }
 void sendrawto_one(struct Client *p0, const char *p1, ...) { never("sendrawto_one"); }
+time_t stale_limit(void) { never("stale_limit"); }
 void timer_add(struct Timer *p0, EventCallBack p1, void *p2, enum TimerType p3, time_t p4) { never("timer_add"); }
 void timer_del(struct Timer *p0) { never("timer_del"); }
 struct Timer *timer_init(struct Timer *p0) { never("timer_init"); }

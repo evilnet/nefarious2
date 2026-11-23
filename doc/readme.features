@@ -2381,6 +2381,12 @@ This server uses it for:
 
  * Deletion records: metadata deletion records are kept at least this
    long, whatever METADATA_TOMBSTONE_TTL says.
+ * Absent history storage servers: while a server that stores
+   chathistory is away, history answers covering the time since it left
+   are marked partial (it may hold messages this server lacks).  Once it
+   has been away longer than this it is forgotten and those answers are
+   no longer partial on its account; the same goes, after a restart, for
+   this server's record that it had such a peer linked.
 
 Every server of a network should use the same value: a server that
 forgets sooner than its peers can answer a returning server with less

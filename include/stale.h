@@ -74,4 +74,13 @@ extern int stale_decide(time_t last_linked, time_t now, time_t limit,
  * for ever" and stays 0. */
 extern time_t stale_lifetime(time_t configured_ttl, time_t limit);
 
+/** Is an absent server forgotten?  An absence from @a start (unix
+ * seconds; 0: none) to @a end (0: still away) is forgotten when the server
+ * is still away and has been for longer than @a limit (equal is not).  An
+ * absence that ended is not this rule's: it keeps its own age-out.  A
+ * start in the future (the clock went back) is not forgotten.
+ * @return 1 when forgotten. */
+extern int stale_absence_forgotten(time_t start, time_t end, time_t now,
+                                   time_t limit);
+
 #endif /* INCLUDED_stale_h */
