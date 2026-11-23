@@ -438,25 +438,4 @@ extern int md_topn_insert(struct md_stamp *kept, int *slot, int *count,
  */
 extern int md_key_replicable(const char *key);
 
-/** An account keeps at most this many times METADATA_MAX_KEYS tombstones
- * (deleted keys' "D" clock rows) of its own keys before a write that
- * would add a key name new to it is refused (md_tombstone_room).  A
- * tombstone is never dropped early to make room: until it ages out
- * (METADATA_TOMBSTONE_TTL) it is what stops a peer's stale copy of the
- * deleted value from coming back. */
-#define MD_TOMBSTONE_FACTOR 4
-
-/** May a client write (SET or DELETE) a key of an account, as far as the
- * account's tombstones go?  A key the account has a row for -- a live
- * value or a tombstone -- adds no name: always.  A key it has no row for
- * adds one (a DELETE of it leaves a tombstone; a SET leaves a value a
- * later DELETE turns into one): only while the account holds fewer than
- * MD_TOMBSTONE_FACTOR x @a max_keys tombstones.  So an account's
- * tombstones stay below that bound plus its live keys.
- * @param[in] has_row The account has a row (live or tombstone) for the key.
- * @param[in] tombstones The account's tombstones (of keys a client may set).
- * @param[in] max_keys METADATA_MAX_KEYS (a negative value is read as 0).
- * @return 1 if the write may go ahead, 0 if it is to be refused. */
-extern int md_tombstone_room(int has_row, int tombstones, int max_keys);
-
 #endif /* INCLUDED_metadata_lww_h */

@@ -730,38 +730,6 @@ static int metadata_check_account_limits(const char *account_name,
   return limit_rc;
 }
 
-/** May a client write (SET or DELETE) @a key of @a target_client, as far
- * as the account's tombstones go (md_tombstone_room)?  A key the account
- * has a row for always; a key name new to it only while the account
- * holds fewer than MD_TOMBSTONE_FACTOR x METADATA_MAX_KEYS tombstones.
- * Nothing is dropped to make room: a tombstone stops a peer's stale copy
- * of the deleted value from coming back.  A target with no account (no
- * stored rows, no tombstones) always may.  Only a local client's write is
- * judged: a peer's rows are applied whatever the count, as they must be.
- * @return 1 if it may, 0 if it is to be refused. */
-static int metadata_tombstone_room_for(struct Client *target_client,
-                                       const char *key)
-{
-  const char *account;
-  struct md_version v;
-  char valbuf[METADATA_VALUE_LEN];
-  int max_keys = feature_int(FEAT_METADATA_MAX_KEYS);
-  int stop;
-
-  if (!target_client || !IsAccount(target_client) || !cli_user(target_client)
-      || !cli_user(target_client)->account[0] || !metadata_lmdb_is_available())
-    return 1;
-  account = cli_user(target_client)->account;
-  if (metadata_account_get_version(account, key, &v, valbuf, sizeof(valbuf)) == 0)
-    return 1;
-  if (max_keys < 0)
-    max_keys = 0;
-  stop = (max_keys > INT_MAX / MD_TOMBSTONE_FACTOR)
-         ? INT_MAX : MD_TOMBSTONE_FACTOR * max_keys;
-  return md_tombstone_room(0, metadata_account_count_tombstones(account, stop),
-                           max_keys);
-}
-
 /** Render a metadata_check_limits()/metadata_check_account_limits()
  * failure code as the oper-facing reason mdsync_limit_notice() logs and
  * notices (W4 plan 1.8's three wire-table strings, the last two with
@@ -1000,11 +968,6 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
     return 0;
   case METADATA_LIMIT_KEYS:
     send_fail(sptr, "METADATA", "LIMIT_REACHED", key, "Maximum number of metadata keys reached");
-    return 0;
-  }
-  if (!is_channel && !metadata_tombstone_room_for(target_client, key)) {
-    send_fail(sptr, "METADATA", "LIMIT_REACHED", key,
-              "Too many deleted metadata keys, try again later");
     return 0;
   }
   if (!metadata_value_fits_line(is_channel,

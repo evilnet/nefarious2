@@ -811,14 +811,3 @@ int md_key_replicable(const char *key)
     return 0;
   return 1;
 }
-
-int md_tombstone_room(int has_row, int tombstones, int max_keys)
-{
-  if (has_row)
-    return 1;
-  if (max_keys < 0)
-    max_keys = 0;
-  /* tombstones < MD_TOMBSTONE_FACTOR * max_keys, with no product to
-   * overflow for a large METADATA_MAX_KEYS */
-  return tombstones / MD_TOMBSTONE_FACTOR < max_keys;
-}
