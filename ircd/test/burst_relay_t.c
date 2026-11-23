@@ -171,6 +171,10 @@ void modebuf_mode(struct ModeBuf *mbuf, unsigned int mode)
 {
 }
 
+void modebuf_exmode(struct ModeBuf *mbuf, unsigned int mode)
+{
+}
+
 void modebuf_mode_client(struct ModeBuf *mbuf, unsigned int mode,
                          struct Client *client, int oplevel)
 {
@@ -218,6 +222,12 @@ void sendcmdto_serv_butone(struct Client *from, const char *cmd,
                            const char *tok, struct Client *one,
                            const char *pattern, ...)
 {
+}
+
+/* A +z lost at a TS loss (burst_exmode_t): not at an equal timestamp. */
+void schedule_destruct_event_1m(struct Channel *chptr)
+{
+  abort();
 }
 
 void sendcmdto_channel_butserv_butone(struct Client *from, const char *cmd,

@@ -162,6 +162,16 @@ void modebuf_mode(struct ModeBuf *mbuf, unsigned int mode)
   abort();
 }
 
+void modebuf_exmode(struct ModeBuf *mbuf, unsigned int mode)
+{
+  abort();
+}
+
+void schedule_destruct_event_1m(struct Channel *chptr)
+{
+  abort();
+}
+
 void modebuf_mode_client(struct ModeBuf *mbuf, unsigned int mode,
                          struct Client *client, int oplevel)
 {

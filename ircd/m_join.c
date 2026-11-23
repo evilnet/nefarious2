@@ -461,6 +461,13 @@ int ms_join(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
         modebuf_mode(&mbuf, MODE_DEL | chptr->mode.mode);
         chptr->mode.mode &= MODE_BURSTADDED | MODE_WASDELJOINS;
+        /* The extended modes go too, as the classic ones do: every server
+         * the JOIN reaches does this wipe-out on its own, and no server is
+         * told.  All but +z: nothing in a JOIN can set it again (a BURST's
+         * mode string can, so ms_burst() takes it), and it is services' to
+         * set and to take. */
+        modebuf_exmode(&mbuf, MODE_DEL | (chptr->mode.exmode & ~EXMODE_PERSIST));
+        chptr->mode.exmode &= EXMODE_PERSIST;
 
         if (chptr->mode.limit) {
           modebuf_mode_uint(&mbuf, MODE_DEL | MODE_LIMIT, chptr->mode.limit);

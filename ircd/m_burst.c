@@ -83,6 +83,7 @@
 
 #include "channel.h"
 #include "client.h"
+#include "destruct_event.h"
 #include "hash.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -479,6 +480,8 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   unsigned int parse_flags = (MODE_PARSE_FORCE | MODE_PARSE_BURST);
   int param, banned = 0, excepted = 0;
   struct BurstRelay relay;
+  int lost_persist = 0;                 /* our +z went at a TS loss */
+  unsigned int wipe_exmode = ~0u;       /* the extended modes a TS loss takes */
 
   /* A channel's state from a server (its own, or relayed): a BURST from
    * a user would be applied and relayed with the user as its source. */
@@ -605,12 +608,31 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
   /* new channel or an older one */
   if (!chptr->creationtime || chptr->creationtime > timestamp) {
+    /* +z is taken only from a BURST that could set it again: mode_parse()
+     * takes +z from a server only while that server is in its netburst,
+     * or from services.  Every server a netburst's BURST reaches, directly
+     * or relayed, has its source in its netburst, so the winner's +z comes
+     * back below; from a BURST that cannot set it, our +z is left as it
+     * is.  A channel left empty without it needs a destruct event, once
+     * the BURST is taken in. */
+    if (!IsBurst(sptr) && !IsService(sptr))
+      wipe_exmode &= ~EXMODE_PERSIST;
+    lost_persist = !!(chptr->mode.exmode & wipe_exmode & EXMODE_PERSIST);
     chptr->creationtime = timestamp;
 
     modebuf_init(mbuf = &modebuf, &me, cptr, chptr,
 		 MODEBUF_DEST_CHANNEL | MODEBUF_DEST_NOKEY);
     modebuf_mode(mbuf, MODE_DEL | chptr->mode.mode); /* wipeout modes */
     chptr->mode.mode &= MODE_BURSTADDED | MODE_WASDELJOINS;
+    /* The extended modes go with the rest: the BURST's mode string sets
+     * the winner's again, every one of them (channel_modes() bursts them
+     * all).  Kept, they were the loser's on top of the winner's here and
+     * nowhere else, and the next netjoin at equal timestamps spread them.
+     * Like the classic modes, they are wiped here and on every other
+     * server the BURST reaches, each of which finds its own copy younger:
+     * nothing is sent to any server for it. */
+    modebuf_exmode(mbuf, MODE_DEL | (chptr->mode.exmode & wipe_exmode));
+    chptr->mode.exmode &= ~wipe_exmode;
 
     /* wipeout any limit and keys that are set */
     parse_flags |= (MODE_PARSE_SET | MODE_PARSE_WIPEOUT);
@@ -874,6 +896,13 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
       break;
     } /* switch (*parv[param]) */
   } /* while (param < parc) */
+
+  /* A channel the TS loss took +z off, which the winner's modes, applied
+   * by now, do not hold open either, gets what a -z gets in mode_parse():
+   * when nobody is in it, a destruct event.  Left as it was, nothing would
+   * ever remove it.  A member joining in the meantime cancels it. */
+  if (lost_persist && !(chptr->mode.exmode & EXMODE_PERSIST) && chptr->users == 0)
+    schedule_destruct_event_1m(chptr);
 
   /* Send the relay's last line (its only one, unless it was split; an
    * empty BURST is relayed as one). */
