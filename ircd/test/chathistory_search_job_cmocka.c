@@ -20,7 +20,9 @@
  * m_chathistory.c is included, compiled with -ffunction-sections and
  * linked with --gc-sections (as auth_recheck_cmocka does s_auth.c), so
  * the program keeps ms_chathistory() and what it reaches.  The S path
- * runs for real; the other subcommands' world is named at the end of
+ * runs for real; so do the L, A and R page paths, as far as the row
+ * limit a page query carries goes (the cases at the end: their walks
+ * are a table too).  The other subcommands' world is named at the end of
  * this file so the program links, and fails the case if it is reached.
  * The real ../store_job.o runs the jobs.  The thread pool is the test's:
  * thread_pool_submit() keeps the task, and a case runs the work function
@@ -942,6 +944,183 @@ static void done_checks_the_numeric_again(void **state)
   assert_all_given_back();
 }
 
+/* ------------------------------------------------------------------ */
+/* The row limit of a page query (L, A, R)                             */
+/* ------------------------------------------------------------------ */
+
+/* The page walks, as far as the limit goes: the table's rows, oldest
+ * first; L keeps the newest @a limit of them, A the oldest.  The page
+ * path runs synchronously: no job, no presence (no P/F requester). */
+static int page_walk(int limit, int newest, struct HistoryMessage **result)
+{
+  struct HistoryMessage *tail = NULL;
+  int i, first, n;
+
+  walks++;
+  seen.limit = limit;
+  *result = NULL;
+  n = limit < nrows ? limit : nrows;
+  if (n <= 0)
+    return 0;
+  first = newest ? nrows - n : 0;
+  for (i = first; i < first + n; i++) {
+    struct HistoryMessage *m = (struct HistoryMessage *)malloc(sizeof(*m));
+
+    row_fill(m, i);
+    if (tail)
+      tail->next = m;
+    else
+      *result = m;
+    tail = m;
+  }
+  return n;
+}
+
+int history_query_latest(const char *p0, enum HistoryRefType p1, const char *p2, int limit,
+                         struct HistoryMessage **result, struct HistoryRowFilter *p5)
+{
+  return page_walk(limit, 1, result);
+}
+
+int history_query_after(const char *p0, enum HistoryRefType p1, const char *p2, int limit,
+                        struct HistoryMessage **result, struct HistoryRowFilter *p5)
+{
+  return page_walk(limit, 0, result);
+}
+
+/** AROUND: only what it was asked for; nothing found, both sides open. */
+int history_query_around(const char *p0, enum HistoryRefType p1, const char *p2, int limit,
+                         struct HistoryMessage **result, struct HistoryRowFilter *p5,
+                         int *exhausted)
+{
+  walks++;
+  seen.limit = limit;
+  *result = NULL;
+  if (exhausted)
+    *exhausted = 0;
+  return 0;
+}
+
+int history_attach_context(const char *p0, struct HistoryMessage *p1) { return 0; }
+
+/** CH Q <target> <sub> <ref> <limit> <reqid> <dest> * * 0, as
+ * start_fed_query() sends a page query, addressed to this server. */
+static void q_page(const char *sub, const char *limit)
+{
+  static char buf[11][64];
+  const char *in[11] = { "CD", "Q", "#chan", sub, "*", limit, "CD7", "AB",
+                         "*", "*", "0" };
+  char *parv[12];
+  int i;
+
+  for (i = 0; i < 11; i++) {
+    snprintf(buf[i], sizeof(buf[i]), "%s", in[i]);
+    parv[i] = buf[i];
+  }
+  parv[11] = NULL;
+  assert_int_equal(ms_chathistory(&origin, &origin, 11, parv), 0);
+}
+
+/** The limit text, as the responder answers it. */
+static void the_page_limit_is_read_into_a_bounded_range(void **state)
+{
+  int clamped;
+
+  assert_int_equal(fed_limit_clamp("50", &clamped), 50);
+  assert_int_equal(clamped, 0);
+  assert_int_equal(fed_limit_clamp("500", &clamped), MAX_FED_MESSAGES);
+  assert_int_equal(clamped, 0);
+  assert_int_equal(fed_limit_clamp("501", &clamped), MAX_FED_MESSAGES);
+  assert_int_equal(clamped, 1);
+  assert_int_equal(fed_limit_clamp("2147483647", &clamped), MAX_FED_MESSAGES);
+  assert_int_equal(clamped, 1);
+  assert_int_equal(fed_limit_clamp("99999999999999999999", &clamped), MAX_FED_MESSAGES);
+  assert_int_equal(clamped, 1);
+  assert_int_equal(fed_limit_clamp("0", &clamped), 0);
+  assert_int_equal(clamped, 0);
+  assert_int_equal(fed_limit_clamp("-5", &clamped), 0);
+  assert_int_equal(clamped, 0);
+  assert_int_equal(fed_limit_clamp("-99999999999999999999", &clamped), 0);
+  assert_int_equal(clamped, 0);
+  assert_int_equal(fed_limit_clamp("", &clamped), 0);
+  assert_int_equal(fed_limit_clamp("x", &clamped), 0);
+}
+
+/** A LATEST page asked for more than a requester keeps walks
+ * MAX_FED_MESSAGES + 1 (the probe), sends the newest MAX_FED_MESSAGES and
+ * says it was cut: T, and U -- the requester's page cannot hold what it
+ * asked for, as when it dropped the rows past its own cap itself. */
+static void a_page_limit_past_the_bound_is_cut(void **state)
+{
+  rows = NULL;
+  nrows = MAX_FED_MESSAGES + 100;
+  q_page("L", "100000");
+  assert_int_equal(walks, 1);
+  assert_int_equal(seen.limit, MAX_FED_MESSAGES + 1);
+  assert_int_equal(nlines, MAX_FED_MESSAGES + 1);
+  assert_non_null(strstr(lines[0], " AB-101 "));
+  assert_non_null(strstr(lines[MAX_FED_MESSAGES - 1], " AB-600 "));
+  assert_string_equal(lines[MAX_FED_MESSAGES], "E CD7 500 TU");
+  assert_int_equal(freed_rows, MAX_FED_MESSAGES + 1);
+}
+
+/** A limit past INT_MAX, or at it, is the same: no overflow of the probe
+ * (it used to walk nothing and answer a bare E, "nothing here"). */
+static void a_page_limit_past_int_max_is_cut(void **state)
+{
+  rows = NULL;
+  nrows = 20;
+  q_page("L", "99999999999");
+  assert_int_equal(seen.limit, MAX_FED_MESSAGES + 1);
+  assert_int_equal(nlines, 21);
+  assert_string_equal(lines[20], "E CD7 20");
+  teardown(state);
+  setup(state);
+  rows = NULL;
+  nrows = 20;
+  q_page("L", "2147483647");
+  assert_int_equal(seen.limit, MAX_FED_MESSAGES + 1);
+  assert_int_equal(nlines, 21);
+  assert_string_equal(lines[20], "E CD7 20");
+}
+
+/** The bound itself is no cut: filled, it is T alone, as before. */
+static void a_page_limit_at_the_bound_is_kept(void **state)
+{
+  rows = NULL;
+  nrows = MAX_FED_MESSAGES + 100;
+  q_page("L", "500");
+  assert_int_equal(seen.limit, MAX_FED_MESSAGES + 1);
+  assert_int_equal(nlines, MAX_FED_MESSAGES + 1);
+  assert_string_equal(lines[MAX_FED_MESSAGES], "E CD7 500 T");
+}
+
+/** A negative limit asks for nothing: no row, and T when there are rows
+ * (it used to answer a bare E, "nothing here"). */
+static void a_negative_page_limit_sends_no_row(void **state)
+{
+  q_page("L", "-5");
+  assert_int_equal(seen.limit, 1);
+  assert_lines(1, "E CD7 0 T");
+}
+
+/** AFTER with a limit of 0: the probe row is not sent (the trim kept it). */
+static void an_after_page_of_limit_0_sends_no_row(void **state)
+{
+  q_page("A", "0");
+  assert_int_equal(seen.limit, 1);
+  assert_lines(1, "E CD7 0 T");
+  assert_int_equal(freed_rows, 1);
+}
+
+/** AROUND is bounded too (it has no probe: its two halves are). */
+static void an_around_page_limit_past_the_bound_is_cut(void **state)
+{
+  q_page("R", "100000");
+  assert_int_equal(seen.limit, MAX_FED_MESSAGES);
+  assert_lines(1, "E CD7 0 T");
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -966,6 +1145,13 @@ int main(void)
     cmocka_unit_test_setup_teardown(a_job_whose_server_left_after_the_scan_sends_nothing, setup, teardown),
     cmocka_unit_test_setup_teardown(a_failed_scan_for_a_server_that_left_sends_nothing, setup, teardown),
     cmocka_unit_test_setup_teardown(done_checks_the_numeric_again, setup, teardown),
+    cmocka_unit_test_setup_teardown(the_page_limit_is_read_into_a_bounded_range, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_page_limit_past_the_bound_is_cut, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_page_limit_past_int_max_is_cut, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_page_limit_at_the_bound_is_kept, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_negative_page_limit_sends_no_row, setup, teardown),
+    cmocka_unit_test_setup_teardown(an_after_page_of_limit_0_sends_no_row, setup, teardown),
+    cmocka_unit_test_setup_teardown(an_around_page_limit_past_the_bound_is_cut, setup, teardown),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
@@ -976,8 +1162,8 @@ int main(void)
 /* ------------------------------------------------------------------ */
 
 /* What ms_chathistory()'s other subcommands, and the requester's side of
- * a federated query, call.  The S path reaches none of it: a case that
- * gets here has left the path under test. */
+ * a federated query, call.  The S path and the page-limit cases reach
+ * none of it: a case that gets here has left the path under test. */
 static void never(const char *what) __attribute__((noreturn));
 static void never(const char *what)
 {
@@ -998,7 +1184,6 @@ struct ConfItem *find_conf_byhost(struct SLink *p0, const char *p1, int p2) { ne
 struct Membership *find_member_link(struct Channel *p0, const struct Client *p1) { never("find_member_link"); }
 struct Channel *hSeekChannel(const char *p0) { never("hSeekChannel"); }
 struct Client *hSeekClient(const char *p0, int p1) { never("hSeekClient"); }
-int history_attach_context(const char *p0, struct HistoryMessage *p1) { never("history_attach_context"); }
 int history_between_descending(const char *p0, enum HistoryRefType p1, const char *p2, enum HistoryRefType p3, const char *p4) { never("history_between_descending"); }
 int history_deserialize_record(const void *p0, size_t p1, struct HistoryMessage *p2) { never("history_deserialize_record"); }
 char *history_forward_split(char *p0, char **p1) { never("history_forward_split"); }
@@ -1018,10 +1203,7 @@ void history_pm_identity(struct Client *p0, char *p1, size_t p2) { never("histor
 int history_pm_identity_matches(struct Client *p0, const char *p1, size_t p2) { never("history_pm_identity_matches"); }
 int history_pm_index_whole(void) { never("history_pm_index_whole"); }
 int history_pm_target_has_sessid(const char *p0, const char *p1) { never("history_pm_target_has_sessid"); }
-int history_query_after(const char *p0, enum HistoryRefType p1, const char *p2, int p3, struct HistoryMessage **p4, struct HistoryRowFilter *p5) { never("history_query_after"); }
-int history_query_around(const char *p0, enum HistoryRefType p1, const char *p2, int p3, struct HistoryMessage **p4, struct HistoryRowFilter *p5, int *p6) { never("history_query_around"); }
 int history_query_between(const char *p0, enum HistoryRefType p1, const char *p2, enum HistoryRefType p3, const char *p4, int p5, struct HistoryMessage **p6, struct HistoryRowFilter *p7) { never("history_query_between"); }
-int history_query_latest(const char *p0, enum HistoryRefType p1, const char *p2, int p3, struct HistoryMessage **p4, struct HistoryRowFilter *p5) { never("history_query_latest"); }
 void history_recv_link_up(void) { never("history_recv_link_up"); }
 void history_recv_peers_linked(int p0) { never("history_recv_peers_linked"); }
 int history_redact_index_scan(uint64_t p0, int p1, history_rdx_cb p2, void *p3, int *p4) { never("history_redact_index_scan"); }

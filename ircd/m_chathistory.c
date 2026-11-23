@@ -2774,6 +2774,30 @@ static int chathistory_between(struct Client *sptr, const char *target,
 
 /** Maximum messages collected per request */
 #define MAX_FED_MESSAGES 500
+
+/** The row limit of a page or SEARCH query from another server (the
+ * <limit> of CH Q), as this server answers it: at most MAX_FED_MESSAGES,
+ * what a requester keeps of one request (add_fed_message drops a row
+ * past it, across all its responders), so a larger limit would only have
+ * this server read and send rows the requester throws away; never below
+ * 0.  Read saturating: atoi() of a number past INT_MAX is undefined, and
+ * the walk's limit+1 probe must not overflow.
+ * @param[in] text The limit parameter as it came.
+ * @param[out] clamped 1 when the asking server wanted more than that.
+ * @return The limit to answer with, 0 to MAX_FED_MESSAGES. */
+static int fed_limit_clamp(const char *text, int *clamped)
+{
+  long v = text ? strtol(text, NULL, 10) : 0;
+
+  *clamped = 0;
+  if (v < 0)
+    return 0;
+  if (v > MAX_FED_MESSAGES) {
+    *clamped = 1;
+    return MAX_FED_MESSAGES;
+  }
+  return (int)v;
+}
 /** The page leg's context children a request keeps (W5 Task 15, F-4):
  * their own bound, apart from MAX_FED_MESSAGES, so a reaction-heavy reply
  * can neither cut the page nor push a row out, and a peer cannot flood
@@ -8550,6 +8574,7 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     int between_desc = -1;   /* W: walk direction for the overflow trim */
     const char *query_subcmd_full;
     int limit, count;
+    int limit_clamped = 0;   /* the asking server wanted more (fed_limit_clamp) */
     struct HistoryMessage *messages = NULL;
     enum HistoryRefType ref_type;
     const char *ref_value;
@@ -8883,6 +8908,16 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
     fed_hook->veto = typing_only_veto;
     fed_hook->veto_ctx = NULL;
 
+    /* The limit is the asking server's word: bound it by what a requester
+     * keeps for one request (fed_limit_clamp) for every subcommand below
+     * that walks by it (L/B/A/R/W/S).  The pages used to take it as sent:
+     * a huge one read and sent the whole target, the requester keeping
+     * the first MAX_FED_MESSAGES to arrive (the oldest, for L and B); one
+     * at INT_MAX overflowed the limit+1 probe, and a negative one walked
+     * nothing and answered "nothing here".  Taken from the text, not the
+     * atoi() above, which the forwarding and the D/K lines keep using. */
+    limit = fed_limit_clamp(parv[5], &limit_clamped);
+
     /* Query local LMDB based on subcommand.  For the linear shapes
      * (L/B/A) probe limit+1: an over-limit result marks this response
      * TRUNCATED, signaled to the requester on the CH E terminator so
@@ -8940,20 +8975,16 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       struct SearchJob *sj;
       struct SearchMatch *ssm;
       char before_buf[HISTORY_TIMESTAMP_LEN];
-      int clamped = 0;
+      int clamped = limit_clamped;
 
       /* The limit is the asking server's word, and every job holds its
-       * rows until it is answered: bound it by what a requester keeps for
-       * one request (add_fed_message drops a row past MAX_FED_MESSAGES).
-       * This server's CHATHISTORY_MAX is not the bound: the requester
-       * applied its own, and the two may differ.  A requester that asked
-       * for more gets the newest MAX_FED_MESSAGES matches and T -- before,
-       * it was sent them all, oldest first, and kept the first
-       * MAX_FED_MESSAGES to arrive. */
-      if (limit > MAX_FED_MESSAGES) {
-        limit = MAX_FED_MESSAGES;
-        clamped = 1;
-      }
+       * rows until it is answered: it was bounded above by what a
+       * requester keeps for one request (fed_limit_clamp; add_fed_message
+       * drops a row past MAX_FED_MESSAGES).  This server's CHATHISTORY_MAX
+       * is not the bound: the requester applied its own, and the two may
+       * differ.  A requester that asked for more gets the newest
+       * MAX_FED_MESSAGES matches and T -- before, it was sent them all,
+       * oldest first, and kept the first MAX_FED_MESSAGES to arrive. */
 
       ircd_strncpy(before_buf, ref_type == HISTORY_REF_TIMESTAMP && ref_value ? ref_value : "",
                    sizeof(before_buf) - 1);
@@ -9127,13 +9158,15 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
         truncated = 1;
         if (query_subcmd_char == 'A'
             || (query_subcmd_char == 'W' && between_desc == 0)) {
-          struct HistoryMessage *m = messages;
+          /* Keep the first `limit` rows (none for a limit of 0: the walk
+           * then read only the probe row, which used to be sent). */
+          struct HistoryMessage **mp = &messages;
           int n;
-          for (n = 1; n < limit && m; n++)
-            m = m->next;
-          if (m && m->next) {
-            history_free_messages(m->next);
-            m->next = NULL;
+          for (n = 0; n < limit && *mp; n++)
+            mp = &(*mp)->next;
+          if (*mp) {
+            history_free_messages(*mp);
+            *mp = NULL;
           }
         } else {
           struct HistoryMessage *extra = messages;
@@ -9164,8 +9197,15 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
       send_ch_rows(sptr, reqid, messages, 1);
 
       /* Send end marker; trailing T = this result was truncated at the
-       * requested limit (optional param, ignored by older parsers). */
-      if (truncated)
+       * requested limit (optional param, ignored by older parsers).  A
+       * result cut at the bound below what the asking server asked for
+       * is also U: its page cannot hold what it asked for, and gets the
+       * mark it gave itself when it dropped the rows past its own cap
+       * (add_fed_message: truncated and partial).  An origin from before
+       * U reads the first letter, T, as it always has. */
+      if (truncated && limit_clamped)
+        sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d TU", reqid, count);
+      else if (truncated)
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d T", reqid, count);
       else
         sendcmdto_one(&me, CMD_CHATHISTORY, sptr, "E %s %d", reqid, count);
