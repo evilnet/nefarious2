@@ -105,6 +105,7 @@ CMOCKA_TESTPROGS = \
 	auth_recheck_cmocka \
 	iauth_held_cmocka \
 	channel_speak_cmocka \
+	burst_modes_cmocka \
 	reveal_handlers_cmocka \
 	dbuf_find_line_cmocka \
 	input_hold_cmocka \
@@ -235,6 +236,7 @@ DEP_SRC = \
 	auth_recheck_cmocka.c \
 	iauth_held_cmocka.c \
 	channel_speak_cmocka.c \
+	burst_modes_cmocka.c \
 	reveal_handlers_cmocka.c \
 	dbuf_find_line_cmocka.c \
 	input_hold_cmocka.c \
@@ -819,6 +821,19 @@ channel_speak_cmocka.o: ${srcdir}/channel_speak_cmocka.c ../channel.c
 
 channel_speak_cmocka: $(CHANNEL_SPEAK_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(CHANNEL_SPEAK_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# burst_modes tests - the modes a relayed BURST carries: the REAL
+# modebuf_extract() and mode_parse().  The test includes channel.c,
+# compiled with -ffunction-sections and linked with --gc-sections, as
+# channel_speak does; what they reach of the rest of the ircd is stubbed
+# in the test.
+BURST_MODES_CMOCKA_OBJS = burst_modes_cmocka.o ../match.o ../ircd_string.o \
+	../ircd_snprintf.o ../ircd_alloc.o
+burst_modes_cmocka.o: ${srcdir}/burst_modes_cmocka.c ../channel.c
+	${CC} ${CFLAGS} -Wno-address -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/burst_modes_cmocka.c
+
+burst_modes_cmocka: $(BURST_MODES_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(BURST_MODES_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # reveal_handlers tests - the JOIN that shows a hidden (+D) member, as a
 # TOPIC and a MODE send it and relay their line: the REAL
