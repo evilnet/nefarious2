@@ -80,6 +80,7 @@
  */
 #include "config.h"
 
+#include "channel.h"
 #include "client.h"
 #include "ircd.h"
 #include "ircd_alloc.h"
@@ -171,6 +172,11 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
         ClearAccount(acptr);
         cli_user(acptr)->kc_id[0] = '\0';
         ircd_strncpy(cli_user(acptr)->account, "", ACCOUNTLEN + 1);
+        /* Account bans (~a:) no longer match: the verdicts cached for the
+         * removed account go (a member of ours; a remote one caches none
+         * here). */
+        if (MyConnect(acptr))
+          member_ban_cache_clear(acptr);
 
         sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
                                                "*");
@@ -199,6 +205,11 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
         ircd_strncpy(cli_user(acptr)->account, parv[3], ACCOUNTLEN + 1);
         SetAccount(acptr);
+        /* Account bans (~a:) match by account: a member of ours forgets
+         * the verdicts cached for its previous account.  (A remote
+         * user's memberships cache nothing here.) */
+        if (MyConnect(acptr))
+          member_ban_cache_clear(acptr);
 
         if (parc > 4) {
           cli_user(acptr)->acc_create = atoi(parv[4]);
@@ -346,6 +357,8 @@ int ms_account(struct Client* cptr, struct Client* sptr, int parc,
 
     ircd_strncpy(cli_user(acptr)->account, parv[2], ACCOUNTLEN + 1);
     SetAccount(acptr);
+    if (MyConnect(acptr))
+      member_ban_cache_clear(acptr);   /* account bans match it now */
 
     sendcmdto_common_channels_capab_butone(acptr, CMD_ACCOUNT, acptr, CAP_ACCNOTIFY, CAP_NONE,
                                            "%s", cli_user(acptr)->account);

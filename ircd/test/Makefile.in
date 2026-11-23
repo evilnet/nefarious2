@@ -7,6 +7,7 @@ LDFLAGS  =
 CC = @CC@
 
 TESTPROGS = \
+	ban_cache_t \
 	burst_relay_t \
 	burst_modes_t \
 	burst_netride_t \
@@ -21,6 +22,7 @@ TESTPROGS = \
 	parse_line_t
 
 DEP_SRC = \
+	ban_cache_t.c \
 	burst_relay_t.c \
 	burst_modes_t.c \
 	burst_netride_t.c \
@@ -51,6 +53,22 @@ depend: ${DEP_SRC}
 
 install:
 
+# A member's cached ban verdicts follow what its bans match: the real
+# predicates in channel.c, and the real ms_account(), ms_svsinfo() and
+# add_mark() that change what they match.  Each is compiled with
+# -ffunction-sections and linked with --gc-sections, so only what they
+# reach is kept; the rest of the server is stubbed in the test.
+BAN_CACHE_T_REAL = bc_m_account.o bc_m_svsinfo.o bc_s_conf.o
+bc_m_account.o: ../m_account.c
+bc_m_svsinfo.o: ../m_svsinfo.c
+bc_s_conf.o: ../s_conf.c
+${BAN_CACHE_T_REAL}:
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ $<
+ban_cache_t.o: ${srcdir}/ban_cache_t.c ../channel.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/ban_cache_t.c
+BAN_CACHE_T_OBJS = ban_cache_t.o ${BAN_CACHE_T_REAL} test_stub.o ../ircd_alloc.o ../ircd_snprintf.o ../ircd_string.o ../match.o
+ban_cache_t: $(BAN_CACHE_T_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(BAN_CACHE_T_OBJS)
 BURST_RELAY_T_OBJS = burst_relay_t.o test_stub.o ../m_burst.o ../ircd_alloc.o ../ircd_snprintf.o ../ircd_string.o ../match.o
 burst_relay_t: $(BURST_RELAY_T_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(BURST_RELAY_T_OBJS)

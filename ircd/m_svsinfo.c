@@ -24,6 +24,7 @@
  */
 #include "config.h"
 
+#include "channel.h"
 #include "client.h"
 #include "handlers.h"
 #include "ircd.h"
@@ -61,6 +62,7 @@ int ms_svsinfo(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
   /* Set the info line, if the length is over REALLEN then it will
      be truncated */
   ircd_strncpy(acptr->cli_info, parv[2], REALLEN + 1);
+  member_ban_cache_clear(acptr);        /* ~r bans match it afresh */
 
 
   sendcmdto_serv_butone(sptr, CMD_SVSINFO, cptr, "%C :%s", acptr, acptr->cli_info);

@@ -1792,6 +1792,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
       } else
 	cli_user(acptr)->kc_id[0] = '\0';   /* +r arrived without one */
       ircd_strncpy(cli_user(acptr)->account, account, len);
+      /* Account bans (~a:) match it now: a member of ours forgets its
+       * cached ban verdicts. */
+      if (MyConnect(acptr))
+        member_ban_cache_clear(acptr);
   }
 
   if (!FlagHas(&setflags, FLAG_CLOAKIP) && IsCloakIP(acptr))

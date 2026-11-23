@@ -153,6 +153,12 @@ void auth_end_loc(struct AuthRequest *auth)
 {
 }
 
+/* channel.c: an account change forgets a member's cached ban verdicts
+ * (ban_cache_t checks that); these cases have no channels. */
+void member_ban_cache_clear(struct Client *cptr)
+{
+}
+
 /* ---------- checks ---------- */
 
 static int checks;              /**< checks evaluated */

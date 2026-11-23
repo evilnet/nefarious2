@@ -26,6 +26,7 @@
 #include "s_conf.h"
 #include "IPcheck.h"
 #include "class.h"
+#include "channel.h"
 #include "client.h"
 #include "crule.h"
 #include "ircd_crypt.h"
@@ -2064,6 +2065,7 @@ int add_mark(struct Client* sptr, const char* mark)
     assert(0 != lp->value.cp);
     strcpy(lp->value.cp, mark);
     cli_marks(sptr) = lp;
+    member_ban_cache_clear(sptr);       /* ~m and ~M bans match it afresh */
   }
   return 0;
 }
