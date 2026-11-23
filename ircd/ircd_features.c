@@ -54,6 +54,7 @@
 #include "s_misc.h"
 #include "s_stats.h"
 #include "s_user.h"
+#include "stale.h"
 #include "send.h"
 #include "struct.h"
 #include "sys.h"    /* FALSE bleah */
@@ -1530,6 +1531,7 @@ static struct FeatureDesc {
   F_I(METADATA_CACHE_TTL, 0, 14400, 0),
   F_I(METADATA_PURGE_FREQUENCY, 0, 3600, feature_notify_metadata_purge_frequency),
   F_I(METADATA_TOMBSTONE_TTL, 0, 2592000, 0), /* 30 days; a D clock row older than this is purged */
+  F_I(STALE_AFTER, 0, 1209600, 0), /* 14 days; read through stale_limit() */
 #ifdef USE_ZSTD
   F_I(COMPRESS_THRESHOLD, 0, 256, feature_notify_compress_threshold),
   F_I(COMPRESS_LEVEL, 0, 3, feature_notify_compress_level),
@@ -2138,6 +2140,15 @@ feature_int(enum Feature feat)
   assert((features[feat].flags & FEAT_MASK) == FEAT_INT);
 
   return features[feat].v_int;
+}
+
+/** The stale-data limit, in seconds: STALE_AFTER, never below
+ * STALE_LIMIT_MIN.  Every reader of the setting reads it here.
+ */
+time_t
+stale_limit(void)
+{
+  return stale_limit_clamp(feature_int(FEAT_STALE_AFTER));
 }
 
 /** Return a feature's boolean value.

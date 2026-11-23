@@ -86,6 +86,7 @@ CMOCKA_TESTPROGS = \
 	metadata_lww_cmocka \
 	metadata_prereg_cmocka \
 	metadata_store_cmocka \
+	stale_cmocka \
 	bouncer_record_cmocka \
 	webpush_line_cmocka \
 	websocket_cmocka \
@@ -209,6 +210,7 @@ DEP_SRC = \
 	metadata_lww_cmocka.c \
 	metadata_prereg_cmocka.c \
 	metadata_store_cmocka.c \
+	stale_cmocka.c \
 	bouncer_record_cmocka.c \
 	webhook_eventlog_cmocka.c \
 	webpush_line_cmocka.c \
@@ -1446,6 +1448,15 @@ METADATA_STORE_CMOCKA_OBJS = metadata_store_cmocka.o test_stub.o ../metadata.o \
 	../ircd_string.o ../ircd_snprintf.o ../ircd_alloc.o fake_db.o
 metadata_store_cmocka: $(METADATA_STORE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) -Wl,--wrap=db_env_open -Wl,--wrap=db_iter_next $(METADATA_STORE_CMOCKA_OBJS) $(CMOCKA_LIBS) $(ZSTD_LIBS)
+
+# stale tests - the stale-data limit's decisions; the module is pure (no
+# ircd deps)
+stale_test.o: ../stale.c ../../include/stale.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../stale.c
+
+STALE_CMOCKA_OBJS = stale_cmocka.o stale_test.o
+stale_cmocka: $(STALE_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(STALE_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # bouncer_record tests - the record decoder calls nothing in the ircd
 bouncer_record_test.o: ../bouncer_record.c ../../include/bouncer_record.h ../../include/bouncer_session.h

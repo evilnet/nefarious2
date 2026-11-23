@@ -2352,3 +2352,18 @@ FAKELAG_ACCOUNT_TIME
 
 The window, in seconds, over which an account may draw at most
 FAKELAG_BORROW (1 to 3600).
+
+STALE_AFTER
+ * Type: integer
+ * Default: 1209600
+
+How long, in seconds, a server may be gone from the network and still
+be caught up when it comes back.  The default is 14 days.  Nothing
+about an absent server is kept for ever: once it has been gone longer
+than this, the rest of the network forgets it, and the state it stored
+before it left (history, metadata) is stale.  Within the limit the
+other servers keep what a returning server needs to catch up.
+
+Every server of a network should use the same value: a server that
+forgets sooner than its peers can answer a returning server with less
+than it needs.  A value below 60 is read as 60 (useful only for tests).

@@ -248,6 +248,7 @@ IRCD_SRC = \
 	webpush_line.c \
 	metadata.c \
 	metadata_lww.c \
+	stale.c \
 	metadata_prereg.c \
 	metadata_sync.c \
 	m_rehash.c \
