@@ -18,6 +18,7 @@
 
 #include "webpush.h"
 #include "webpush_keyring.h"
+#include "webpush_endpoint.h"
 #include "ircd_log.h"
 #ifdef USE_LIBKC
 #include "ircd_kc_adapter.h"
@@ -38,6 +39,8 @@
 
 #ifdef USE_LIBKC
 #include <curl/curl.h>   /* curl_slist */
+#include <arpa/inet.h>   /* inet_ntop */
+#include <netinet/in.h>
 #endif
 
 #include <string.h>
@@ -951,6 +954,34 @@ static void webpush_http_callback(struct kc_http_response *resp, void *data)
   }
 }
 
+/** The HTTP client's question before it connects a delivery to \a addr
+ * (each address the endpoint's name resolved to): only a public one
+ * (webpush_endpoint_address_ok()).  The registered URL was checked, but a
+ * name can lead anywhere, and a subscription from another server was not
+ * checked on this one. */
+static int webpush_connect_check(const struct sockaddr *addr, size_t len,
+                                 void *data)
+{
+  char ip[INET6_ADDRSTRLEN] = "?";
+
+  (void)data;
+  if (webpush_endpoint_address_ok(addr, len))
+    return 1;
+  if (addr && addr->sa_family == AF_INET && len >= sizeof(struct sockaddr_in)) {
+    struct sockaddr_in sin;
+    memcpy(&sin, addr, sizeof(sin));
+    inet_ntop(AF_INET, &sin.sin_addr, ip, sizeof(ip));
+  } else if (addr && addr->sa_family == AF_INET6
+             && len >= sizeof(struct sockaddr_in6)) {
+    struct sockaddr_in6 sin6;
+    memcpy(&sin6, addr, sizeof(sin6));
+    inet_ntop(AF_INET6, &sin6.sin6_addr, ip, sizeof(ip));
+  }
+  log_write(LS_SYSTEM, L_WARNING, 0,
+            "WebPush: not connecting to %s: not a public address", ip);
+  return 0;
+}
+
 int webpush_send_async(const struct webpush_subscription *sub,
                        const unsigned char *encrypted, size_t encrypted_len,
                        unsigned long ttl,
@@ -1042,6 +1073,7 @@ int webpush_send_async(const struct webpush_subscription *sub,
   req.headers = headers;
   req.bearer_token = NULL;
   req.timeout_ms = 30000;
+  req.connect_check = webpush_connect_check;   /* also https only, no proxy */
 
   /* Submit async request */
   rc = kc_http_request(&req, webpush_http_callback, ctx);

@@ -27,6 +27,17 @@ struct kc_http_request {
     const char *auth_user;        /* HTTP Basic auth username, or NULL */
     const char *auth_passwd;      /* HTTP Basic auth password, or NULL */
     long timeout_ms;              /* Per-request timeout (0 = default) */
+    /* Optional: asked about every address the request is about to
+     * connect to (each one a name resolved to); nonzero allows it.  A
+     * refused address is not connected to, and when none is left the
+     * request fails as an unreachable host does.  Nothing connects such
+     * a request past the check: it uses https only, no proxy (whatever
+     * the environment names), follows no redirect, and opens its own
+     * connection, closed when done (a pooled one would skip the check).
+     * NULL: any address, and none of these limits. */
+    int (*connect_check)(const struct sockaddr *addr, size_t addrlen,
+                         void *data);
+    void *connect_check_data;     /* Passed to connect_check */
 };
 
 /* HTTP response (passed to callback, caller must not free) */

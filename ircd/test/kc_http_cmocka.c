@@ -20,6 +20,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
 #include <curl/curl.h>
 
@@ -40,6 +44,8 @@ struct setopt_rec {
     CURL *easy;
     CURLoption option;
     long lval;          /* the value, for a long-typed option */
+    void *pval;         /* the value, for an object or string option */
+    void (*fval)(void); /* the value, for a function option */
     CURLcode rc;        /* what the real libcurl answered */
 };
 
@@ -59,6 +65,8 @@ CURLcode __wrap_curl_easy_setopt(CURL *easy, CURLoption option, ...)
         g_setopts[g_nsetopts].easy = easy;
         g_setopts[g_nsetopts].option = option;
         g_setopts[g_nsetopts].lval = 0;
+        g_setopts[g_nsetopts].pval = NULL;
+        g_setopts[g_nsetopts].fval = NULL;
     }
     if (option < CURLOPTTYPE_OBJECTPOINT) {
         long v = va_arg(ap, long);
@@ -66,9 +74,15 @@ CURLcode __wrap_curl_easy_setopt(CURL *easy, CURLoption option, ...)
             g_setopts[g_nsetopts].lval = v;
         rc = __real_curl_easy_setopt(easy, option, v);
     } else if (option < CURLOPTTYPE_FUNCTIONPOINT) {
-        rc = __real_curl_easy_setopt(easy, option, va_arg(ap, void *));
+        void *v = va_arg(ap, void *);
+        if (g_nsetopts < MAX_SETOPTS)
+            g_setopts[g_nsetopts].pval = v;
+        rc = __real_curl_easy_setopt(easy, option, v);
     } else if (option < CURLOPTTYPE_OFF_T) {
-        rc = __real_curl_easy_setopt(easy, option, va_arg(ap, void (*)(void)));
+        void (*f)(void) = va_arg(ap, void (*)(void));
+        if (g_nsetopts < MAX_SETOPTS)
+            g_setopts[g_nsetopts].fval = f;
+        rc = __real_curl_easy_setopt(easy, option, f);
     } else if (option < CURLOPTTYPE_BLOB) {
         rc = __real_curl_easy_setopt(easy, option, va_arg(ap, curl_off_t));
     } else {
@@ -316,9 +330,219 @@ static void test_init_quiet_on_capable_libcurl(void **state)
 #endif
 }
 
+/* --- connect_check --- */
+
+static int g_check_allow;
+static int g_check_calls;
+static int g_check_family;
+static void *g_check_data;
+static struct sockaddr_in g_check_sin;   /* the last IPv4 address asked about */
+
+static int record_check(const struct sockaddr *addr, size_t addrlen, void *data)
+{
+    g_check_calls++;
+    g_check_family = addr->sa_family;
+    g_check_data = data;
+    if (addr->sa_family == AF_INET && addrlen >= sizeof(g_check_sin))
+        memcpy(&g_check_sin, addr, sizeof(g_check_sin));
+    return g_check_allow;
+}
+
+/* The setopt record for option \a opt on handle \a easy, or NULL. */
+static const struct setopt_rec *find_setopt(CURL *easy, CURLoption opt)
+{
+    int i;
+    for (i = 0; i < g_nsetopts && i < MAX_SETOPTS; i++)
+        if (g_setopts[i].easy == easy && g_setopts[i].option == opt)
+            return &g_setopts[i];
+    return NULL;
+}
+
+static CURL *handle_of(const char *url)
+{
+    int i;
+    for (i = 0; i < g_nsetopts && i < MAX_SETOPTS; i++)
+        if (g_setopts[i].option == CURLOPT_URL && g_setopts[i].pval
+            && !strcmp((const char *)g_setopts[i].pval, url))
+            return g_setopts[i].easy;
+    return NULL;
+}
+
+/* A request with a connect_check gets a socket hook that asks it about
+ * each address before a socket is opened (refused: no socket, curl's
+ * CURL_SOCKET_BAD), and nothing that would connect it past the hook: https
+ * only, no proxy (whatever the environment says), no redirect, no pooled
+ * connection.  A request without one (every Keycloak call) gets none of
+ * this. */
+static void test_connect_check_request(void **state)
+{
+    struct kc_http_request plain, checked;
+    const char *plain_url = "http://127.0.0.1:9/plain";
+    const char *checked_url = "https://127.0.0.1:9/checked";
+    const struct setopt_rec *fn, *data, *proto;
+    curl_opensocket_callback open_cb;
+    struct curl_sockaddr sa;
+    struct sockaddr_in sin;
+    CURL *hp, *hc;
+    curl_socket_t s;
+    int marker;
+
+    (void)state;
+    assert_int_equal(kc_http_init(&fake_ops, &capture_ops), 0);
+    memset(&plain, 0, sizeof(plain));
+    plain.url = plain_url;
+    memset(&checked, 0, sizeof(checked));
+    checked.url = checked_url;
+    checked.method = "POST";
+    checked.connect_check = record_check;
+    checked.connect_check_data = &marker;
+    g_check_allow = 0;
+    assert_int_equal(kc_http_request(&plain, ignore_response, NULL), 0);
+    assert_int_equal(kc_http_request(&checked, ignore_response, NULL), 0);
+    assert_true(g_nsetopts <= MAX_SETOPTS);
+    hp = handle_of(plain_url);
+    hc = handle_of(checked_url);
+    assert_non_null(hp);
+    assert_non_null(hc);
+
+    /* No hook, no protocol limit, pooled connections without them. */
+    assert_null(find_setopt(hp, CURLOPT_OPENSOCKETFUNCTION));
+    assert_null(find_setopt(hp, CURLOPT_FRESH_CONNECT));
+    assert_null(find_setopt(hp, CURLOPT_FORBID_REUSE));
+    assert_null(find_setopt(hp, CURLOPT_PROXY));
+    assert_null(find_setopt(hp, CURLOPT_NOPROXY));
+    assert_null(find_setopt(hp, CURLOPT_FOLLOWLOCATION));
+#if LIBCURL_VERSION_NUM >= 0x075500
+    assert_null(find_setopt(hp, CURLOPT_PROTOCOLS_STR));
+    assert_null(find_setopt(hp, CURLOPT_REDIR_PROTOCOLS_STR));
+#else
+    assert_null(find_setopt(hp, CURLOPT_PROTOCOLS));
+    assert_null(find_setopt(hp, CURLOPT_REDIR_PROTOCOLS));
+#endif
+
+    /* https only, as the linked libcurl understood it. */
+#if LIBCURL_VERSION_NUM >= 0x075500
+    proto = find_setopt(hc, CURLOPT_PROTOCOLS_STR);
+    assert_non_null(proto);
+    assert_string_equal((const char *)proto->pval, "https");
+#else
+    proto = find_setopt(hc, CURLOPT_PROTOCOLS);
+    assert_non_null(proto);
+    assert_int_equal(proto->lval, CURLPROTO_HTTPS);
+#endif
+    assert_int_equal(proto->rc, CURLE_OK);
+#if LIBCURL_VERSION_NUM >= 0x075500
+    proto = find_setopt(hc, CURLOPT_REDIR_PROTOCOLS_STR);
+    assert_non_null(proto);
+    assert_string_equal((const char *)proto->pval, "https");
+#else
+    proto = find_setopt(hc, CURLOPT_REDIR_PROTOCOLS);
+    assert_non_null(proto);
+    assert_int_equal(proto->lval, CURLPROTO_HTTPS);
+#endif
+    assert_int_equal(proto->rc, CURLE_OK);
+
+    /* No redirect is followed. */
+    proto = find_setopt(hc, CURLOPT_FOLLOWLOCATION);
+    assert_non_null(proto);
+    assert_int_equal(proto->lval, 0);
+
+    /* No proxy: the socket the hook judges is the endpoint's own. */
+    proto = find_setopt(hc, CURLOPT_PROXY);
+    assert_non_null(proto);
+    assert_string_equal((const char *)proto->pval, "");
+    assert_int_equal(proto->rc, CURLE_OK);
+    proto = find_setopt(hc, CURLOPT_NOPROXY);
+    assert_non_null(proto);
+    assert_string_equal((const char *)proto->pval, "*");
+    assert_int_equal(proto->rc, CURLE_OK);
+
+    /* A checked request never rides a pooled connection (libcurl does
+     * not open a socket for one, so the hook would not be asked) and
+     * leaves none behind for another request. */
+    proto = find_setopt(hc, CURLOPT_FRESH_CONNECT);
+    assert_non_null(proto);
+    assert_int_equal(proto->lval, 1);
+    proto = find_setopt(hc, CURLOPT_FORBID_REUSE);
+    assert_non_null(proto);
+    assert_int_equal(proto->lval, 1);
+
+    /* The hook, driven as libcurl drives it. */
+    fn = find_setopt(hc, CURLOPT_OPENSOCKETFUNCTION);
+    data = find_setopt(hc, CURLOPT_OPENSOCKETDATA);
+    assert_non_null(fn);
+    assert_non_null(data);
+    assert_int_equal(fn->rc, CURLE_OK);
+    open_cb = (curl_opensocket_callback)fn->fval;
+
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons(9);
+    sin.sin_addr.s_addr = htonl(0x7f000001);
+    memset(&sa, 0, sizeof(sa));
+    sa.family = AF_INET;
+    sa.socktype = SOCK_STREAM;
+    sa.protocol = IPPROTO_TCP;
+    sa.addrlen = sizeof(sin);
+    memcpy(&sa.addr, &sin, sizeof(sin));
+
+    g_check_calls = 0;
+    g_check_allow = 0;
+    s = open_cb(data->pval, CURLSOCKTYPE_IPCXN, &sa);
+    assert_int_equal(s, CURL_SOCKET_BAD);
+    assert_int_equal(g_check_calls, 1);
+    assert_int_equal(g_check_family, AF_INET);
+    assert_ptr_equal(g_check_data, &marker);
+
+    g_check_allow = 1;
+    s = open_cb(data->pval, CURLSOCKTYPE_IPCXN, &sa);
+    assert_true(s != CURL_SOCKET_BAD);
+    assert_int_equal(g_check_calls, 2);
+    close(s);
+}
+
+/* With a proxy named in the environment, a checked request still connects
+ * (and asks the hook about) the endpoint's address, not the proxy's.  The
+ * hook refuses, so nothing is ever connected.  libcurl starts the connect
+ * of an IP-literal URL inside kc_http_request()'s first kick; if a libcurl
+ * did not, the hook is not asked and the case says so and skips. */
+static void test_connect_check_ignores_env_proxy(void **state)
+{
+    static const char *vars[] = { "https_proxy", "HTTPS_PROXY", "all_proxy",
+                                  "ALL_PROXY" };
+    struct kc_http_request checked;
+    size_t i;
+
+    (void)state;
+    for (i = 0; i < sizeof(vars) / sizeof(vars[0]); i++)
+        setenv(vars[i], "http://127.0.0.2:3128", 1);
+    unsetenv("no_proxy");
+    unsetenv("NO_PROXY");
+    assert_int_equal(kc_http_init(&fake_ops, &capture_ops), 0);
+    memset(&checked, 0, sizeof(checked));
+    checked.url = "https://127.0.0.3:9/checked";
+    checked.method = "POST";
+    checked.connect_check = record_check;
+    g_check_allow = 0;
+    g_check_calls = 0;
+    memset(&g_check_sin, 0, sizeof(g_check_sin));
+    assert_int_equal(kc_http_request(&checked, ignore_response, NULL), 0);
+    for (i = 0; i < sizeof(vars) / sizeof(vars[0]); i++)
+        unsetenv(vars[i]);
+    if (g_check_calls == 0) {
+        print_message("  libcurl opened no socket in the first kick\n");
+        skip();
+    }
+    assert_int_equal(g_check_family, AF_INET);
+    assert_int_equal(ntohl(g_check_sin.sin_addr.s_addr), 0x7f000003);
+    assert_int_equal(ntohs(g_check_sin.sin_port), 9);
+}
+
 int main(void)
 {
     const struct CMUnitTest tests[] = {
+        cmocka_unit_test_setup_teardown(test_connect_check_request, reset, teardown),
+        cmocka_unit_test_setup_teardown(test_connect_check_ignores_env_proxy, reset, teardown),
         cmocka_unit_test_setup_teardown(test_request_handle_sets_quick_exit, reset, teardown),
         cmocka_unit_test_setup_teardown(test_sync_every_attempt_sets_quick_exit, reset, teardown),
         cmocka_unit_test_setup_teardown(test_init_warns_without_asynchdns, reset, teardown),

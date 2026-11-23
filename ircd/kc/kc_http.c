@@ -11,6 +11,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 
 /* --- Internal state --- */
 
@@ -51,6 +52,9 @@ struct kc_request_ctx {
     unsigned long start_time;
     struct curl_slist *owned_headers;  /* Headers owned by this request */
     struct kc_location_capture location; /* The response's Location header */
+    int (*connect_check)(const struct sockaddr *addr, size_t addrlen,
+                         void *data);   /* kc_http_request.connect_check */
+    void *connect_check_data;
 };
 
 /* --- Forward declarations --- */
@@ -65,6 +69,8 @@ static void process_pending_cleanup(void);
 static size_t write_callback(char *ptr, size_t size, size_t nmemb, void *userdata);
 static size_t header_callback(char *ptr, size_t size, size_t nmemb, void *userdata);
 static void request_ctx_free(struct kc_request_ctx *ctx);
+static curl_socket_t open_socket_cb(void *clientp, curlsocktype purpose,
+                                    struct curl_sockaddr *address);
 
 /* --- Timer handle --- */
 static void *g_timer_handle = NULL;
@@ -267,6 +273,36 @@ int kc_http_request(const struct kc_http_request *req,
     /* SSL: verify by default */
     curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(easy, CURLOPT_SSL_VERIFYHOST, 2L);
+
+    /* The caller's say on every address connected to (open_socket_cb),
+     * and nothing that would connect the request past it. */
+    if (req->connect_check) {
+        ctx->connect_check = req->connect_check;
+        ctx->connect_check_data = req->connect_check_data;
+        curl_easy_setopt(easy, CURLOPT_OPENSOCKETFUNCTION, open_socket_cb);
+        curl_easy_setopt(easy, CURLOPT_OPENSOCKETDATA, ctx);
+        /* libcurl opens no socket for a pooled connection, so the check
+         * would not be asked: the request takes none (another request's,
+         * or one made before the name changed) and leaves its own for no
+         * other request. */
+        curl_easy_setopt(easy, CURLOPT_FRESH_CONNECT, 1L);
+        curl_easy_setopt(easy, CURLOPT_FORBID_REUSE, 1L);
+        /* Through a proxy the socket checked would be the proxy's, and the
+         * proxy would connect to the host unchecked: none, whatever the
+         * environment (https_proxy, ALL_PROXY, ...) names. */
+        curl_easy_setopt(easy, CURLOPT_PROXY, "");
+        curl_easy_setopt(easy, CURLOPT_NOPROXY, "*");
+        /* https only, and no redirect followed (libcurl's default, set
+         * here so that it stays so; a hop would be limited to https). */
+        curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 0L);
+#if LIBCURL_VERSION_NUM >= 0x075500
+        curl_easy_setopt(easy, CURLOPT_PROTOCOLS_STR, "https");
+        curl_easy_setopt(easy, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+#else
+        curl_easy_setopt(easy, CURLOPT_PROTOCOLS, (long)CURLPROTO_HTTPS);
+        curl_easy_setopt(easy, CURLOPT_REDIR_PROTOCOLS, (long)CURLPROTO_HTTPS);
+#endif
+    }
 
     /* Add to multi handle */
     rc = curl_multi_add_handle(g_multi, easy);
@@ -576,6 +612,28 @@ static size_t header_callback(char *ptr, size_t size, size_t nmemb, void *userda
 
     kc_location_capture_line(&ctx->location, ptr, total);
     return total;
+}
+
+/*
+ * CURLOPT_OPENSOCKETFUNCTION for a request with a connect_check: libcurl
+ * calls it for every address it is about to connect to, after the name
+ * was resolved.  An address the check refuses gets no socket.
+ */
+static curl_socket_t open_socket_cb(void *clientp, curlsocktype purpose,
+                                    struct curl_sockaddr *address)
+{
+    struct kc_request_ctx *ctx = (struct kc_request_ctx *)clientp;
+    int type = address->socktype;
+
+    (void)purpose;
+    if (ctx->connect_check
+        && !ctx->connect_check(&address->addr, (size_t)address->addrlen,
+                               ctx->connect_check_data))
+        return CURL_SOCKET_BAD;
+#ifdef SOCK_CLOEXEC
+    type |= SOCK_CLOEXEC;
+#endif
+    return socket(address->family, type, address->protocol);
 }
 
 /*

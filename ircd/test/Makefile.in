@@ -71,6 +71,7 @@ CMOCKA_TESTPROGS = \
 	nick_request_cmocka \
 	iauth_respawn_cmocka \
 	webpush_mute_cmocka \
+	webpush_endpoint_cmocka \
 	webpush_expiry_cmocka \
 	webpush_keyring_cmocka \
 	webpush_attention_cmocka \
@@ -192,6 +193,7 @@ DEP_SRC = \
 	nick_request_cmocka.c \
 	iauth_respawn_cmocka.c \
 	webpush_mute_cmocka.c \
+	webpush_endpoint_cmocka.c \
 	webpush_expiry_cmocka.c \
 	webpush_keyring_cmocka.c \
 	webpush_attention_cmocka.c \
@@ -1325,6 +1327,14 @@ webpush_mute_test.o: ../webpush_mute.c ../../include/webpush_mute.h
 WEBPUSH_MUTE_CMOCKA_OBJS = webpush_mute_cmocka.o webpush_mute_test.o
 webpush_mute_cmocka: $(WEBPUSH_MUTE_CMOCKA_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(WEBPUSH_MUTE_CMOCKA_OBJS) $(CMOCKA_LIBS)
+
+# webpush_endpoint tests - the module is pure (no log_write, no ircd deps)
+webpush_endpoint_test.o: ../webpush_endpoint.c ../../include/webpush_endpoint.h
+	${CC} ${CFLAGS} ${CPPFLAGS} -c -o $@ ../webpush_endpoint.c
+
+WEBPUSH_ENDPOINT_CMOCKA_OBJS = webpush_endpoint_cmocka.o webpush_endpoint_test.o
+webpush_endpoint_cmocka: $(WEBPUSH_ENDPOINT_CMOCKA_OBJS)
+	${CC} -o $@ $(LDFLAGS) $(WEBPUSH_ENDPOINT_CMOCKA_OBJS) $(CMOCKA_LIBS)
 
 # webpush_expiry tests - the module is pure (no log_write, no ircd deps)
 webpush_expiry_test.o: ../webpush_expiry.c ../../include/webpush_expiry.h

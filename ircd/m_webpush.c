@@ -64,6 +64,7 @@
 #include "webpush_keyring.h"
 #include "webpush_attention.h"
 #include "webpush_mute.h"
+#include "webpush_endpoint.h"
 #include "webpush_expiry.h"
 #include "webpush_store.h"
 #include "bouncer_session.h"
@@ -116,39 +117,16 @@ static void send_webpush_fail(struct Client *sptr, const char *code,
                 code, context ? context : "*", message);
 }
 
-/** Check if an endpoint URL is valid (HTTPS only, no internal IPs).
+/** Check if an endpoint URL is valid (HTTPS only, no internal IPs:
+ * webpush_endpoint_url_ok()).
  * @param[in] endpoint The endpoint URL to validate.
  * @return 1 if valid, 0 otherwise.
  */
 static int is_valid_endpoint(const char *endpoint)
 {
-  /* Must start with https:// */
-  if (strncmp(endpoint, "https://", 8) != 0)
-    return 0;
-
-  /* Check length */
   if (strlen(endpoint) > WEBPUSH_MAX_ENDPOINT_LEN)
     return 0;
-
-  /* Block localhost and private IPs */
-  if (strstr(endpoint, "://localhost") ||
-      strstr(endpoint, "://127.") ||
-      strstr(endpoint, "://10.") ||
-      strstr(endpoint, "://192.168.") ||
-      strstr(endpoint, "://172.16.") ||
-      strstr(endpoint, "://172.17.") ||
-      strstr(endpoint, "://172.18.") ||
-      strstr(endpoint, "://172.19.") ||
-      strstr(endpoint, "://172.2") ||
-      strstr(endpoint, "://172.30.") ||
-      strstr(endpoint, "://172.31.") ||
-      strstr(endpoint, "://[::1]") ||
-      strstr(endpoint, "://[fe80:") ||
-      strstr(endpoint, "://[fc") ||
-      strstr(endpoint, "://[fd"))
-    return 0;
-
-  return 1;
+  return webpush_endpoint_url_ok(endpoint);
 }
 
 /** Parse keys parameter in format "p256dh=...;auth=..."
