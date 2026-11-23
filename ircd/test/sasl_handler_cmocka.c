@@ -6464,6 +6464,53 @@ static void abort_during_webirc_check_drops_held_lines(void **state)
   assert_no_exchange(c);
 }
 
+#ifdef USE_LIBKC
+/** Lines held for a WEBIRC check whose replay ends an exchange inside a
+ * line (here the local tier's 904 for data that is not base64): the next
+ * held line starts a new exchange, and its name is checked as any first
+ * line's is -- credentials there reach no tier, services or IAuth, as a
+ * mechanism (908 and 904), though more held lines follow it. */
+static void replayed_line_after_an_ended_exchange_is_checked(void **state)
+{
+  int i;
+
+  for (i = 0; i < 2; i++) {             /* services, then IAuth, behind the local tier */
+    struct Client *c;
+    struct fake *f;
+    char blob[128];
+    int k;
+
+    sasl_init_once();
+    iauth_on = i;
+    iauth_starts = iauth_datas = 0;
+    ntlog = 0;
+    c = new_client(166 + i, "wr", 1, REG_KEEPS);
+    f = fake_of(c);
+    plain_b64("wr", "secretpw", blob);
+
+    SetWebIRCPending(c);
+    assert_int_equal(authenticate(c, "PLAIN"), 0);
+    assert_int_equal(authenticate(c, "!!!!"), 0);
+    assert_int_equal(authenticate(c, blob), 0);
+    assert_int_equal(authenticate(c, "+"), 0);
+    assert_non_null(cli_saslheld(c));
+    assert_false(has_numeric(f, ERR_SASLFAIL));
+
+    ClearWebIRCPending(c);                                     /* the check */
+    assert_int_equal(authenticate_replay(c), 0);
+    assert_null(cli_saslheld(c));
+
+    assert_int_equal(iauth_starts + iauth_datas, 0);
+    for (k = 0; k < ntlog; k++)
+      assert_null(strstr(tlog[k], blob));
+    assert_false(tlog_has_prefix("servers"));   /* no SASL line went out */
+    assert_true(has_numeric(f, ERR_SASLMECHS));
+    assert_true(has_numeric(f, ERR_SASLFAIL));
+    assert_no_exchange(c);
+  }
+}
+#endif
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -6580,6 +6627,9 @@ int main(void)
 #endif
     cmocka_unit_test_setup(held_during_webirc_check_then_replayed, setup),
     cmocka_unit_test_setup(abort_during_webirc_check_drops_held_lines, setup),
+#ifdef USE_LIBKC
+    cmocka_unit_test_setup(replayed_line_after_an_ended_exchange_is_checked, setup),
+#endif
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

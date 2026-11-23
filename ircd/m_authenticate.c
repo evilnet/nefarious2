@@ -319,8 +319,15 @@ int m_authenticate(struct Client* cptr, struct Client* sptr, int parc, char* par
    * A client that names an advertised mechanism in lower case ("plain")
    * is taken at its word, and the line goes on in the advertised
    * spelling: what a backend is sent is then a name out of this server's
-   * own list, never the client's bytes. */
-  if (!cli_saslsession(cptr) && !cli_saslcookie(cptr) && !cli_saslheld(cptr)
+   * own list, never the client's bytes.
+   *
+   * A line arriving while lines are held for a WEBIRC check is data of
+   * the held first line (checked when it came), and is held unchecked.
+   * The replay (authenticate_replay()) runs after the check has ended, so
+   * there every line that starts an exchange is checked here -- also one
+   * following a line whose exchange ended inside the replay. */
+  if (!cli_saslsession(cptr) && !cli_saslcookie(cptr)
+      && !(IsWebIRCPending(cptr) && cli_saslheld(cptr))
       && !sasl_mechanism_name_ok(parv[1])) {
     const char *mechs = cap_sasl_mechanisms();
     const char *listed = sasl_mechanism_listed(parv[1], mechs);
