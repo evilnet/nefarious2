@@ -267,8 +267,13 @@ int m_redact(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
                 "Message not found");
       return 0;
     } else if (rc < 0) {
-      /* Database error - allow redaction anyway (trust client): fall
-       * through to the store, fan-out and relay below. */
+      /* The store could not be read: the row the authorization needs (its
+       * type, sender and time) is unknown, so the redaction cannot be
+       * checked and is refused, for everyone -- nothing is stored, shown
+       * or relayed.  The client may try again. */
+      send_fail(sptr, "REDACT", "INTERNAL_ERROR", fail_ctx,
+                "Could not read message history, try again");
+      return 0;
     } else {
       /* Found the message: the one authorization rule (redact_index.c). */
       struct redact_auth_in ai;
