@@ -465,23 +465,10 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
                 "No such channel");
       return 0;
     }
-    /* For offline users, check if account has any metadata in LMDB */
-    if (metadata_lmdb_is_available()) {
-      struct MetadataEntry *entries = metadata_account_list(target);
-      if (entries) {
-        /* Account has LMDB data — valid offline target, proceed */
-        struct MetadataEntry *e = entries;
-        while (e) {
-          struct MetadataEntry *n = e->next;
-          metadata_free_entry(e);
-          e = n;
-        }
-      } else {
-        send_fail(sptr, "METADATA", "INVALID_TARGET", target,
-                  "No such target");
-        return 0;
-      }
-    } else {
+    /* For offline users, check if the account has any metadata in the
+     * store: a row metadata_account_list() would return, found by one
+     * seek (it used to list and decode them all, then free them). */
+    if (!metadata_lmdb_is_available() || !metadata_account_has_rows(target)) {
       send_fail(sptr, "METADATA", "INVALID_TARGET", target,
                 "No such target");
       return 0;

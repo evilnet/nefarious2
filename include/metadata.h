@@ -168,6 +168,14 @@ extern int metadata_account_set_permanent(const char *account, const char *key, 
  */
 extern struct MetadataEntry *metadata_account_list(const char *account);
 
+/** Would metadata_account_list() return a row for @a account?  Stops at
+ * the first such row instead of reading them all.  Tombstones are not
+ * rows (they live in the clock store); a server-managed key is.
+ * @param[in] account Account name.
+ * @return 1 yes; 0 no, the store unavailable, or a read error.
+ */
+extern int metadata_account_has_rows(const char *account);
+
 /*
  * Read Marker API (IRCv3 draft/read-marker)
  *

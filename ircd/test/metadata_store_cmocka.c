@@ -1,15 +1,19 @@
 /*
- * metadata_store_cmocka.c - the metadata store, on the REAL ../metadata.o
- * over the in-memory storage fake (fake_db.o).
+ * metadata_store_cmocka.c - the metadata store's account reads, on the
+ * REAL ../metadata.o over the in-memory storage fake (fake_db.o).
  *
+ *  - metadata_account_has_rows(): METADATA GET's test of an offline
+ *    target.  It must say "yes" for exactly the accounts
+ *    metadata_account_list() returns a row for -- every case below asks
+ *    both -- while stopping at the first such row: no walk of the rest.
  *  - metadata_account_purge_expired(): each purge it runs is governed by
  *    its own setting -- the tombstones by METADATA_TOMBSTONE_TTL, whatever
- *    METADATA_CACHE_TTL says.  The periodic callback (ircd.c) runs it
- *    whenever the store is up and leaves those decisions to it.
+ *    METADATA_CACHE_TTL says.
  *
  * metadata_lmdb_init() opens its environment with db_env_open(), which
  * the fake refuses (it has no on-disk env): the link wraps it
- * (-Wl,--wrap=db_env_open) to hand out a fake environment instead.  The
+ * (-Wl,--wrap=db_env_open) to hand out a fake environment instead, and
+ * db_iter_next() is wrapped to count the steps a read takes.  The
  * rest of the ircd metadata.o reaches is named at the end of this file;
  * none of it is on the paths under test.
  */
@@ -75,6 +79,15 @@ void db_cf_close(struct db_env *e, struct db_cf *cf) {}
 
 const char *db_strerror(int rc) { return "fake"; }
 
+/* Every step of an iterator metadata.o takes (-Wl,--wrap=db_iter_next). */
+static unsigned int steps;
+int __real_db_iter_next(struct db_iter *it);
+int __wrap_db_iter_next(struct db_iter *it)
+{
+  steps++;
+  return __real_db_iter_next(it);
+}
+
 static struct db_cf *cf_named(const char *name)
 {
   struct db_cf *cf = NULL;
@@ -123,6 +136,25 @@ static void put_clock(const char *account, const char *key, uint64_t ms,
   put_raw("metadata_clock", account, key, buf, (size_t)n);
 }
 
+static int listed(const char *account)
+{
+  struct MetadataEntry *list = metadata_account_list(account), *e, *n;
+  int any = list != NULL;
+
+  for (e = list; e; e = n) {
+    n = e->next;
+    metadata_free_entry(e);
+  }
+  return any;
+}
+
+/** has_rows answers exactly what list does, and returns @a want. */
+static void assert_has_rows(const char *account, int want)
+{
+  assert_int_equal(listed(account), want);
+  assert_int_equal(metadata_account_has_rows(account), want);
+}
+
 static int setup(void **state)
 {
   cache_ttl = 0;
@@ -139,6 +171,130 @@ static int teardown(void **state)
   fake_db_free(env);
   env = NULL;
   return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* metadata_account_has_rows                                           */
+/* ------------------------------------------------------------------ */
+
+/** A permanent row, a TTL row within its life, a legacy bare row. */
+static void an_account_with_rows_has_rows(void **state)
+{
+  put_value("ann", "avatar", "T0|P:http://x/a.png");
+  assert_has_rows("ann", 1);
+  put_value("bob", "url", "T1699999990|http://x");
+  cache_ttl = 100;
+  assert_has_rows("bob", 1);
+  put_value("cat", "bio", "legacy bare value");
+  assert_has_rows("cat", 1);
+}
+
+/** Nothing under the name -- the neighbours' rows are not its own: a
+ * name that is a prefix of another, or sorts just before or after it. */
+static void an_account_without_rows_has_none(void **state)
+{
+  put_value("ann", "avatar", "T0|P:x");
+  put_value("anna", "avatar", "T0|P:x");
+  put_value("am", "avatar", "T0|P:x");
+  assert_has_rows("an", 0);
+  assert_has_rows("annb", 0);
+  assert_has_rows("nobody", 0);
+  assert_has_rows("ann", 1);
+}
+
+/** Tombstones live in the clock CF, never as value rows: an account whose
+ * keys were all deleted has none. */
+static void an_account_with_only_tombstones_has_none(void **state)
+{
+  put_clock("dan", "avatar", 1699999000000ULL, 1);
+  put_clock("dan", "$cleared", 1699999000000ULL, 1);
+  assert_has_rows("dan", 0);
+}
+
+/** A server-managed key is a row like any other (list does not filter
+ * them), so it counts. */
+static void a_server_managed_row_counts(void **state)
+{
+  put_value("eve", "draft/persistence/profile", "T0|x");
+  assert_has_rows("eve", 1);
+}
+
+/** The name is folded, as the keys are. */
+static void the_name_is_folded(void **state)
+{
+  put_value("ann", "avatar", "T0|P:x");
+  assert_has_rows("ANN", 1);
+  assert_has_rows("Ann", 1);
+}
+
+/** Rows list skips do not count -- an expired cache row, a value that does
+ * not decode, a key too long for an entry -- and a skipped row first does
+ * not hide a listed one after it. */
+static void rows_list_skips_do_not_count(void **state)
+{
+  char longkey[METADATA_KEY_LEN + 8];
+
+  memset(longkey, 'k', METADATA_KEY_LEN);
+  longkey[METADATA_KEY_LEN] = '\0';
+
+  cache_ttl = 100;
+  put_value("fay", "a-old", "T1000|stale");     /* expired */
+  put_value("fay", "b-bad", "T12x|value");      /* does not decode */
+  put_value("fay", "c-bad", "T12");             /* no separator */
+  put_raw("metadata", "fay", longkey, "T0|x", 4); /* key too long */
+  assert_has_rows("fay", 0);
+
+  put_value("fay", "z-live", "T0|x");           /* after all of them */
+  assert_has_rows("fay", 1);
+
+  /* The same rows with expiry off: the old one counts again. */
+  cache_ttl = 0;
+  assert_has_rows("fay", 1);
+}
+
+/** No store: no rows, and no crash. */
+static void without_a_store_there_are_none(void **state)
+{
+  put_value("ann", "avatar", "T0|P:x");
+  metadata_lmdb_shutdown();
+  assert_has_rows("ann", 0);
+  assert_has_rows(NULL, 0);
+  assert_int_equal(metadata_lmdb_init("unused"), 0);   /* teardown's */
+}
+
+/** A name longer than any key prefix the store builds has none. */
+static void an_overlong_name_has_none(void **state)
+{
+  char name[CHANNELLEN + 8];
+
+  memset(name, 'n', CHANNELLEN + 1);
+  name[CHANNELLEN + 1] = '\0';
+  assert_has_rows(name, 0);
+}
+
+/** One seek: the first listed row ends it, however many follow (the
+ * listing steps over every one of them). */
+static void it_stops_at_the_first_row(void **state)
+{
+  struct db_cf *cf = cf_named("metadata");
+  unsigned int opens, firsts;
+  char key[16];
+  int i;
+
+  for (i = 0; i < 50; i++) {
+    snprintf(key, sizeof(key), "key%02d", i);
+    put_value("gus", key, "T0|x");
+  }
+  put_value("guy", "avatar", "T0|x");
+  opens = fake_db_iter_opens(cf);
+  firsts = fake_db_seek_firsts(cf);
+  steps = 0;
+  assert_int_equal(metadata_account_has_rows("gus"), 1);
+  assert_int_equal(fake_db_iter_opens(cf), opens + 1);
+  assert_int_equal(fake_db_seek_firsts(cf), firsts);
+  assert_int_equal(steps, 0);
+  assert_int_equal(listed("gus"), 1);
+  assert_int_equal(steps, 50);
 }
 
 /* ------------------------------------------------------------------ */
@@ -194,6 +350,15 @@ static void cache_rows_go_by_the_cache_ttl(void **state)
 int main(void)
 {
   const struct CMUnitTest tests[] = {
+    cmocka_unit_test_setup_teardown(an_account_with_rows_has_rows, setup, teardown),
+    cmocka_unit_test_setup_teardown(an_account_without_rows_has_none, setup, teardown),
+    cmocka_unit_test_setup_teardown(an_account_with_only_tombstones_has_none, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_server_managed_row_counts, setup, teardown),
+    cmocka_unit_test_setup_teardown(the_name_is_folded, setup, teardown),
+    cmocka_unit_test_setup_teardown(rows_list_skips_do_not_count, setup, teardown),
+    cmocka_unit_test_setup_teardown(without_a_store_there_are_none, setup, teardown),
+    cmocka_unit_test_setup_teardown(an_overlong_name_has_none, setup, teardown),
+    cmocka_unit_test_setup_teardown(it_stops_at_the_first_row, setup, teardown),
     cmocka_unit_test_setup_teardown(tombstones_are_purged_with_the_cache_expiry_off, setup, teardown),
     cmocka_unit_test_setup_teardown(tombstone_ttl_0_keeps_them, setup, teardown),
     cmocka_unit_test_setup_teardown(cache_rows_go_by_the_cache_ttl, setup, teardown),

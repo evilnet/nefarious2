@@ -1154,6 +1154,111 @@ int metadata_readmarker_foreach(const char *account,
   return visited;
 }
 
+/** Is the row @a vbuf / @a vlen, whose key's part after the account
+ * prefix is @a keylen bytes, one metadata_account_list() returns?  Not a
+ * key too long for METADATA_KEY_LEN, a value that does not decompress or
+ * decode, or an expired cache row (METADATA_CACHE_TTL).
+ * @param[out] decoded The value, TTL wrapper stripped (the visibility
+ *   prefix still on), when the row is listed; METADATA_VALUE_LEN bytes.
+ * @return 1 listed, 0 not. */
+static int account_row_listed(size_t keylen, const void *vbuf, size_t vlen,
+                              char *decoded)
+{
+  const unsigned char *raw = (const unsigned char *)vbuf;
+  size_t rawlen = vlen;
+  time_t timestamp;
+#ifdef USE_ZSTD
+  unsigned char decompressed[METADATA_VALUE_LEN];
+  size_t decompressed_len;
+#endif
+
+  /* A 64+ byte key (draft/persistence/... profile keys run up to 127
+   * bytes on the wire, metadata_lww.h's md_wire_key_valid) cannot fit
+   * the fixed METADATA_KEY_LEN entry buffer: skipped, not an end -- the
+   * walk is ordered by key bytes, not by length, so a long key can sort
+   * before a short one (W4 review focus #2).  Callers needing every row
+   * regardless of key length use metadata_account_foreach_version. */
+  if (keylen >= METADATA_KEY_LEN)
+    return 0;
+#ifdef USE_ZSTD
+  if (is_compressed((const unsigned char *)vbuf, vlen)) {
+    if (decompress_data((const unsigned char *)vbuf, vlen,
+                        decompressed, sizeof(decompressed), &decompressed_len) < 0)
+      return 0;
+    raw = decompressed;
+    rawlen = decompressed_len;
+  }
+#endif
+  /* Strip the TTL wrapper (T<ts>|value) exactly like metadata_account_get,
+   * and skip an expired cache row rather than loading a stale value into
+   * memory.  The listing backs metadata_load_account (the eager auth-time
+   * memory fill); before it stripped the wrapper it returned the raw
+   * "T0|..." store form undecoded, so a reconnecting user saw the wrapper
+   * prefix -- the s5c_restore regression caught exactly that. */
+  if (decode_ttl_value(raw, rawlen, decoded, METADATA_VALUE_LEN, &timestamp) < 0)
+    return 0;
+  if (is_value_expired(timestamp, feature_int(FEAT_METADATA_CACHE_TTL)))
+    return 0;
+  return 1;
+}
+
+/** Build the store prefix of @a account's rows ("account\0", folded).
+ * @return Its length, or -1 when the name is longer than any target. */
+static int account_prefix(char prefix[CHANNELLEN + 2], const char *account)
+{
+  int prefixlen = strlen(account);
+
+  /* '>' not '>=': a name of EXACTLY CHANNELLEN bytes is valid (buffer is
+   * CHANNELLEN + 2, room for the name + KEY_SEP).  The old '>=' silently
+   * rejected a full-length (200-char) +R channel -- this backs
+   * metadata_channel_load, so it must accept a full channel name. */
+  if (prefixlen > CHANNELLEN)
+    return -1;
+  db_casefold_bytes(prefix, account, prefixlen);   /* folded, like the keys */
+  prefix[prefixlen++] = KEY_SEP;
+  return prefixlen;
+}
+
+/** See include/metadata.h.  The listing's rule (account_row_listed), up
+ * to its first listed row: one seek, where METADATA GET used to walk and
+ * decode every row of the account only to see whether there was one. */
+int metadata_account_has_rows(const char *account)
+{
+  struct db_iter *it;
+  char prefix[CHANNELLEN + 2];
+  char decoded[METADATA_VALUE_LEN];
+  int prefixlen;
+  int found = 0;
+  int rc;
+
+  if (!metadata_lmdb_available || !account)
+    return 0;
+  prefixlen = account_prefix(prefix, account);
+  if (prefixlen < 0)
+    return 0;
+
+  it = db_iter_open(metadata_db_env, metadata_cf, /*snap=*/NULL);
+  if (!it)
+    return 0;
+  for (rc = db_iter_seek(it, prefix, (size_t)prefixlen);
+       rc == DB_OK && db_iter_valid(it);
+       rc = db_iter_next(it)) {
+    size_t klen, vlen;
+    const void *kbuf = db_iter_key(it, &klen);
+    const void *vbuf = db_iter_value(it, &vlen);
+
+    if (klen < (size_t)prefixlen ||
+        memcmp(kbuf, prefix, (size_t)prefixlen) != 0)
+      break;
+    if (account_row_listed(klen - prefixlen, vbuf, vlen, decoded)) {
+      found = 1;
+      break;
+    }
+  }
+  db_iter_close(it);
+  return found;
+}
+
 /** List all metadata for an account from LMDB.
  * Caller must free the returned list with metadata entries.
  * @param[in] account Account name.
@@ -1171,23 +1276,12 @@ struct MetadataEntry *metadata_account_list(const char *account)
   int prefixlen;
   struct MetadataEntry *head = NULL, *tail = NULL, *entry;
   int rc;
-#ifdef USE_ZSTD
-  unsigned char decompressed[METADATA_VALUE_LEN];
-  size_t decompressed_len;
-#endif
 
   if (!metadata_lmdb_available || !account)
     return NULL;
-
-  prefixlen = strlen(account);
-  /* '>' not '>=': a name of EXACTLY CHANNELLEN bytes is valid (buffer is
-   * CHANNELLEN + 2, room for the name + KEY_SEP).  The old '>=' silently
-   * rejected a full-length (200-char) +R channel — this backs
-   * metadata_channel_load, so it must accept a full channel name. */
-  if (prefixlen > CHANNELLEN)
+  prefixlen = account_prefix(prefix, account);
+  if (prefixlen < 0)
     return NULL;
-  db_casefold_bytes(prefix, account, prefixlen);   /* folded, like the keys */
-  prefix[prefixlen++] = KEY_SEP;
 
   it = db_iter_open(metadata_db_env, metadata_cf, /*snap=*/NULL);
   if (!it)
@@ -1199,64 +1293,25 @@ struct MetadataEntry *metadata_account_list(const char *account)
     size_t klen, vlen;
     const void *kbuf = db_iter_key(it, &klen);
     const void *vbuf = db_iter_value(it, &vlen);
+    char decoded[METADATA_VALUE_LEN];
 
     if (klen < (size_t)prefixlen ||
         memcmp(kbuf, prefix, (size_t)prefixlen) != 0)
       break;
 
+    /* Skipped with `continue`, never `break` (account_row_listed). */
+    if (!account_row_listed(klen - prefixlen, vbuf, vlen, decoded))
+      continue;
+
     entry = (struct MetadataEntry *)MyMalloc(sizeof(struct MetadataEntry));
     if (!entry)
       break;
-
-    /* A 64+ byte key (draft/persistence/... profile keys run up to 127
-     * bytes on the wire, metadata_lww.h's md_wire_key_valid) cannot fit
-     * this fixed METADATA_KEY_LEN buffer.  Skip it with `continue`, not
-     * `break`: this walk is ordered by key bytes, not by length, so a
-     * long key can sort before a short one and a `break` here would
-     * silently hide every row after it (W4 review focus #2). Callers
-     * needing every row regardless of key length use
-     * metadata_account_foreach_version instead. */
-    if (klen - prefixlen >= METADATA_KEY_LEN) {
-      MyFree(entry);
-      continue;
-    }
     memcpy(entry->key, (const char *)kbuf + prefixlen, klen - prefixlen);
     entry->key[klen - prefixlen] = '\0';
 
     {
-      const unsigned char *raw = (const unsigned char *)vbuf;
-      size_t rawlen = vlen;
-      char decoded[METADATA_VALUE_LEN];
       const char *stripped;
-      time_t timestamp;
-      int ttl;
-#ifdef USE_ZSTD
-      if (is_compressed((const unsigned char *)vbuf, vlen)) {
-        if (decompress_data((const unsigned char *)vbuf, vlen,
-                            decompressed, sizeof(decompressed), &decompressed_len) < 0) {
-          MyFree(entry);
-          continue;
-        }
-        raw = decompressed;
-        rawlen = decompressed_len;
-      }
-#endif
-      /* Strip the TTL wrapper (T<ts>|value) exactly like metadata_account_get,
-       * and skip an expired cache row rather than loading a stale value into
-       * memory. This function backs metadata_load_account (the eager auth-time
-       * memory fill); before this fix it returned the raw "T0|..." store form
-       * undecoded, so a reconnecting user saw the wrapper prefix — the
-       * s5c_restore regression caught exactly that. Pre-existing gap,
-       * independent of the M8 CLEAR fix. */
-      if (decode_ttl_value(raw, rawlen, decoded, sizeof(decoded), &timestamp) < 0) {
-        MyFree(entry);
-        continue;
-      }
-      ttl = feature_int(FEAT_METADATA_CACHE_TTL);
-      if (is_value_expired(timestamp, ttl)) {
-        MyFree(entry);
-        continue;
-      }
+
       /* Decode the vis prefix (same class rule as metadata_account_get_vis)
        * and store the STRIPPED value — entry->value is never prefixed. */
       entry->visibility = metadata_decode_visibility(entry->key, decoded, &stripped);
@@ -1674,6 +1729,7 @@ int metadata_account_get_vis(const char *account, const char *key, char *value, 
 int metadata_account_set(const char *account, const char *key, const char *value, int visibility) { (void)visibility; return -1; }
 int metadata_account_set_permanent(const char *account, const char *key, const char *value, int visibility) { (void)visibility; return -1; }
 struct MetadataEntry *metadata_account_list(const char *account) { return NULL; }
+int metadata_account_has_rows(const char *account) { (void)account; return 0; }
 int metadata_account_clear(const char *account) { return -1; }
 int metadata_account_count_keys(const char *account) { return 0; }
 int metadata_account_count_tombstones(const char *account, int stop_at) { (void)account; (void)stop_at; return 0; }
