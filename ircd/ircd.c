@@ -27,6 +27,7 @@
 #include "IPcheck.h"
 #include "class.h"
 #include "client.h"
+#include "conf_precheck.h"
 #include "crule.h"
 #include "destruct_event.h"
 #include "hash.h"
@@ -649,6 +650,9 @@ int main(int argc, char **argv) {
   cli_fd(&me) = -1;
 
   parse_command_line(argc, argv);
+
+  /* Before the chdir(): argv[0] may be relative to where we started. */
+  conf_precheck_started(argv[0]);
 
   if (chdir(dpath)) {
     fprintf(stderr, "Fail: Cannot chdir(%s): %s, check DPATH\n", dpath, strerror(errno));

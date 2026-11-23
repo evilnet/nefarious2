@@ -10,12 +10,14 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -24,6 +26,42 @@
 #endif
 #include <time.h>
 #include <unistd.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+/** The file the server was started as (conf_precheck_started()), or
+ * empty when that is not known. */
+static char started_as[PATH_MAX];
+
+void conf_precheck_started(const char *argv0)
+{
+  char real[PATH_MAX];
+
+  started_as[0] = '\0';
+  if (!argv0 || !strchr(argv0, '/') || !realpath(argv0, real))
+    return;
+  memcpy(started_as, real, strlen(real) + 1);
+}
+
+const char *conf_precheck_binary(const char *self, const char *spath)
+{
+  struct stat image, file;
+  int have_image = stat(self, &image) == 0;
+  int have_started = started_as[0] && stat(started_as, &file) == 0
+      && S_ISREG(file.st_mode) && access(started_as, X_OK) == 0;
+
+  if (have_image) {
+    if (have_started && image.st_dev == file.st_dev
+        && image.st_ino == file.st_ino)
+      return self;
+    if (stat(spath, &file) == 0 && image.st_dev == file.st_dev
+        && image.st_ino == file.st_ino)
+      return self;
+  }
+  return have_started ? started_as : spath;
+}
 
 /** Exit status of "ircd -k" when the configuration has errors
  * (init_conf() failed: main() returns 7). */
