@@ -814,6 +814,24 @@ static void ordinary_rows_are_not_cut_by_the_byte_budget(void **state)
   assert_all_given_back();
 }
 
+/** #164: `before` is "at or before".  The walk's reference excludes its
+ * own millisecond, so SEARCH hands it the millisecond after. */
+static void the_before_bound_takes_in_its_millisecond(void **state)
+{
+  char b[HISTORY_TIMESTAMP_LEN];
+
+  search_before_bound("1700000100.250", b, sizeof(b));
+  assert_string_equal(b, "1700000100.251");
+  search_before_bound("1700000100.999", b, sizeof(b));
+  assert_string_equal(b, "1700000101.000");
+  search_before_bound("1700000100.000", b, sizeof(b));
+  assert_string_equal(b, "1700000100.001");
+  /* In place, as m_search calls it. */
+  strcpy(b, "1700000100.250");
+  search_before_bound(b, b, sizeof(b));
+  assert_string_equal(b, "1700000100.251");
+}
+
 /** The store could not be read: E 0 U, no row, and the one log line a
  * failed read leaves (the worker's own are dropped). */
 static void done_with_a_store_error_says_U(void **state)
@@ -940,6 +958,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(done_with_T_when_the_budget_cut_the_scan, setup, teardown),
     cmocka_unit_test_setup_teardown(done_with_T_when_the_byte_budget_cut_the_scan, setup, teardown),
     cmocka_unit_test_setup_teardown(ordinary_rows_are_not_cut_by_the_byte_budget, setup, teardown),
+    cmocka_unit_test_setup_teardown(the_before_bound_takes_in_its_millisecond, setup, teardown),
     cmocka_unit_test_setup_teardown(done_with_a_store_error_says_U, setup, teardown),
     cmocka_unit_test_setup_teardown(without_a_view_the_answer_is_U, setup, teardown),
     cmocka_unit_test_setup_teardown(without_a_pool_the_line_is_answered_at_once, setup, teardown),
@@ -983,7 +1002,10 @@ int history_attach_context(const char *p0, struct HistoryMessage *p1) { never("h
 int history_between_descending(const char *p0, enum HistoryRefType p1, const char *p2, enum HistoryRefType p3, const char *p4) { never("history_between_descending"); }
 int history_deserialize_record(const void *p0, size_t p1, struct HistoryMessage *p2) { never("history_deserialize_record"); }
 char *history_forward_split(char *p0, char **p1) { never("history_forward_split"); }
-void history_format_ms(char *p0, size_t p1, uint64_t p2) { never("history_format_ms"); }
+void history_format_ms(char *buf, size_t n, uint64_t ms)
+{
+  snprintf(buf, n, "%lu.%03lu", (unsigned long)(ms / 1000), (unsigned long)(ms % 1000));
+}
 void history_free_targets(struct HistoryTarget *p0) { never("history_free_targets"); }
 int history_has_channel(const char *p0) { never("history_has_channel"); }
 int history_has_msgid(const char *p0) { never("history_has_msgid"); }

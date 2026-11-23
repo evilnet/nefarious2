@@ -7691,6 +7691,17 @@ static int search_hides(struct HistoryView *view, const char *target,
   return 1;
 }
 
+/** The walk's reference for a SEARCH `before` of @a before_unix (unix
+ * sec.ms), in @a out (may be the same buffer): the millisecond after it.
+ * The spec's `before` is "at or before this time" (#164), and a BEFORE
+ * walk excludes its reference's millisecond.  The reference also goes to
+ * the storage servers as it is, so they include that millisecond too,
+ * whatever their version. */
+static void search_before_bound(const char *before_unix, char *out, size_t n)
+{
+  history_format_ms(out, n, history_parse_ms(before_unix) + 1);
+}
+
 /** Set @a sm's text selector to @a text (NULL or empty: none), folded
  * once for every row of the walks.  -1 for a text longer than the matcher
  * holds (IRCD_UTF8_NEEDLE_MAX units, more than one server line carries). */
@@ -9877,9 +9888,14 @@ int ms_chathistory(struct Client *cptr, struct Client *sptr, int parc, char *par
  * INVALID_PARAMS; of a repeated attribute only the last counts.
  *
  * Ours is a brute scan of the store: the same walk CHATHISTORY BEFORE
- * uses, from `before` (default now) back towards `after`, keeping the
- * newest `limit` matches.  `text` is a case-insensitive substring, no
- * regular expressions (the spec's ReDoS note).  The presence hook rides
+ * uses, from `before` (default now; a row at that very millisecond
+ * included, as the spec's "at or before" says) back towards `after`
+ * (included too), keeping the newest `limit` matches.  The spec asks for
+ * a search from `after` forward when `after` is given; this one still
+ * walks back from `before` and keeps the newest (#164): the storage
+ * servers answer the newest of their own, and the merge cannot make the
+ * oldest of the union from those.  `text` is a case-insensitive
+ * substring, no regular expressions (the spec's ReDoS note).  The presence hook rides
  * in front of the match so a member who was not there does not find it,
  * and the reply side runs the same presence filter as a CHATHISTORY page.
  * A redacted message is never a match (search_row_hook): it is dropped
@@ -10061,6 +10077,8 @@ int m_search(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     ircd_snprintf(0, before_unix, sizeof(before_unix), "%lu.%03lu",
                   (unsigned long)tv.tv_sec, (unsigned long)(tv.tv_usec / 1000));
   }
+  /* At or before: the walk starts a millisecond later (#164). */
+  search_before_bound(before_unix, before_unix, sizeof(before_unix));
 
   if (in[0]) {
     struct HistoryMessage *rows = NULL;
