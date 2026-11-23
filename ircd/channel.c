@@ -2795,7 +2795,8 @@ modebuf_flush(struct ModeBuf *mbuf)
  *
  * @param mbuf		The mode buffer to extract the modes from.
  * @param buf		The string buffer to write the modes into.
- * @param oplevels	Include oplevels modes (+AU)?
+ * @param oplevels	Include oplevels modes (+AU)?  The other modes,
+ *			extended ones included, are always there.
  */
 void
 modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
@@ -2883,11 +2884,10 @@ modebuf_extract(struct ModeBuf *mbuf, char *buf, int oplevels)
     }
   }
 
+  /* The extended modes go to every peer: only +A/+U depend on oplevels. */
   for (flag_p = exflags; flag_p[0]; flag_p += 2) {
-    if (*flag_p & exadd) {
-      if (!(!oplevels)) /* Nothing like a double negative to wake you up in the morning */
-        buf[bufpos++] = flag_p[1];
-    }
+    if (*flag_p & exadd)
+      buf[bufpos++] = flag_p[1];
   }
 
   for (i = 0, len = bufpos; i < len; i++) {

@@ -8,6 +8,7 @@ CC = @CC@
 
 TESTPROGS = \
 	burst_relay_t \
+	burst_modes_t \
 	burst_netride_t \
 	ircd_chattr_t \
 	iauth_held_t \
@@ -21,6 +22,7 @@ TESTPROGS = \
 
 DEP_SRC = \
 	burst_relay_t.c \
+	burst_modes_t.c \
 	burst_netride_t.c \
 	ircd_chattr_t.c \
 	iauth_held_t.c \
@@ -52,6 +54,15 @@ install:
 BURST_RELAY_T_OBJS = burst_relay_t.o test_stub.o ../m_burst.o ../ircd_alloc.o ../ircd_snprintf.o ../ircd_string.o ../match.o
 burst_relay_t: $(BURST_RELAY_T_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(BURST_RELAY_T_OBJS)
+# The modes a relayed BURST carries: the real modebuf_extract() and
+# mode_parse().  channel.c is included, compiled with -ffunction-sections
+# and linked with --gc-sections, so only what they reach is kept; the rest
+# of the server they reach is stubbed in the test.
+BURST_MODES_T_OBJS = burst_modes_t.o test_stub.o ../ircd_alloc.o ../ircd_snprintf.o ../ircd_string.o ../match.o
+burst_modes_t.o: ${srcdir}/burst_modes_t.c ../channel.c
+	${CC} ${CFLAGS} -ffunction-sections -fdata-sections ${CPPFLAGS} -c -o $@ ${srcdir}/burst_modes_t.c
+burst_modes_t: $(BURST_MODES_T_OBJS)
+	${CC} -o $@ $(LDFLAGS) -Wl,--gc-sections $(BURST_MODES_T_OBJS)
 BURST_NETRIDE_T_OBJS = burst_netride_t.o test_stub.o ../m_burst.o ../ircd_alloc.o ../ircd_snprintf.o ../ircd_string.o ../match.o
 burst_netride_t: $(BURST_NETRIDE_T_OBJS)
 	${CC} -o $@ $(LDFLAGS) $(BURST_NETRIDE_T_OBJS)
