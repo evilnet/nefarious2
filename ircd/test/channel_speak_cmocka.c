@@ -897,6 +897,53 @@ static void realname_change_rechecks_bans(void **state)
   assert_int_equal(failed, 0);
 }
 
+/** An extended ban whose mask is nick!user@host (~q, ~n) matches a user
+ * only when both parts match, the host part in every form a plain ban's
+ * host part matches: the host name, or the address for an address mask.
+ * (The host part was ignored: "~q:*!*@some.host" silenced everyone.) */
+static void extended_ban_mask_needs_both_parts(void **state)
+{
+  static const struct { const char *ban; const char *except; int silenced; } cases[] = {
+    { "~q:*!*@other.host",      NULL, 0 },   /* another host */
+    { "~q:*!*@u.host",          NULL, 1 },
+    { "~q:*!*@*.host",          NULL, 1 },
+    { "~q:nobody!*@*",          NULL, 0 },   /* another nick */
+    { "~q:nobody!*@u.host",     NULL, 0 },
+    { "~q:u!*@u.host",          NULL, 1 },
+    { "~q:u!*@other.host",      NULL, 0 },
+    { "~q:*!*@10.0.0.0/8",      NULL, 1 },   /* the address */
+    { "~q:*!*@192.168.0.0/16",  NULL, 0 },
+    { "~q:*!*@u.host", "~q:*!*@other.host", 1 },  /* an exception for another host */
+    { "~q:*!*@u.host", "~q:*!*@u.host",     0 },
+  };
+  size_t i;
+  int failed = 0;
+  (void)state;
+
+  for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    struct fake_client u;
+    struct Channel *ch = chan_new("#xb");
+    struct Membership *m;
+    int silenced;
+
+    fake_init(&u, "u", "u.host", NULL, 1, 0);
+    assert_true(ircd_aton(&cli_ip(&u.cli), "10.1.2.3"));
+    m = join(ch, &u, 0);
+    add_ban(&ch->banlist, cases[i].ban, 0);
+    if (cases[i].except)
+      add_ban(&ch->exceptlist, cases[i].except, 1);
+    silenced = !member_can_send_to_channel(m, 0);
+    if (silenced != cases[i].silenced) {
+      print_message("+b %s%s%s: silenced=%d, expected %d\n", cases[i].ban,
+                    cases[i].except ? " +e " : "",
+                    cases[i].except ? cases[i].except : "",
+                    silenced, cases[i].silenced);
+      failed++;
+    }
+  }
+  assert_int_equal(failed, 0);
+}
+
 /** ~m (any user's marks) and ~M (an unauthenticated user's marks) bans:
  * a mark given to a registered user (a MARK from another server) changes
  * what they match, and the verdict follows. */
@@ -1176,6 +1223,7 @@ int main(void)
     cmocka_unit_test(oper_change_rechecks_bans),
     cmocka_unit_test(realname_change_rechecks_bans),
     cmocka_unit_test(mark_change_rechecks_bans),
+    cmocka_unit_test(extended_ban_mask_needs_both_parts),
     cmocka_unit_test(reveal_named_after_the_line),
     cmocka_unit_test(reveal_named_after_the_event_to_come),
     cmocka_unit_test(reveal_named_after_a_given_event),

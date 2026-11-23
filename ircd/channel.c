@@ -608,22 +608,23 @@ struct Ban *find_ban(struct Client *cptr, struct Ban *banlist, int extbantype, i
             found = find_ban(cptr, chptr->banlist, extbantype, level + 1);
         }
       } else if (banlist->extban.nu_len) {
-        /* Compare nick!user portion of ban. */
+        /* Both parts of a nick!user@host mask must match, as for a
+         * plain ban below: the nick!user part ... */
         banlist->extban.mask[banlist->extban.nu_len] = '\0';
         res = match(banlist->extban.mask, nu);
         banlist->extban.mask[banlist->extban.nu_len] = '@';
-        if (!res)
-          ismatch = 1;
-        /* Compare host portion of ban. */
+        /* ... and the host part, against any of the user's addresses
+         * and host names. */
         hostmask = banlist->extban.mask + banlist->extban.nu_len + 1;
-        if (((banlist->flags & BAN_IPMASK)
-             && ipmask_check(&cli_ip(cptr), &banlist->address, banlist->addrbits))
-            && !match(hostmask, cli_user(cptr)->host)
-            && !match(hostmask, cli_user(cptr)->realhost)
-            && (IsCloakIP(cptr) && !match(hostmask, cli_user(cptr)->cloakip))
-            && (IsCloakHost(cptr) && !match(hostmask, cli_user(cptr)->cloakhost))
-            && (sr && !match(hostmask, sr)))
-            ismatch = 1;
+        if (!res
+            && (((banlist->flags & BAN_IPMASK)
+                 && ipmask_check(&cli_ip(cptr), &banlist->address, banlist->addrbits))
+                || !match(hostmask, cli_user(cptr)->host)
+                || !match(hostmask, cli_user(cptr)->realhost)
+                || (IsCloakIP(cptr) && !match(hostmask, cli_user(cptr)->cloakip))
+                || (IsCloakHost(cptr) && !match(hostmask, cli_user(cptr)->cloakhost))
+                || (sr && !match(hostmask, sr))))
+          ismatch = 1;
       }
       if ((banlist->extban.flags & extbantype) || !(banlist->extban.flags & EBAN_ACTIVITY)) {
         if ((banlist->extban.flags & EBAN_NEGATEMASK) && !ismatch)
