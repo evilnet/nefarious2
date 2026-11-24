@@ -437,6 +437,10 @@ enum md_target_kind md_target_classify(const char *parv1)
     return len == 1 ? MD_T_INVALID : MD_T_ACCOUNT;
   if (parv1[0] == '=')
     return len == 1 ? MD_T_INVALID : MD_T_ACCOUNT_STAMPED;
+  /* "%" and a channel's name (one character past its prefix at least). */
+  if (parv1[0] == '%')
+    return (len > 2 && (parv1[1] == '#' || parv1[1] == '&'))
+           ? MD_T_CHANNEL_STAMPED : MD_T_INVALID;
   if (parv1[0] == '!')
     return len == 1 ? MD_T_INVALID : MD_T_SESSION;
   if (parv1[0] == '?')

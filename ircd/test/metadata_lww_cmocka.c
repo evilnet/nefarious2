@@ -249,6 +249,12 @@ static void test_classify_table(void **state)
   assert_int_equal(MD_T_CHANNEL, md_target_classify("&c"));
   assert_int_equal(MD_T_ACCOUNT, md_target_classify("*acct"));
   assert_int_equal(MD_T_ACCOUNT_STAMPED, md_target_classify("=acct"));
+  /* A channel, LWW-stamped: "%" and a channel's name. */
+  assert_int_equal(MD_T_CHANNEL_STAMPED, md_target_classify("%#c"));
+  assert_int_equal(MD_T_CHANNEL_STAMPED, md_target_classify("%&c"));
+  assert_int_equal(MD_T_INVALID, md_target_classify("%"));
+  assert_int_equal(MD_T_INVALID, md_target_classify("%#"));
+  assert_int_equal(MD_T_INVALID, md_target_classify("%acct"));
   assert_int_equal(MD_T_SESSION, md_target_classify("!Ab+/9"));
   assert_int_equal(MD_T_PULL, md_target_classify("?"));
   assert_int_equal(MD_T_PULL_END, md_target_classify("."));
@@ -588,26 +594,34 @@ static void test_chunk_abandon_final_piece_no_poison(void **state)
   assert_string_equal(c.value, "w");
 }
 
-/* M2: an identity field that does not fit its buffer (an account over
- * ACCOUNTLEN, a stamp text over MD_STAMP_BUFSIZE - 1) is refused, never
- * truncated into a name that could match another row's, and the
- * pending row is left alone. */
+/* M2: an identity field that does not fit its buffer (a target -- an
+ * account, or a channel's name -- over CHANNELLEN, a stamp text over
+ * MD_STAMP_BUFSIZE - 1) is refused, never truncated into a name that
+ * could match another row's, and the pending row is left alone.  An
+ * account's own bound (ACCOUNTLEN) is ms_metadata_stamped's. */
 static void test_chunk_rejects_oversize_identity(void **state)
 {
   struct md_chunk c;
   char longkey[200];
+  char chan200[202], chan201[203];
 
   (void)state;
   memset(&c, 0, sizeof(c));
   memset(longkey, 'k', sizeof(longkey));
   longkey[sizeof(longkey) - 1] = '\0';
+  chan200[0] = '#';
+  memset(chan200 + 1, 'c', 199);
+  chan200[200] = '\0';
+  chan201[0] = '#';
+  memset(chan201 + 1, 'c', 200);
+  chan201[201] = '\0';
 
   assert_int_equal(MD_CHUNK_PENDING,
                    md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 1, "aaa"));
-  /* 16 chars: one over ACCOUNTLEN; would truncate to "acct567890123456"'s
-   * first 15 and could pass for that account's row. */
+  /* 201 chars: one over CHANNELLEN; would truncate to chan200 and could
+   * pass for that channel's row. */
   assert_int_equal(MD_CHUNK_ERROR,
-                   md_chunk_feed(&c, "acct567890123456", "7.0.1", "k1", 0, 0, "x"));
+                   md_chunk_feed(&c, chan201, "7.0.1", "k1", 0, 0, "x"));
   assert_int_equal(MD_CHUNK_ERROR,
                    md_chunk_feed(&c, "acct", "12345678901234567890.65535.65535", "k1", 0, 0, "x"));
   assert_int_equal(MD_CHUNK_ERROR,
@@ -616,9 +630,14 @@ static void test_chunk_rejects_oversize_identity(void **state)
   assert_int_equal(MD_CHUNK_DONE,
                    md_chunk_feed(&c, "acct", "7.0.1", "k1", 0, 0, "b"));
   assert_string_equal(c.value, "aaab");
-  /* Exactly 15 is a valid account. */
+  /* Exactly 15 is a valid account; exactly CHANNELLEN a valid channel. */
   assert_int_equal(MD_CHUNK_DONE,
                    md_chunk_feed(&c, "acct56789012345", "7.0.1", "k1", 0, 0, "y"));
+  assert_int_equal(MD_CHUNK_PENDING,
+                   md_chunk_feed(&c, chan200, "7.0.1", "k1", 0, 1, "p1"));
+  assert_int_equal(MD_CHUNK_DONE,
+                   md_chunk_feed(&c, chan200, "7.0.1", "k1", 0, 0, "p2"));
+  assert_string_equal(c.value, "p1p2");
 }
 
 /* M2: a stamp text of MD_STAMP_BUFSIZE (32) characters or more -- a

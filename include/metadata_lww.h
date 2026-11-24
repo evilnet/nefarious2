@@ -230,6 +230,7 @@ enum md_target_kind {
   MD_T_CHANNEL,          /**< "#..." or "&..." -- a channel. */
   MD_T_ACCOUNT,          /**< "*<account>" -- an account, unstamped. */
   MD_T_ACCOUNT_STAMPED,  /**< "=<account>" -- an account, LWW-stamped. */
+  MD_T_CHANNEL_STAMPED,  /**< "%#..." / "%&..." -- a channel, LWW-stamped. */
   MD_T_SESSION,          /**< "!<session-id>" -- a bouncer session. */
   MD_T_PULL,             /**< Exactly "?" -- a pull request. */
   MD_T_PULL_END,         /**< Exactly "." -- a pull end marker. */
@@ -265,21 +266,26 @@ extern int md_flags_parse(const char *tok, int *vis, int *tombstone,
 
 /** One row whose remaining pieces are being discarded (see struct
  * md_chunk). */
+/** A chunk's target buffer: an account, or a channel's name (CHANNELLEN,
+ * 200), and the NUL. */
+#define MD_CHUNK_TARGET_SIZE 201
+
 struct md_chunk_poison {
   int used;
-  char account[16];
+  char account[MD_CHUNK_TARGET_SIZE];   /**< account or channel name */
   char key[128];
   char stamp[MD_STAMP_BUFSIZE];
 };
 
-/** Chunk-reassembly state for one stamped-account row's value, across
+/** Chunk-reassembly state for one stamped row's value (an account's or a
+ * channel's), across
  * one or more wire lines joined by the `+` continuation flag. Each
  * field here except @a value/@a len/@a active/@a dropped identifies
  * which (account, stamp, key, vis) the pending accumulation belongs to,
  * so a line that does not match restarts cleanly instead of silently
  * concatenating two different rows' pieces. */
 struct md_chunk {
-  char account[16];
+  char account[MD_CHUNK_TARGET_SIZE];   /**< account or channel name */
   char key[128];
   char stamp[MD_STAMP_BUFSIZE];
   int vis;
@@ -307,8 +313,10 @@ enum { MD_CHUNK_ERROR = -1, MD_CHUNK_PENDING = 0, MD_CHUNK_DONE = 1 };
  *
  * A row is identified by (account, stamp, key); every piece of it must
  * also agree on @a vis.  Rules, in order:
- *  - An identity field that does not fit its buffer (@a account over 15
- *    bytes, i.e. ACCOUNTLEN; @a stamp of MD_STAMP_BUFSIZE bytes or more;
+ *  - An identity field that does not fit its buffer (@a account -- an
+ *    account or a channel's name -- over 200 bytes, i.e. CHANNELLEN; an
+ *    account's own ACCOUNTLEN bound is the caller's; @a stamp of
+ *    MD_STAMP_BUFSIZE bytes or more;
  *    @a key of 128 or more) is refused: MD_CHUNK_ERROR, state untouched.
  *    It is never truncated into a name that could match another row.
  *  - A piece of a poisoned row (see struct md_chunk) is swallowed:
