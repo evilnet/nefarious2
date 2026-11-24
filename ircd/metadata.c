@@ -2112,6 +2112,11 @@ static int metadata_mode_sync_index(const char *key)
   return -1;
 }
 
+int metadata_key_mode_synced(const char *key)
+{
+  return key && metadata_mode_sync_index(key) >= 0;
+}
+
 /** Whether mode-sync row @a i's flag is on for @a value. */
 static int metadata_mode_sync_want(int i, const char *value)
 {

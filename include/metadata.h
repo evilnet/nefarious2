@@ -624,6 +624,13 @@ extern void metadata_notify_subscribers_butone(const char *target, const char *k
  */
 extern void metadata_mode_sync_restore(struct Client *cptr, int live);
 
+/** Whether @a key is one of the mode-synced keys (metadata_mode_sync[]:
+ * umode.*, chathistory.nostorage, chathistory.pm, draft/persistence/hold),
+ * whose value a connection's mode can hold in memory with no stored row
+ * (its class default).
+ * @return 1 if mode-synced, 0 if not. */
+extern int metadata_key_mode_synced(const char *key);
+
 /** Re-derive our connection's mode-synced flags (metadata_mode_sync[]) for
  * the account it now holds, after a SASL account change: each key the
  * account has a row for follows the row (as metadata_mode_sync_restore()

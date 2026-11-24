@@ -614,9 +614,26 @@ int server_finish_burst(struct Client *cptr)
              * final fix wave, M-2). */
             if (!md_key_replicable(entry->key))
               continue;
-            if (!metadata_lmdb_is_available()
-                || metadata_account_get_version(account, entry->key, &v,
-                                                valbuf, sizeof(valbuf)) != 0) {
+            /* The account's rows as the store holds them, and nothing
+             * else.  A key in memory with no row is not the account's: a
+             * mode its connection class gives by default (register_user
+             * applies class modes after loading the account; they are
+             * noted in memory only, metadata_mode_sync_restore()).  Sent
+             * as a row, a peer with no row took it, stored it and relayed
+             * it: every relink turned class defaults into preferences
+             * stored on every server (metadata audit 2026-11-23).  A read
+             * error sends nothing either: a pull fills the gap. */
+            if (metadata_lmdb_is_available()) {
+              if (metadata_account_get_version(account, entry->key, &v,
+                                               valbuf, sizeof(valbuf)) != 0)
+                continue;
+            } else {
+              /* No store: memory is all there is, at stamp 0 (any stored
+               * row wins over it) -- but a mode-synced key here may be a
+               * class default, and the user's modes travel on the N line
+               * anyway. */
+              if (metadata_key_mode_synced(entry->key))
+                continue;
               memset(&v.st, 0, sizeof(v.st));
               v.tombstone = 0;
               v.vis = entry->visibility;
