@@ -422,7 +422,10 @@ enum ForwardedLabelState {
  * replies without a msgid (a legacy server answered) by the command's
  * family and subject, over the link it went out on (fwd_match.h).  An
  * unlabeled command is tracked too (fl_plain: no label, no batch), so
- * that its replies are never taken for a labeled one's.
+ * that its replies are never taken for a labeled one's -- and, for a
+ * bouncer session with more than one connection, so that its reply goes
+ * to the connection that sent it (do_numeric()), whether or not any of
+ * them uses labeled-response.
  */
 struct ForwardedLabel {
   char                     fl_label[64];   /**< Saved client label ("" for fl_plain) */
