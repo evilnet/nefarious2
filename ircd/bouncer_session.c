@@ -13176,8 +13176,8 @@ static void bounce_apply_remote_oper_grant(struct Client *cptr,
  * device, opered, the leaf split and relinked; the hub connection's CHECK
  * was answered 517).
  *
- * A PRIVS line that names a device has already been copied onto its
- * primary by the caller.
+ * A PRIVS line that names a device of an oper session has already been
+ * copied onto its primary by the caller (only while both are opers).
  *
  * Only a copy, never a clear, and only between two opers: an /OPER on a
  * device sends the device's list in several PRIVS lines BEFORE its mode
@@ -13379,8 +13379,10 @@ void bounce_sync_session_snomask(struct Client *source)
  * another server was sent the mask while it was still no oper there, and
  * nothing sent it again.  It ended an oper without the oper notices.
  *
- * The receiver takes the later stamp, finds its member an oper now, and
- * tells it (+s, 008). */
+ * The receiver takes the later stamp and, where its member is an oper by
+ * now, gives it the mask and tells it (+s, 008).  Where it is not (a local
+ * grant; a server that only passes the device's line on and has not heard
+ * the primary's server yet) the result is the first line's again. */
 void bounce_session_snomask_again(struct Client *member)
 {
   struct BouncerSession *sess;
@@ -17434,6 +17436,18 @@ static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr,
 
   snomask = (unsigned int)strtoul(parv[3], NULL, 10);
   ts = (parc > 4) ? (time_t)strtoul(parv[4], NULL, 10) : 0;
+  if (ts == sess->hs_snomask_ts
+      && 0 == strcmp(cli_yxx(sptr), sess->hs_snomask_origin)) {
+    /* The change we already took, addressed to another of our members: a
+     * sender tells each member of the session on its own line, all under
+     * one stamp.  Dropped as "not later", every member here but the first
+     * kept what it had -- a second connection never got the mask at all.
+     * The session's record is the first line's; this member takes the
+     * mask as that one did. */
+    if (!IsBouncerHold(target))
+      bounce_put_member_snomask(target, snomask, 1);
+    return 0;
+  }
   if (!bounce_snomask_later(sess, ts, cli_yxx(sptr))) {
     /* An older change crossing a newer one: whoever made the newer one
      * has sent it everywhere, this one included. */

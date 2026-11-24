@@ -709,6 +709,19 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       parv[1] = parv[2];
       parv[2] = parv[3];
     } else {
+      /* Not from a device (alias) of a bouncer session.  The other server
+       * answers with privileges for the DEVICE and a mode change by nick,
+       * which lands on the session's primary: the session ended +o with no
+       * privileges on every server (and the request itself goes out under
+       * a numeric no legacy server knows).  Until that path carries a
+       * session, the device is refused; the primary's own connection, or
+       * an /OPER on this server, works. */
+      if (IsBouncerAlias(sptr)) {
+        sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :OPER on another server "
+                      "is not available from this connection of your "
+                      "session", sptr);
+        return send_reply(sptr, ERR_NOOPERHOST);
+      }
       sendcmdto_one(sptr, CMD_OPER, srv, "%C %s %s", srv, parv[2], parv[3]);
       SetOperedRemote(sptr);
       ClearOperedLocal(sptr);
