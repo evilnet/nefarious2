@@ -616,24 +616,95 @@ static void test_note_bound(void **state)
   struct notes ns;
   (void)state;
   memset(&ns, 0, sizeof(ns));
-  assert_true(md_prereg_fits(NULL, "a", 0, 2));
-  assert_false(md_prereg_fits(NULL, "a", 0, 0));
-  assert_false(md_prereg_fits(NULL, "a", 1, -1));
+  assert_true(md_prereg_fits(NULL, "a", 0, 2, NULL));
+  assert_false(md_prereg_fits(NULL, "a", 0, 0, NULL));
+  assert_false(md_prereg_fits(NULL, "a", 1, -1, NULL));
   note(&ns, "s1", "1", 1);
   note(&ns, "s2", "2", 2);
   note(&ns, "d1", NULL, 3);
-  assert_false(md_prereg_fits(&ns.n[0], "s3", 0, 2));   /* a third set */
-  assert_true(md_prereg_fits(&ns.n[0], "s1", 0, 2));    /* a set replaced */
-  assert_true(md_prereg_fits(&ns.n[0], "d2", 1, 2));    /* a second delete */
-  assert_true(md_prereg_fits(&ns.n[0], "S1", 1, 2));    /* s1 becomes a delete */
-  assert_true(md_prereg_fits(&ns.n[0], "d1", 1, 1));    /* d1 replaced */
-  assert_false(md_prereg_fits(&ns.n[0], "d2", 1, 1));
+  assert_false(md_prereg_fits(&ns.n[0], "s3", 0, 2, NULL));   /* a third set */
+  assert_true(md_prereg_fits(&ns.n[0], "s1", 0, 2, NULL));    /* a set replaced */
+  assert_true(md_prereg_fits(&ns.n[0], "d2", 1, 2, NULL));    /* a second delete */
+  assert_true(md_prereg_fits(&ns.n[0], "S1", 1, 2, NULL));    /* s1 becomes a delete */
+  assert_true(md_prereg_fits(&ns.n[0], "d1", 1, 1, NULL));    /* d1 replaced */
+  assert_false(md_prereg_fits(&ns.n[0], "d2", 1, 1, NULL));
   /* A CLEAR is not a delete note: it does not count. */
   memset(&ns, 0, sizeof(ns));
   note_clear(&ns, 1);
   note(&ns, "d1", NULL, 2);
-  assert_true(md_prereg_fits(&ns.n[0], "d2", 1, 2));
-  assert_false(md_prereg_fits(&ns.n[0], "d2", 1, 1));
+  assert_true(md_prereg_fits(&ns.n[0], "d2", 1, 2, NULL));
+  assert_false(md_prereg_fits(&ns.n[0], "d2", 1, 1, NULL));
+}
+
+/* --- Keys outside the cap (owner, 2026-11-24) ----------------------- */
+/* A key the cap is not for (a mode key, an IRCv3 registry key): the fake's
+ * are the ones named "free...". */
+static int f_counts(void *ctx, const char *key)
+{
+  (void)ctx;
+  return strncmp(key, "free", 4) != 0;
+}
+
+static int counts_free(const char *key)
+{
+  return f_counts(NULL, key);
+}
+
+static const struct md_prereg_ops counted_ops = {
+  f_row, f_store, f_apply, f_send, f_refuse, f_no_row_is_state, f_clear_keys,
+  f_counts
+};
+
+/* At the cap, a new key the cap is not for still applies; deleting one
+ * frees no place for a key it is for. */
+static void test_uncounted_keys_outside_the_cap(void **state)
+{
+  struct fake f;
+  struct notes ns;
+  struct md_version v;
+
+  (void)state;
+  memset(&f, 0, sizeof(f));
+  memset(&ns, 0, sizeof(ns));
+  v = live(100, "a", VIS_PUBLIC); row_put(&f, "k1", &v);
+  v = live(100, "b", VIS_PUBLIC); row_put(&f, "k2", &v);
+  v = live(100, "c", VIS_PUBLIC); row_put(&f, "free0", &v);
+
+  note(&ns, "free1", "x", 200);      /* new, outside the cap: applies */
+  note(&ns, "k3", "y", 201);         /* new, at the cap: refused */
+  note(&ns, "free0", NULL, 202);     /* a delete outside the cap */
+  note(&ns, "k4", "z", 203);         /* still at the cap: refused */
+  /* The account's count is of the keys the cap is for: k1, k2. */
+  assert_int_equal(md_prereg_merge(&ns.n[0], 2, 2, 300, &counted_ops, &f), 2);
+
+  assert_string_equal(value_of(&f, "free1"), "x");
+  assert_null(value_of(&f, "free0"));
+  assert_int_equal(f.nrefused, 2);
+  assert_string_equal(f.refused[0], "k3");
+  assert_int_equal(f.refused_why[0], MD_PREREG_LIMIT_KEYS);
+  assert_string_equal(f.refused[1], "k4");
+  assert_int_equal(f.refused_why[1], MD_PREREG_LIMIT_KEYS);
+}
+
+/* The note bound counts only notes of keys the cap is for. */
+static void test_note_bound_uncounted(void **state)
+{
+  struct notes ns;
+  (void)state;
+  memset(&ns, 0, sizeof(ns));
+  assert_true(md_prereg_fits(NULL, "free1", 0, 0, counts_free));
+  note(&ns, "s1", "1", 1);
+  note(&ns, "s2", "2", 2);
+  note(&ns, "free1", "x", 3);
+  note(&ns, "free2", "x", 4);
+  assert_false(md_prereg_fits(&ns.n[0], "s3", 0, 2, counts_free));
+  assert_true(md_prereg_fits(&ns.n[0], "free3", 0, 2, counts_free));
+  memset(&ns, 0, sizeof(ns));
+  note(&ns, "free1", "x", 1);
+  note(&ns, "free2", "x", 2);
+  note(&ns, "s1", "1", 3);
+  assert_true(md_prereg_fits(&ns.n[0], "s2", 0, 2, counts_free));
+  assert_false(md_prereg_fits(&ns.n[0], "s2", 0, 2, NULL));  /* NULL: all count */
 }
 
 /* --- A CLEAR before registration (owner, 2026-11-13: it clears it all) --- */
@@ -819,6 +890,8 @@ int main(void)
     cmocka_unit_test(test_no_store),
     cmocka_unit_test(test_delete_told_as_the_row_was),
     cmocka_unit_test(test_note_bound),
+    cmocka_unit_test(test_uncounted_keys_outside_the_cap),
+    cmocka_unit_test(test_note_bound_uncounted),
     cmocka_unit_test(test_note_clear),
     cmocka_unit_test(test_clear_then_set),
     cmocka_unit_test(test_set_then_clear_and_two_clears),

@@ -653,13 +653,51 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
   return 0;
 }
 
+/** See include/capab.h.  max-keys is "the maximum number of keys a client
+ * is allowed to set on its own nickname": the cap and the keys outside it
+ * a client may set on itself (metadata_max_keys_total()).  Channels have
+ * no advertised limit. */
+void feature_notify_metadata_capvalue(void)
+{
+  char val[128];
+  int subs = feature_int(FEAT_METADATA_MAX_SUBS);
+  int bytes = feature_int(FEAT_METADATA_MAX_VALUE_BYTES);
+
+  ircd_snprintf(0, val, sizeof(val),
+                "before-connect,max-subs=%d,max-keys=%d,max-value-bytes=%d",
+                subs < 0 ? 0 : subs, metadata_max_keys_total(),
+                bytes < 0 ? 0 : bytes);
+  cap_set_value(CAP_DRAFT_METADATA2, val);
+  if (feature_bool(FEAT_CAP_draft_metadata_2))
+    send_cap_notify("draft/metadata-2", 1, val);
+}
+
 /* Result codes for metadata_check_limits(). */
 enum {
   METADATA_LIMIT_OK    = 0,
   METADATA_LIMIT_UTF8  = -1,   /* value is not valid UTF-8 */
   METADATA_LIMIT_VALUE = -2,   /* value longer than FEAT_METADATA_MAX_VALUE_BYTES */
-  METADATA_LIMIT_KEYS  = -3    /* new key would exceed FEAT_METADATA_MAX_KEYS */
+  METADATA_LIMIT_KEYS  = -3,   /* new key would exceed FEAT_METADATA_MAX_KEYS */
+  METADATA_CEILING_VALUE = -4, /* received value over what a row can hold */
+  METADATA_CEILING_KEYS  = -5  /* received new key past the key ceiling */
 };
+
+/** The most keys that count toward the cap a server keeps for one target
+ * it did not write: four times METADATA_MAX_KEYS, and never under four
+ * times its default (20).  The cap itself is the writing server's (owner,
+ * 2026-11-24): a server applies a peer's row whatever its own cap says,
+ * or a server with a lower cap -- or both halves of a split filling the
+ * last places with different keys -- would hold another set of keys than
+ * its peers for good, which no pull can repair.  The ceiling only stops a
+ * runaway peer. */
+static int metadata_key_ceiling(void)
+{
+  int max_keys = feature_int(FEAT_METADATA_MAX_KEYS);
+
+  if (max_keys < 20)
+    max_keys = 20;
+  return max_keys * 4;
+}
 
 /* Validate a metadata write against the configured limits.  Returns
  * METADATA_LIMIT_OK if allowed, else the code of the failed check.
@@ -692,6 +730,10 @@ static int metadata_check_limits(struct Client *target_client,
   if (strlen(value) > (size_t)max_value_bytes)
     return METADATA_LIMIT_VALUE;
 
+  /* Mode-synced, registry and server-managed keys stand outside the cap
+   * (metadata_key_counts()). */
+  if (!metadata_key_counts(key, is_channel))
+    return METADATA_LIMIT_OK;
   if (is_channel) {
     if (target_channel && !metadata_get_channel(target_channel, key)
         && metadata_count_channel(target_channel) >= max_keys)
@@ -704,12 +746,54 @@ static int metadata_check_limits(struct Client *target_client,
   return METADATA_LIMIT_OK;
 }
 
+/** The check for a row a peer sends: the writing server applied its own
+ * limits (metadata_key_ceiling() says why this server does not apply its
+ * own again).  Left: a value must be UTF-8 and fit our value buffer
+ * (METADATA_VALUE_LEN, 1023 bytes: our buffer size, not a spec limit; a
+ * compliant writer never comes near it, its 761 line-fit rule holding a
+ * value to a few hundred bytes), and a new key
+ * that counts toward the cap must leave the target under the ceiling.
+ * One of @a target_client, @a target_channel (with @a is_channel) or
+ * @a account_name (a stored account's rows) names the target. */
+static int metadata_check_received(struct Client *target_client,
+                                   struct Channel *target_channel,
+                                   int is_channel, const char *account_name,
+                                   const char *key, const char *value)
+{
+  int ceiling = metadata_key_ceiling();
+
+  if (!value || metadata_key_is_server_managed(key))
+    return METADATA_LIMIT_OK;
+  if (!string_is_valid_utf8(value))
+    return METADATA_LIMIT_UTF8;
+  if (strlen(value) >= METADATA_VALUE_LEN)
+    return METADATA_CEILING_VALUE;
+  if (!metadata_key_counts(key, is_channel))
+    return METADATA_LIMIT_OK;
+
+  if (is_channel) {
+    if (target_channel && !metadata_get_channel(target_channel, key)
+        && metadata_count_channel(target_channel) >= ceiling)
+      return METADATA_CEILING_KEYS;
+  } else if (target_client) {
+    if (!metadata_get_client(target_client, key)
+        && metadata_count_client(target_client) >= ceiling)
+      return METADATA_CEILING_KEYS;
+  } else if (account_name) {
+    char scratch[METADATA_VALUE_LEN];
+
+    if (metadata_account_get(account_name, key, scratch) != 0
+        && metadata_account_count_keys(account_name, ceiling) >= ceiling)
+      return METADATA_CEILING_KEYS;
+  }
+  return METADATA_LIMIT_OK;
+}
+
 /** Check metadata_check_limits() (UTF-8 + length) plus @a account_name's
  * persisted key count against FEAT_METADATA_MAX_KEYS, for a write that
  * has no live local Client to check the key budget against directly --
- * the offline-account oper write (this file's "*account" SET branch)
- * and the inbound W4 stamped-account row (ms_metadata_stamped) both
- * need this.  Updates to an existing key are always allowed at cap,
+ * the offline-account oper write (this file's "*account" SET branch).
+ * A peer's row is checked by metadata_check_received() instead.  Updates to an existing key are always allowed at cap,
  * same as the live-Client path metadata_check_limits() already
  * implements via metadata_count_client(). */
 static int metadata_check_account_limits(const char *account_name,
@@ -717,14 +801,14 @@ static int metadata_check_account_limits(const char *account_name,
 {
   int limit_rc = metadata_check_limits(NULL, NULL, 0, key, value);
 
-  if (limit_rc == METADATA_LIMIT_OK && !metadata_key_is_server_managed(key)) {
+  if (limit_rc == METADATA_LIMIT_OK && metadata_key_counts(key, 0)) {
     char scratch[METADATA_VALUE_LEN];
     int max_keys = feature_int(FEAT_METADATA_MAX_KEYS);
 
     if (max_keys < 0)
       max_keys = 0;
     if (metadata_account_get(account_name, key, scratch) != 0
-        && metadata_account_count_keys(account_name) >= max_keys)
+        && metadata_account_count_keys(account_name, max_keys) >= max_keys)
       limit_rc = METADATA_LIMIT_KEYS;
   }
   return limit_rc;
@@ -748,6 +832,14 @@ static const char *metadata_limit_why(int limit_rc)
   case METADATA_LIMIT_KEYS:
     ircd_snprintf(0, buf, sizeof(buf), "key count at METADATA_MAX_KEYS %d",
                   feature_int(FEAT_METADATA_MAX_KEYS));
+    return buf;
+  case METADATA_CEILING_VALUE:
+    ircd_snprintf(0, buf, sizeof(buf), "value over %d bytes",
+                  METADATA_VALUE_LEN - 1);
+    return buf;
+  case METADATA_CEILING_KEYS:
+    ircd_snprintf(0, buf, sizeof(buf), "key count at the ceiling %d",
+                  metadata_key_ceiling());
     return buf;
   default:
     return "over this server's METADATA limits";
@@ -1751,16 +1843,17 @@ static int ms_metadata_session(struct Client *cptr, struct Client *sptr,
     return 0;
   }
 
-  /* Enforce the same limits every other write path obeys.  Task 5 (W4
-   * plan 1.8): on a violation, skip apply/notify and tell opers once
-   * per link (mdsync_limit_notice), but still relay unchanged -- the
-   * same rule every MD form now follows.  Only the origin guard above
-   * still drops without relaying; an over-limit check never does. */
+  /* The writing server applied its limits; here only the receive check
+   * (metadata_check_received(): UTF-8, a row's size, the key ceiling).
+   * On a violation, skip apply/notify and tell opers once per link
+   * (mdsync_limit_notice), but still relay unchanged -- the same rule
+   * every MD form follows.  Only the origin guard above still drops
+   * without relaying; a limit check never does. */
   {
     int limit_rc = METADATA_LIMIT_OK;
 
     if (value)
-      limit_rc = metadata_check_limits(only, NULL, 0, key, value);
+      limit_rc = metadata_check_received(only, NULL, 0, NULL, key, value);
 
     if (limit_rc != METADATA_LIMIT_OK) {
       mdsync_limit_notice(cptr, target, key, metadata_limit_why(limit_rc));
@@ -2046,15 +2139,16 @@ static int ms_metadata_stamped(struct Client *cptr, struct Client *sptr,
     }
   }
 
-  /* Apply this server's full limits (value bytes + key count, via
-   * metadata_check_account_limits -- Task 5, W4 plan 1.8, extends what
-   * used to be a UTF-8/length-only first-hop flood stop here).  On a
-   * violation, skip merge/apply/store and tell opers once per link
-   * (mdsync_limit_notice), but still relay the incoming version onward
-   * through metadata_emit_versioned unchanged -- an over-limit check
-   * must never suppress the relay. */
+  /* Not this server's limits: the writing server's cap stands (owner,
+   * 2026-11-24; metadata_key_ceiling() says why), so only the receive
+   * check (UTF-8, a row's size, the key ceiling).  On a violation, skip
+   * merge/apply/store and tell opers once per link (mdsync_limit_notice),
+   * but still relay the incoming version onward through
+   * metadata_emit_versioned unchanged -- a limit check must never
+   * suppress the relay. */
   if (!tombstone) {
-    int limit_rc = metadata_check_account_limits(account_name, wire_key, chunk->value);
+    int limit_rc = metadata_check_received(NULL, NULL, 0, account_name,
+                                           wire_key, chunk->value);
 
     if (limit_rc != METADATA_LIMIT_OK) {
       mdsync_limit_notice(cptr, target, wire_key, metadata_limit_why(limit_rc));
@@ -2174,14 +2268,15 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     int rc;
     int limit_rc = METADATA_LIMIT_OK;
 
-    /* Same first-hop flood stop as the nick form below: UTF-8 + length
-     * only (no client context; the origin already enforced key counts).
-     * Task 5 (W4 plan 1.8): on a violation, skip apply/store and tell
+    /* The receive check, as for every form (metadata_check_received()):
+     * the oper's server applied the limits.  On a violation, skip
+     * apply/store and tell
      * opers once per link (mdsync_limit_notice), but still relay
      * unchanged below -- an over-limit check must never suppress the
      * relay. */
     if (value)
-      limit_rc = metadata_check_limits(NULL, NULL, 0, key, value);
+      limit_rc = metadata_check_received(NULL, NULL, 0, account_name, key,
+                                         value);
 
     if (limit_rc != METADATA_LIMIT_OK) {
       mdsync_limit_notice(cptr, target, key, metadata_limit_why(limit_rc));
@@ -2235,19 +2330,19 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     }
   }
 
-  /* Enforce the same limits every other write path obeys.  Task 5 (W4
-   * plan 1.8): on a violation, skip apply/cache/notify and tell opers
-   * once per link (mdsync_limit_notice), but still relay unchanged --
-   * caps are a feature, not a protocol invariant, so a compliant
-   * origin can legitimately trip a stricter downstream server's limits;
-   * dropping the relay there would silently diverge that server's view
-   * from the rest of the mesh instead of just not applying locally. */
+  /* The receive check only (metadata_check_received()): caps are the
+   * writing server's, so a compliant origin's write applies here even
+   * when this server's own limits are stricter -- refusing it would
+   * leave this server's view apart from the rest of the network for
+   * good.  On a violation (not UTF-8, too big for a row, past the key
+   * ceiling), skip apply/cache/notify and tell opers once per link
+   * (mdsync_limit_notice), but still relay unchanged. */
   {
     int limit_rc = METADATA_LIMIT_OK;
 
     if (value)
-      limit_rc = metadata_check_limits(target_client, target_channel, is_channel,
-                                       key, value);
+      limit_rc = metadata_check_received(target_client, target_channel,
+                                         is_channel, NULL, key, value);
 
     if (limit_rc != METADATA_LIMIT_OK) {
       mdsync_limit_notice(cptr, target, key, metadata_limit_why(limit_rc));

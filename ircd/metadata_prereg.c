@@ -9,6 +9,7 @@
  * See include/metadata_prereg.h.  Keep this file free of ircd headers:
  * it is compiled standalone for the cmocka suite.
  */
+#include <limits.h>
 #include "metadata_prereg.h"
 
 #include <string.h>
@@ -119,10 +120,20 @@ static void merge_one(struct merge_state *m, const char *key,
     ops->refuse(m->ctx, key, MD_PREREG_ERROR);
     return;
   }
-  v = md_prereg_decide(rc == 0 ? &stored : NULL, w,
-                       ops->no_row_is_state
-                         && ops->no_row_is_state(m->ctx, key),
-                       &m->user_keys, m->max_keys, m->max_value_bytes);
+  /* A key outside the cap is decided against a count of its own, with no
+   * cap: never refused for it, and its coming or going moves no place. */
+  if (ops->counts && !ops->counts(m->ctx, key)) {
+    int outside = 0;
+
+    v = md_prereg_decide(rc == 0 ? &stored : NULL, w,
+                         ops->no_row_is_state
+                           && ops->no_row_is_state(m->ctx, key),
+                         &outside, INT_MAX, m->max_value_bytes);
+  } else
+    v = md_prereg_decide(rc == 0 ? &stored : NULL, w,
+                         ops->no_row_is_state
+                           && ops->no_row_is_state(m->ctx, key),
+                         &m->user_keys, m->max_keys, m->max_value_bytes);
   switch (v) {
   case MD_PREREG_APPLY:
   case MD_PREREG_STAMP:
@@ -230,13 +241,17 @@ void md_prereg_note_clear(struct MetadataPrereg **list,
   *list = marker;
 }
 
-/** Count @a list's notes by kind, leaving out the one for @a except. */
+/** Count @a list's notes by kind, leaving out the one for @a except and
+ * those of keys outside the cap (@a counts, when given, says which). */
 static void count_notes(const struct MetadataPrereg *list, const char *except,
+                        int (*counts)(const char *key),
                         int *sets, int *deletes)
 {
   *sets = *deletes = 0;
   for (; list; list = list->next) {
     if (list->clear || (except && key_eq(list->key, except)))
+      continue;
+    if (counts && !counts(list->key))
       continue;
     if (list->value)
       (*sets)++;
@@ -246,12 +261,14 @@ static void count_notes(const struct MetadataPrereg *list, const char *except,
 }
 
 int md_prereg_fits(const struct MetadataPrereg *list, const char *key,
-                   int is_delete, int max_keys)
+                   int is_delete, int max_keys, int (*counts)(const char *key))
 {
   int sets, deletes;
 
+  if (counts && !counts(key))
+    return 1;
   if (max_keys < 0)
     max_keys = 0;
-  count_notes(list, key, &sets, &deletes);
+  count_notes(list, key, counts, &sets, &deletes);
   return (is_delete ? deletes : sets) < max_keys;
 }

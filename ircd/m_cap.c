@@ -539,7 +539,7 @@ static struct capabilities capab_list[] = {
   _CAP(DRAFT_READMARKER, 0, "draft/read-marker", FEAT_CAP_draft_read_marker),
   _CAP(DRAFT_CHANRENAME, 0, "draft/channel-rename", FEAT_CAP_draft_channel_rename),
   _CAP(EVILNET_RELOCATE, 0, "evilnet.github.io/channel-relocate", FEAT_CAP_evilnet_channel_relocate),
-  _CAP_V(DRAFT_METADATA2, 0, "draft/metadata-2", FEAT_CAP_draft_metadata_2, "before-connect,max-subs=50,max-keys=20,max-value-bytes=300"),
+  _CAP_V(DRAFT_METADATA2, 0, "draft/metadata-2", FEAT_CAP_draft_metadata_2, "before-connect,max-subs=50,max-keys=34,max-value-bytes=300"),  /* the defaults; feature_notify_metadata_capvalue() replaces it from the settings at boot */
   _CAP(DRAFT_WEBPUSH, 0, "draft/webpush", FEAT_CAP_draft_webpush),
   _CAP(DRAFT_AUTHTOKEN, 0, "draft/authtoken", FEAT_CAP_draft_authtoken),
   _CAP(EVILNET_PERSISTENCE, 0, "evilnet.github.io/persistence", FEAT_CAP_evilnet_persistence),
@@ -565,7 +565,7 @@ static struct capabilities capab_list[] = {
  * the entry itself would not survive the shuffle.  Slots are keyed by
  * capability and reused, so a rehash storm cannot exhaust them.
  */
-#define CAP_VALUE_SLOTS 4
+#define CAP_VALUE_SLOTS 8
 #define CAP_VALUE_LEN   256
 
 static struct {

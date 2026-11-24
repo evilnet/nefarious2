@@ -153,6 +153,10 @@ struct md_prereg_ops {
   void (*clear_keys)(void *ctx, const struct md_stamp *st,
                      void (*each)(void *arg, const char *key, int vis),
                      void *arg);
+  /** Non-zero when @a key counts toward the cap (metadata_key_counts()):
+   * a key outside it is never refused for the cap, and adding or deleting
+   * one leaves the count be.  NULL: every key counts. */
+  int (*counts)(void *ctx, const char *key);
 };
 
 /** Merge the before-connect writes @a list into the account: each write
@@ -185,10 +189,14 @@ extern int md_prereg_merge(const struct MetadataPrereg *list, int user_keys,
  * @param[in] list The notes.
  * @param[in] key The key written.
  * @param[in] is_delete Non-zero for a delete.
+ * A key outside the cap (@a counts says so) always fits, and its notes are
+ * not counted: those keys are a fixed few, each noted once.
  * @param[in] max_keys METADATA_MAX_KEYS (negative: 0).
+ * @param[in] counts Whether a key counts toward the cap; NULL: every key.
  * @return non-zero if it fits. */
 extern int md_prereg_fits(const struct MetadataPrereg *list, const char *key,
-                          int is_delete, int max_keys);
+                          int is_delete, int max_keys,
+                          int (*counts)(const char *key));
 
 /** Note a CLEAR: every note in @a *list goes (@a release frees each; it
  * may be NULL when the caller owns none), and @a marker -- the caller's,

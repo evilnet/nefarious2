@@ -1463,18 +1463,21 @@ int metadata_account_clear(const char *account)
   return (rc == DB_OK) ? 0 : -1;
 }
 
-/** Count persisted metadata keys for an account, excluding
- * server-managed keys.  Bounded: stops counting at
- * FEAT_METADATA_MAX_KEYS + 1 so a pathological account cannot make the
- * scan unbounded.  Counts TTL-cached rows too (cheap approximation —
+/** Count persisted metadata keys for an account (or a +R channel), only
+ * those that count toward the cap (metadata_key_counts()).  Bounded: stops
+ * counting at @a limit + 1 so a pathological account cannot make the scan
+ * unbounded.  @a limit is the caller's: METADATA_MAX_KEYS for a write made
+ * here, the key ceiling for a peer's row (a count stopped at the cap could
+ * never reach the ceiling).  Counts TTL-cached rows too (cheap approximation —
  * decoding every value to check expiry is not worth it; after the
  * commit that stops TTL-downgrading user rows, user rows are
  * effectively all permanent).
  * @param[in] account Account name.
- * @return number of keys (possibly capped at max_keys + 1), or 0 on
+ * @param[in] limit The most keys the caller compares against (negative: 0).
+ * @return number of keys (possibly capped at @a limit + 1), or 0 on
  *         storage unavailable/error.
  */
-int metadata_account_count_keys(const char *account)
+int metadata_account_count_keys(const char *account, int limit)
 {
   struct db_iter *it;
   /* CHANNELLEN, not ACCOUNTLEN: the account slot now also carries channel
@@ -1484,11 +1487,15 @@ int metadata_account_count_keys(const char *account)
   int max_keys;
   int count = 0;
   int rc;
+  int is_channel;
 
   if (!metadata_lmdb_available || !account)
     return 0;
+  /* The slot holds a +R channel's name too: its keys count by the
+   * channel list. */
+  is_channel = IsChannelName(account);
 
-  max_keys = feature_int(FEAT_METADATA_MAX_KEYS);
+  max_keys = limit;
   if (max_keys < 0)
     max_keys = 0;
 
@@ -1524,7 +1531,7 @@ int metadata_account_count_keys(const char *account)
     memcpy(kbuf, (const char *)rawkey + prefixlen, kpartlen);
     kbuf[kpartlen] = '\0';
 
-    if (metadata_key_is_server_managed(kbuf))
+    if (!metadata_key_counts(kbuf, is_channel))
       continue;
 
     if (++count > max_keys)
@@ -1751,7 +1758,7 @@ int metadata_account_set_permanent(const char *account, const char *key, const c
 struct MetadataEntry *metadata_account_list(const char *account) { return NULL; }
 int metadata_account_has_rows(const char *account) { (void)account; return 0; }
 int metadata_account_clear(const char *account) { return -1; }
-int metadata_account_count_keys(const char *account) { return 0; }
+int metadata_account_count_keys(const char *account, int limit) { return 0; }
 int metadata_account_purge_expired(void) { return -1; }
 int metadata_account_foreach_key(void (*cb)(const void *key, size_t klen, void *arg), void *arg) { (void)cb; (void)arg; return -1; }
 int metadata_account_put_versioned(const char *account, const char *key, const char *value, int vis, const struct md_stamp *st) { (void)account; (void)key; (void)value; (void)vis; (void)st; return -1; }
@@ -2110,6 +2117,58 @@ static int metadata_mode_sync_index(const char *key)
     if (ircd_strcmp(key, metadata_mode_sync[i].key) == 0)
       return i;
   return -1;
+}
+
+/** The IRCv3 metadata key registry (https://ircv3.net/registry, as of
+ * 2026-11-24): its user keys and its channel keys.  Keys outside
+ * METADATA_MAX_KEYS (owner, 2026-11-24).  A key registered later counts
+ * toward the cap until it is added here. */
+static const char *const metadata_registry_user_keys[] = {
+  "avatar", "bot", "color", "display-name", "homepage", "pronouns", "status",
+  NULL
+};
+static const char *const metadata_registry_channel_keys[] = {
+  "avatar", "display-name",
+  NULL
+};
+
+/** Whether @a key is in the registry list @a list. */
+static int metadata_key_in(const char *const *list, const char *key)
+{
+  for (; *list; list++)
+    if (ircd_strcmp(key, *list) == 0)
+      return 1;
+  return 0;
+}
+
+/** See include/metadata.h. */
+int metadata_key_counts(const char *key, int is_channel)
+{
+  if (!key || metadata_key_is_server_managed(key))
+    return 0;
+  if (is_channel)
+    return !metadata_key_in(metadata_registry_channel_keys, key);
+  if (metadata_mode_sync_index(key) >= 0)
+    return 0;
+  return !metadata_key_in(metadata_registry_user_keys, key);
+}
+
+/** See include/metadata.h. */
+int metadata_max_keys_total(void)
+{
+  int total = feature_int(FEAT_METADATA_MAX_KEYS);
+  int i;
+
+  if (total < 0)
+    total = 0;
+  for (i = 0; metadata_registry_user_keys[i]; i++)
+    total++;
+  /* draft/persistence/hold is mode-synced but the server's: a client
+   * cannot set it (metadata_key_is_server_managed). */
+  for (i = 0; metadata_mode_sync[i].key; i++)
+    if (!metadata_key_is_server_managed(metadata_mode_sync[i].key))
+      total++;
+  return total;
 }
 
 int metadata_key_mode_synced(const char *key)
@@ -2489,6 +2548,12 @@ struct MetadataEntry *metadata_list_client(struct Client *cptr)
   return cli_metadata(cptr);
 }
 
+/** A user key that counts toward the cap (md_prereg_fits()'s test). */
+static int prereg_key_counts(const char *key)
+{
+  return metadata_key_counts(key, 0);
+}
+
 /** See include/metadata.h. */
 int metadata_prereg_record(struct Client *cptr, const char *key,
                            const char *value, int visibility,
@@ -2504,7 +2569,7 @@ int metadata_prereg_record(struct Client *cptr, const char *key,
    * (not the in-memory key count's): METADATA_MAX_KEYS sets and as many
    * deletes -- an account holds no more user keys than that. */
   if (!md_prereg_fits(cli_metadata_prereg(cptr), key, value == NULL,
-                      feature_int(FEAT_METADATA_MAX_KEYS)))
+                      feature_int(FEAT_METADATA_MAX_KEYS), prereg_key_counts))
     return -2;
 
   for (w = cli_metadata_prereg(cptr); w; prev = w, w = w->next) {
@@ -2974,18 +3039,25 @@ static int prereg_no_row_is_state(void *arg, const char *key)
  * as a SET would change them, except that the registering connection is
  * told nothing beyond its burst and its sign-on mode line.
  */
+/** md_prereg_ops.counts: a user's key, by metadata_key_counts(). */
+static int prereg_counts(void *ctx, const char *key)
+{
+  (void)ctx;
+  return metadata_key_counts(key, 0);
+}
+
 static void metadata_prereg_merge(struct Client *cptr, int path)
 {
   static const struct md_prereg_ops store_ops = {
     prereg_row, prereg_store, prereg_apply, prereg_send, prereg_refuse,
-    prereg_no_row_is_state, prereg_clear_keys
+    prereg_no_row_is_state, prereg_clear_keys, prereg_counts
   };
   /* No store (b2): rows read from the session's memory, nothing stored,
    * a CLEAR deletes what that memory holds -- as a CLEAR after
    * registration deletes the requester's memory's keys there. */
   static const struct md_prereg_ops nostore_ops = {
     nostore_row, NULL, prereg_apply, prereg_send, prereg_refuse,
-    prereg_no_row_is_state, nostore_clear_keys
+    prereg_no_row_is_state, nostore_clear_keys, prereg_counts
   };
   struct MetadataPrereg *list = cli_metadata_prereg(cptr);
   struct prereg_merge_ctx c;
@@ -3140,8 +3212,8 @@ int metadata_key_is_server_managed(const char *key)
   return 0;
 }
 
-/** Count user-managed metadata entries for a client.
- * Server-managed entries (see metadata_key_is_server_managed) are skipped.
+/** Count a client's metadata entries that count toward the cap
+ * (metadata_key_counts(): not server-managed, mode-synced or registry keys).
  * @param[in] cptr Client to count.
  * @return Number of user-managed metadata entries.
  */
@@ -3154,7 +3226,7 @@ int metadata_count_client(struct Client *cptr)
     return 0;
 
   for (entry = cli_metadata(cptr); entry; entry = entry->next) {
-    if (metadata_key_is_server_managed(entry->key))
+    if (!metadata_key_counts(entry->key, 0))
       continue;
     count++;
   }
@@ -3312,7 +3384,8 @@ void metadata_clear_channel(struct Channel *chptr)
   chptr->metadata = NULL;
 }
 
-/** Count metadata entries for a channel.
+/** Count a channel's metadata entries that count toward the cap
+ * (metadata_key_counts(): not server-managed or channel registry keys).
  * @param[in] chptr Channel to count.
  * @return Number of metadata entries.
  */
@@ -3325,7 +3398,7 @@ int metadata_count_channel(struct Channel *chptr)
     return 0;
 
   for (entry = chptr->metadata; entry; entry = entry->next) {
-    if (metadata_key_is_server_managed(entry->key))
+    if (!metadata_key_counts(entry->key, 1))
       continue;
     count++;
   }

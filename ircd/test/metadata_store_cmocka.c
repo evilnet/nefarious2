@@ -548,6 +548,84 @@ static void without_a_store_the_seed_does_nothing(void **state)
   assert_int_equal(metadata_lmdb_init("unused"), 0);   /* teardown's */
 }
 
+/* ------------------------------------------------------------------ */
+/* The key cap (owner, 2026-11-24): it is for a target's own keys;     */
+/* mode keys, IRCv3 registry keys and server-managed keys stand apart  */
+/* ------------------------------------------------------------------ */
+
+static void the_key_classes(void **state)
+{
+  (void)state;
+  assert_true(metadata_key_counts("custom", 0));
+  assert_true(metadata_key_counts("avatar2", 0));
+  assert_false(metadata_key_counts("avatar", 0));
+  assert_false(metadata_key_counts("Display-Name", 0));
+  assert_false(metadata_key_counts("pronouns", 0));
+  assert_false(metadata_key_counts("umode.invisible", 0));
+  assert_false(metadata_key_counts("chathistory.pm", 0));
+  assert_false(metadata_key_counts("draft/persistence/hold", 0));
+  assert_false(metadata_key_counts("draft/persistence/x", 1));
+  /* A channel has its own registry list, and no modes in metadata. */
+  assert_false(metadata_key_counts("avatar", 1));
+  assert_false(metadata_key_counts("display-name", 1));
+  assert_true(metadata_key_counts("pronouns", 1));
+  assert_true(metadata_key_counts("umode.invisible", 1));
+  assert_false(metadata_key_counts(NULL, 0));
+}
+
+static void the_cap_counts_an_accounts_own_keys(void **state)
+{
+  (void)state;
+  put_value("gus", "custom1", "a");
+  put_value("gus", "custom2", "a");
+  put_value("gus", "avatar", "a");
+  put_value("gus", "pronouns", "a");
+  put_value("gus", "umode.invisible", "1");
+  put_value("gus", "chathistory.pm", "0");
+  put_value("gus", "draft/persistence/hold", "1");
+  assert_int_equal(metadata_account_count_keys("gus", 20), 2);
+}
+
+static void a_channel_counts_by_the_channel_list(void **state)
+{
+  (void)state;
+  put_value("#chan", "topicx", "a");
+  put_value("#chan", "avatar", "a");
+  put_value("#chan", "display-name", "a");
+  put_value("#chan", "pronouns", "a");
+  put_value("#chan", "umode.invisible", "1");
+  assert_int_equal(metadata_account_count_keys("#chan", 20), 3);
+}
+
+/* The count stops past the caller's limit, not the cap's: a peer's rows are
+ * held to the key ceiling (4x the cap), which a count stopped at the cap
+ * could never reach. */
+static void the_count_runs_to_the_callers_limit(void **state)
+{
+  char key[16];
+  int i;
+
+  (void)state;
+  for (i = 0; i < 30; i++) {
+    snprintf(key, sizeof(key), "k%02d", i);
+    put_value("gus", key, "a");
+  }
+  assert_int_equal(metadata_account_count_keys("gus", 80), 30);
+  assert_int_equal(metadata_account_count_keys("gus", 20), 21);
+  assert_int_equal(metadata_account_count_keys("gus", 29), 30);
+  assert_int_equal(metadata_account_count_keys("gus", -1), 1);
+}
+
+/* max-keys: "the maximum number of keys a client is allowed to set on its
+ * own nickname" -- the cap (20 here) and every key outside it a client may
+ * set on itself: 7 registry keys, 7 mode keys (draft/persistence/hold is
+ * the server's). */
+static void the_advertised_total(void **state)
+{
+  (void)state;
+  assert_int_equal(metadata_max_keys_total(), 34);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -573,6 +651,11 @@ int main(void)
     cmocka_unit_test_setup_teardown(bad_rows_are_passed_over, setup, teardown),
     cmocka_unit_test_setup_teardown(old_rows_leave_the_clock_be, setup, teardown),
     cmocka_unit_test_setup_teardown(without_a_store_the_seed_does_nothing, setup, teardown),
+    cmocka_unit_test(the_key_classes),
+    cmocka_unit_test_setup_teardown(the_cap_counts_an_accounts_own_keys, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_channel_counts_by_the_channel_list, setup, teardown),
+    cmocka_unit_test(the_advertised_total),
+    cmocka_unit_test_setup_teardown(the_count_runs_to_the_callers_limit, setup, teardown),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

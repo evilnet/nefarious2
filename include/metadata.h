@@ -76,7 +76,12 @@ struct Channel;
 /** Maximum length of a metadata key name */
 #define METADATA_KEY_LEN 64
 
-/** Maximum length of a metadata value */
+/** Our buffer size for a metadata value, its NUL included: a value of up
+ * to 1023 bytes can be held, stored and read back.  Not from any spec
+ * (draft/metadata-2 only has a server announce its own max-value-bytes);
+ * chosen with the first implementation (f8232880).  The limit a client
+ * meets is METADATA_MAX_VALUE_BYTES (300), and a peer's row is refused
+ * only past this buffer (m_metadata.c metadata_check_received()). */
 #define METADATA_VALUE_LEN 1024
 
 /** Visibility levels for metadata */
@@ -467,17 +472,18 @@ extern int metadata_count_client(struct Client *cptr);
  */
 extern int metadata_count_channel(struct Channel *chptr);
 
-/** Count persisted metadata keys for an account, excluding
- * server-managed keys.  Used to enforce FEAT_METADATA_MAX_KEYS against
- * LMDB-persisted rows for offline accounts (the oper "*account" SET
- * path), where there is no in-memory MetadataEntry list to walk.
- * Bounded: stops counting at FEAT_METADATA_MAX_KEYS + 1 so a
- * pathological account cannot make the scan unbounded.
+/** Count persisted metadata keys for an account (or a +R channel), only
+ * those that count toward the cap (metadata_key_counts()).  Used where
+ * there is no in-memory MetadataEntry list to walk: METADATA_MAX_KEYS for
+ * the oper "*account" SET path, the key ceiling for a peer's account row.
+ * Bounded: stops counting at @a limit + 1 so a pathological account
+ * cannot make the scan unbounded.
  * @param[in] account Account name.
- * @return Number of keys (possibly capped at max_keys + 1), or 0 on
+ * @param[in] limit The most keys the caller compares against (negative: 0).
+ * @return Number of keys (possibly capped at @a limit + 1), or 0 on
  *         storage unavailable/error.
  */
-extern int metadata_account_count_keys(const char *account);
+extern int metadata_account_count_keys(const char *account, int limit);
 
 /** Test whether a metadata key is server-managed.
  * Server-managed keys live under the reserved prefix (draft/persistence/...).
@@ -488,6 +494,23 @@ extern int metadata_account_count_keys(const char *account);
  * @return Non-zero if the key is server-managed.
  */
 extern int metadata_key_is_server_managed(const char *key);
+
+/** Whether @a key counts toward METADATA_MAX_KEYS on a target (owner,
+ * 2026-11-24).  The cap is for a target's own keys: a server-managed key
+ * (draft/persistence/...), a mode-synced key on a user (umode.*,
+ * chathistory.nostorage, chathistory.pm), and a key in the IRCv3 metadata
+ * registry (ircv3.net/registry, its user or channel list) stand outside it.
+ * Each of those is one of a fixed few, so the store stays bounded.
+ * @param[in] key The key.
+ * @param[in] is_channel Non-zero for a channel target.
+ * @return non-zero if it counts. */
+extern int metadata_key_counts(const char *key, int is_channel);
+
+/** The draft/metadata-2 max-keys value: "the maximum number of keys a
+ * client is allowed to set on its own nickname" -- METADATA_MAX_KEYS plus
+ * every key outside the cap a client may set on itself (the registry's
+ * user keys and the mode-synced keys that are not server-managed). */
+extern int metadata_max_keys_total(void);
 
 /** Check if a viewer can see a metadata entry.
  * @param[in] viewer Client viewing the metadata.

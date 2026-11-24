@@ -1379,6 +1379,9 @@ int main(int argc, char **argv) {
    * attach-cursor = ATTACH accepts the optional last-seen-msgid catch-up
    * anchor. */
   cap_set_value(CAP_EVILNET_PERSISTENCE, PERSISTENCE_EXTRAS_VALUE);
+  /* draft/metadata-2's limits, from the settings (the compiled-in value
+   * is the defaults'); their feature hooks keep it in step after. */
+  feature_notify_metadata_capvalue();
   /* While PERSISTENCE_DRAFT_EXTRAS keeps the old names working,
    * draft/persistence keeps the value too: clients written against them
    * read attach-cursor there (feature_notify_persistence_draft_extras()). */

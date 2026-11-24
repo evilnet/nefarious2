@@ -216,6 +216,12 @@ extern void cap_set_value(enum Capab cap, const char *value);
  * draft/account-registration CAP value from FEAT_REGISTER_VERIFY_EMAIL.
  * Defined in m_register.c. */
 extern void feature_notify_accountreg_capvalue(void);
+
+/* Feature-notify hook (ircd_features.c table) and boot call: rebuilds the
+ * draft/metadata-2 CAP value from METADATA_MAX_SUBS, METADATA_MAX_KEYS
+ * (as metadata_max_keys_total() counts it) and METADATA_MAX_VALUE_BYTES.
+ * Defined in m_metadata.c. */
+extern void feature_notify_metadata_capvalue(void);
 extern void feature_notify_cap_accountreg(void);
 
 /* CAP notify batching for rehash - aggregates multiple CAP NEW/DEL into single messages */
