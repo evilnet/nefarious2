@@ -328,6 +328,7 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
 {
   struct Flags old_mode = cli_flags(sptr);
   char*        modes;
+  char*        class_umode = NULL;  /* our own user's class modes, applied last */
   char*        parv[2];
   char*        join[3];
   char         chan[CHANNELLEN + 1];
@@ -426,23 +427,14 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
     /* Nothing left but signs: no mode change to apply. */
     modes = umode_buf[strspn(umode_buf, "+-")] ? umode_buf : NULL;
   }
-  if (modes) {
-    if (MyUser(sptr)) {
-      char *umodev[] = { NULL, NULL, NULL, NULL };
-      umodev[1] = cli_name(sptr);
-      umodev[2] = modes;
-      old_mode = cli_flags(sptr);
-      set_user_mode(sptr, sptr, 3, umodev, ALLOWMODES_ANY);
-      send_umode(NULL, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
-      if ((cli_snomask(sptr) != feature_int(FEAT_SNOMASK_OPERDEFAULT)) &&
-          HasFlag(sptr, FLAG_SERVNOTICE))
-        send_reply(sptr, RPL_SNOMASK, cli_snomask(sptr), cli_snomask(sptr));
-    } else {
-      if (snomask)
-        sendcmdto_one(&me, CMD_MODE, sptr, "%s %s+s +%d", cli_name(sptr), modes, snomask);
-      else
-        sendcmdto_one(&me, CMD_MODE, sptr, "%s %s", cli_name(sptr), modes);
-    }
+  /* Our own user's class modes are applied at the end, once its session is
+   * an oper as a whole (below). */
+  class_umode = MyUser(sptr) ? modes : NULL;
+  if (modes && !MyUser(sptr)) {
+    if (snomask)
+      sendcmdto_one(&me, CMD_MODE, sptr, "%s %s+s +%d", cli_name(sptr), modes, snomask);
+    else
+      sendcmdto_one(&me, CMD_MODE, sptr, "%s %s", cli_name(sptr), modes);
   }
 
   /* Record the oper grant on the session record so the state survives
@@ -495,6 +487,25 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
 
     if (primary)
       send_umode_out_device_oper(sptr, primary, &primary_before);
+  }
+
+  /* The class's usermode, now that every member of the session is an oper.
+   * The mode command names the nick, which for a device is its primary:
+   * applied before the sync above, the user rules were judged on a primary
+   * that was no oper yet (oper-only modes refused), and the sync that
+   * follows a mode change of the primary copied that primary onto the
+   * device -- taking its +o, its privileges and the oper handler away
+   * again.  Nobody ended an oper, after a 381. */
+  if (class_umode) {
+    char *umodev[] = { NULL, NULL, NULL, NULL };
+    umodev[1] = cli_name(sptr);
+    umodev[2] = class_umode;
+    old_mode = cli_flags(sptr);
+    set_user_mode(sptr, sptr, 3, umodev, ALLOWMODES_ANY);
+    send_umode(NULL, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
+    if ((cli_snomask(sptr) != feature_int(FEAT_SNOMASK_OPERDEFAULT)) &&
+        HasFlag(sptr, FLAG_SERVNOTICE))
+      send_reply(sptr, RPL_SNOMASK, cli_snomask(sptr), cli_snomask(sptr));
   }
 
   send_reply(sptr, RPL_YOUREOPER);
