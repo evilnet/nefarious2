@@ -12839,8 +12839,8 @@ static void bounce_send_member_snomask(struct Client *target,
   peer = cli_from(target);
   if (!peer || !IsServer(peer) || !IsIRCv3Aware(peer))
     return;
-  /* ... and the server that made the change, when it was not us: the
-   * stamp orders two changes by (stamp, origin), and a line that only
+  /* ... and the server that made the change (us, or the one we took it
+   * from): the stamp orders two changes by (stamp, origin), and a line that only
    * repeats a stored change (the BX C answer) is ours on the wire.  Judged
    * by our numeric, the server that made the change dropped its own mask
    * coming back for a new device whenever its numeric was the lower one.
