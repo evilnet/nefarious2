@@ -130,6 +130,7 @@ void client_set_privs(struct Client *client, struct ConfItem *oper) {}
 void client_send_privs(struct Client *from, struct Client *to,
                        struct Client *client) {}
 void client_sendtoserv_privs(struct Client *client) {}
+void bounce_session_snomask_again(struct Client *member) {}
 void send_umode_out_device_oper(struct Client *device, struct Client *primary,
                                 struct Flags *primary_old) {}
 void send_umode_out_device_toward_primary(struct Client *device,
@@ -301,6 +302,25 @@ static void completion_grants_the_live_block(void **state)
   free(user.opername);
 }
 
+/** The connection became an oper while its password was being checked
+ * (X3's auto-oper, or another connection of its session): the answer is
+ * the bare 381 an oper's own OPER gets, and nothing is granted again. */
+static void completion_for_a_connection_opered_meanwhile_only_answers(void **state)
+{
+  struct oper_verify_ctx *ctx;
+
+  (void)state;
+  add_block("op", "$X$old", "*", "");
+  ctx = pending_oper(5);
+  SetOper(&client);
+  oper_password_verified(CRYPT_VERIFY_MATCH, ctx);
+  ClearOper(&client);
+  assert_int_equal(attaches, 0);
+  assert_int_equal(last_reply, RPL_YOUREOPER);
+  assert_false(IsOperPending(&client));
+  assert_ptr_equal(resumed, &client);
+}
+
 /** The block now requires a fingerprint the client lacks: the answer is
  * the synchronous path's, ERR_SSLCLIFP, and the notice says when it was
  * found, naming no rehash. */
@@ -362,6 +382,7 @@ int main(void)
     cmocka_unit_test_setup(narrowed_host_fails, setup),
     cmocka_unit_test_setup(new_fingerprint_fails, setup),
     cmocka_unit_test_setup(completion_grants_the_live_block, setup),
+    cmocka_unit_test_setup(completion_for_a_connection_opered_meanwhile_only_answers, setup),
     cmocka_unit_test_setup(completion_fingerprint_answers_sslclifp, setup),
     cmocka_unit_test_setup(completion_without_block_answers_nooperhost, setup),
     cmocka_unit_test_setup(completion_changed_password_answers_passwdmismatch, setup),

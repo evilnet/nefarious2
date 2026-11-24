@@ -13367,6 +13367,43 @@ void bounce_sync_session_snomask(struct Client *source)
   }
 }
 
+/** Send the session's server notice mask to its members on other servers
+ * AGAIN, under a newer stamp: @a member's /OPER has just been announced.
+ *
+ * A server gives a member the mask it is sent only as far as that member
+ * may hold it then: a non-oper gets none of the oper bits (none at all
+ * under HIS_SNOTICES_OPER_ONLY), and that cut-down value is what the
+ * server keeps as the session's.  The session sync sends the mask (BX K)
+ * as part of the /OPER, and an /OPER on a device is announced to the
+ * network only after the sync, under the primary's numeric: a member on
+ * another server was sent the mask while it was still no oper there, and
+ * nothing sent it again.  It ended an oper without the oper notices.
+ *
+ * The receiver takes the later stamp, finds its member an oper now, and
+ * tells it (+s, 008). */
+void bounce_session_snomask_again(struct Client *member)
+{
+  struct BouncerSession *sess;
+  struct Client *m;
+  int i;
+
+  if (!member || !IsUser(member))
+    return;
+  sess = bounce_get_session(member);
+  if (!sess || !sess->hs_snomask_known)
+    return;
+  bounce_stamp_snomask(sess);
+  bounce_mark_dirty(member);
+  for (i = -1; i < sess->hs_alias_count; i++) {
+    m = (i < 0) ? sess->hs_client : findNUser(sess->hs_aliases[i].ba_numeric);
+    if (!m || !IsUser(m) || MyConnect(m))
+      continue;
+    if (i >= 0 && !IsBouncerAlias(m))
+      continue;
+    bounce_send_member_snomask(m, sess);
+  }
+}
+
 /* ---------------------------------------------------------------- */
 /* Cross-server transfer (BT token)                                  */
 /* ---------------------------------------------------------------- */

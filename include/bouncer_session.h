@@ -1189,6 +1189,10 @@ struct Flags;
 extern void bounce_sync_session_umodes(struct Client *source,
                                        const struct Flags *source_before,
                                        struct Client *told);
+/** Send the session's server notice mask to its members on other servers
+ * again, under a newer stamp, after @a member's /OPER was announced: sent
+ * before the +o it was cut down to a non-oper's there. */
+extern void bounce_session_snomask_again(struct Client *member);
 /** The oper privileges of session member @a member changed on this server
  * without a mode change (a PRIVS line named it): give every device of its
  * session the primary's list, as the mode mirror does at a mode change.

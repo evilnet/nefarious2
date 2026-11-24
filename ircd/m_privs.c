@@ -143,24 +143,23 @@ int ms_privs(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
     if (MyConnect(acptr) && modified)
       sendcmdto_one(&me, CMD_NOTICE, acptr, "%C :Your privileges were modified", acptr);
 
-    /* Alias→primary privilege sync: the PRIVS message targets the alias
-     * numeric, but the primary needs the same privileges so oper
-     * capabilities (CHECK, KILL, etc.) work from the primary too.
+    /* Alias→primary privilege sync: a PRIVS line that names a device (an
+     * alias) of an oper session is the session's, so the primary takes it
+     * too -- while BOTH are opers.
      *
-     * A replace, line by line, of the primary's list by the device
-     * copy's: a grant's lines add up on the device copy, which its server
-     * starts from nothing first ("PRIV_NONE", do_oper), and a local
-     * grant's list is taken back the same way.  The primary's server
-     * takes the list again when the device's mode line makes its user an
-     * oper (m_mode.c). */
-    /* Never onto a primary that is an oper while this copy of the device
-     * is not: the device's grant is then not the session's (the primary
-     * holds its own -- a local one on its server, or one that got there
-     * first), and its lines, the "PRIV_NONE" ahead of them above all,
-     * would empty or replace a list the primary was granted. */
+     * Not before: the lines of an /OPER on a device come ahead of its mode
+     * line, and the primary's server takes the device copy's list when
+     * that line makes its user an oper (m_mode.c); every other server is
+     * sent the list under the primary's numeric.  Copied here, a primary
+     * held privileges while no oper -- and kept them if the mode line never
+     * came.  And never onto a primary that is an oper while this copy of
+     * the device is not: that grant is not the session's (the primary holds
+     * its own, a local one on its server or one that got there first), and
+     * its lines, the "PRIV_NONE" ahead of them above all, would empty or
+     * replace a list the primary was granted. */
     if (IsBouncerAlias(acptr) && cli_user(acptr)
         && cli_user(acptr)->alias_primary
-        && (IsAnOper(acptr) || !IsAnOper(cli_user(acptr)->alias_primary))) {
+        && IsAnOper(acptr) && IsAnOper(cli_user(acptr)->alias_primary)) {
       memcpy(&cli_privs(cli_user(acptr)->alias_primary),
              &cli_privs(acptr), sizeof(struct Privs));
     }

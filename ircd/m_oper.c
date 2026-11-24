@@ -259,7 +259,15 @@ static void oper_password_verified(int result, void *arg)
   client_input_resume(sptr);
 
   oper_answer_begin(sptr, ctx->label, &st);
-  if (result == CRYPT_VERIFY_MATCH
+  if (result == CRYPT_VERIFY_MATCH && IsAnOper(sptr)) {
+    /* It became an oper while its password was being checked: X3's
+     * auto-oper landed, or another connection of its session opered.  An
+     * oper's own OPER is answered and changes nothing (mo_oper()); the
+     * grant run here regardless took its +o for a local block's +O with no
+     * -o announced, and, for a device, sent privilege lines that emptied
+     * or replaced the list its session already held on other servers. */
+    send_reply(sptr, RPL_YOUREOPER);
+  } else if (result == CRYPT_VERIFY_MATCH
       && !(aconf = oper_live_block(sptr, ctx->name, ctx->passwd, &why))) {
     /* The password matched the block as it was; the configuration in force
      * now has no such block for this client: a rehash during the check, or
@@ -468,8 +476,8 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
   }
 
   /* Sync oper mode flags across all members of this client's bouncer
-   * session — handles /OPER on alias as well as on primary.  Must be
-   * after all mode and ConfUmode changes are applied.
+   * session — handles /OPER on alias as well as on primary.  The
+   * class's usermode is applied after it (below).
    *
    * A device that opers: the sync gives its primary (our user, or our
    * copy of another server's) the oper state, and the network is then
@@ -485,8 +493,12 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
 
     bounce_sync_session_umodes(sptr, NULL, sptr);
 
-    if (primary)
+    if (primary) {
       send_umode_out_device_oper(sptr, primary, &primary_before);
+      /* The sync sent the session's notice mask before that announcement:
+       * a member on another server was no oper yet when it arrived. */
+      bounce_session_snomask_again(sptr);
+    }
   }
 
   /* The class's usermode, now that every member of the session is an oper.

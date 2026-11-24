@@ -2329,27 +2329,6 @@ static void send_umode_out_device(struct Client *device, struct Client *primary,
 }
 
 
-/** Tell the network that a session's user became an oper by an /OPER on
- * one of its devices, here: the session sync has just given @a primary
- * (our user, or our copy of another server's) the device's oper state.
- *
- * Under the PRIMARY's numeric, the one every server knows: its privilege
- * list (a global grant only), then its mode change.  The device's own
- * mode line used to go to every link under the device's numeric, which a
- * legacy server and X3 do not know; and a fork server that had already
- * set +o on its copy passed on no change when the primary's server
- * announced it -- so the legacy servers and X3 behind it never saw the
- * oper (a device beside its primary, and a device between the primary's
- * server and them).
- *
- * The link toward a primary on another server is not told here: it got the
- * DEVICE's line before the sync (send_umode_out_device_toward_primary()),
- * and its server tells its own side.  A local grant (+O) is no network
- * state: no list is sent, and the mode change goes without +o.
- *
- * @param[in] device      The local device that opered.
- * @param[in] primary     Its session's primary.
- * @param[in] primary_old The primary's flags before the session sync. */
 /** The first half of telling the network about an /OPER on a device, for a
  * primary that is ANOTHER server's user: the device's own mode line, under
  * the device's numeric, toward that server only.  It applies the line to
@@ -2381,6 +2360,27 @@ void send_umode_out_device_toward_primary(struct Client *device,
                   umodeBuf);
 }
 
+/** Tell the network that a session's user became an oper by an /OPER on
+ * one of its devices, here: the session sync has just given @a primary
+ * (our user, or our copy of another server's) the device's oper state.
+ *
+ * Under the PRIMARY's numeric, the one every server knows: its privilege
+ * list (a global grant only), then its mode change.  The device's own
+ * mode line used to go to every link under the device's numeric, which a
+ * legacy server and X3 do not know; and a fork server that had already
+ * set +o on its copy passed on no change when the primary's server
+ * announced it -- so the legacy servers and X3 behind it never saw the
+ * oper (a device beside its primary, and a device between the primary's
+ * server and them).
+ *
+ * The link toward a primary on another server is not told here: it got the
+ * DEVICE's line before the sync (send_umode_out_device_toward_primary()),
+ * and its server tells its own side.  A local grant (+O) is no network
+ * state: no list is sent, and the mode change goes without +o.
+ *
+ * @param[in] device      The local device that opered.
+ * @param[in] primary     Its session's primary.
+ * @param[in] primary_old The primary's flags before the session sync. */
 void send_umode_out_device_oper(struct Client *device, struct Client *primary,
                                 struct Flags *primary_old)
 {
