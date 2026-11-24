@@ -157,6 +157,9 @@ void sendcmdto_one(struct Client *from, const char *cmd, const char *tok,
 void sendcmdto_serv_butone(struct Client *from, const char *cmd,
                            const char *tok, struct Client *one,
                            const char *pattern, ...) {}
+void sendcmdto_serv_butone_v3(struct Client *from, const char *cmd,
+                              const char *tok, struct Client *one,
+                              const char *pattern, ...) {}
 
 static struct Client client;
 static struct Connection con;

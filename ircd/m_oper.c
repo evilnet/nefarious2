@@ -340,6 +340,18 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
   parv[1] = NULL;
 
   SetOper(sptr);
+  /* A device (alias).  The other fork servers keep its privilege list on
+   * their copy of it, and the primary's server hands that copy's list to
+   * the session when the device's mode line makes it an oper (m_mode.c).
+   * PRIVS lines only add, so the copy is started from nothing first: what
+   * an earlier grant left on it is no part of this one.  (A local grant,
+   * +O, changes no mode another server sees; after one whose mode letters
+   * were already set no line followed its PRIVS at all, and its list
+   * stayed on the copies -- a later /OPER then gave the session both
+   * blocks' privileges.)  Only the servers that know devices are told. */
+  if (MyUser(sptr) && IsBouncerAlias(sptr))
+    sendcmdto_serv_butone_v3(&me, CMD_PRIVS, NULL, "%C PRIV_NONE", sptr);
+
   client_set_privs(sptr, aconf);
   ClearOper(sptr);
 
