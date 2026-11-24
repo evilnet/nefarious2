@@ -70,8 +70,9 @@ struct Client *fwd_label_asker(struct Client *owner, struct ForwardedLabel *fl);
  *   commands of SEVERAL connections: every one of them (a device on
  *   another server included).  The caller sends the reply to each.
  * @param[in] max_askers Room in \a askers.
- * @param[out] n_askers How many were put there; 0 when the reply is one
- *   connection's (\a owner's, or the device its entry names).
+ * @param[out] n_askers How many were put there (a candidate whose device
+ *   is gone adds none); 0 when the reply is one connection's (\a owner's,
+ *   or the device its entry names).
  * @return The entry, or NULL: the reply goes out as it would without
  *   labeled-response.
  */

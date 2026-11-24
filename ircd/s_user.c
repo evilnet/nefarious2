@@ -327,7 +327,8 @@ int hunt_server_cmd(struct Client *from, const char *cmd, const char *tok,
    * unless the route heads toward the primary's own server, which
    * knows the alias (and where a primary-sourced line would be a fake
    * direction).  Replies then arrive addressed to the primary; the
-   * numeric relay mirrors them to the session's local aliases. */
+   * command is remembered below, and the numeric relay hands a reply to
+   * the connection that asked (do_numeric()). */
   asker = from;
   if (IsBouncerAlias(from) && cli_user(from) && cli_user(from)->alias_primary) {
     struct Client *prim = cli_user(from)->alias_primary;
@@ -443,7 +444,8 @@ int hunt_server_prio_cmd(struct Client *from, const char *cmd, const char *tok,
    * unless the route heads toward the primary's own server, which
    * knows the alias (and where a primary-sourced line would be a fake
    * direction).  Replies then arrive addressed to the primary; the
-   * numeric relay mirrors them to the session's local aliases. */
+   * command is remembered below, and the numeric relay hands a reply to
+   * the connection that asked (do_numeric()). */
   asker = from;
   if (IsBouncerAlias(from) && cli_user(from) && cli_user(from)->alias_primary) {
     struct Client *prim = cli_user(from)->alias_primary;

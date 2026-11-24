@@ -789,8 +789,10 @@ void fwd_label_drop_all(struct Client *cptr, int send_end)
    * yet) is forgotten. */
   for (i = 0; i < MAX_FORWARDED_LABELS; i++) {
     struct ForwardedLabel *fl = &cli_fwd_labels(cptr)[i];
-    if (send_end && (fl->fl_state == FWD_LABEL_ACTIVE
-                     || fl->fl_state == FWD_LABEL_DRAINING))
+    /* (A plain entry is no batch, DRAINING or not.) */
+    if (send_end && !fl->fl_plain
+        && (fl->fl_state == FWD_LABEL_ACTIVE
+            || fl->fl_state == FWD_LABEL_DRAINING))
       send_batch_marker(cptr, '-', fl->fl_batch_id, NULL, NULL, NULL, NULL);
   }
   /* The entries go; the commands they stood for may still be answered.

@@ -465,10 +465,6 @@ static void test_pick_oper_reply_from_elsewhere(void **state)
   assert_int_equal(PICK(372, ":- line", "Bb", "Qq", 0), 0);   /* non-oper: renamed */
 }
 
-/* CHECK is an oper's command, so its replies come under their origin's
- * name: that tells two CHECKs sent to different servers apart, though
- * nothing in the lines does.  Two to the same server are answered in the
- * order sent. */
 /** The askers of a reply's candidates: one connection's commands are one
  * asker however many they are; several connections' are several; what is
  * no candidate does not count. */
@@ -488,6 +484,10 @@ static void test_cand_askers(void **state)
   assert_int_equal(fwd_cand_askers(two, all, 0), 0);
 }
 
+/* CHECK is an oper's command, so its replies come under their origin's
+ * name: that tells two CHECKs sent to different servers apart, though
+ * nothing in the lines does.  Two to the same server are answered in the
+ * order sent. */
 static void test_pick_check_by_source(void **state)
 {
   int fit, amb;

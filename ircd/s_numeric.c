@@ -200,9 +200,12 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
         matched_plain = 2;
       }
 
-      if (matched_plain == 2 && nask > 1) {
+      if (matched_plain == 2 && nask > 0) {
         /* It could answer the commands of several connections, and names
-         * nothing that tells them apart: it goes to each of them.  Our own
+         * nothing that tells them apart: it goes to each of them (nask is
+         * every asker that is still there; one of the candidates may be a
+         * device that is gone, and the reply is then still not the oldest
+         * entry's alone).  Our own
          * connections of a primary that is ours get it as an unmatched
          * reply does, below (the primary and every local device); a
          * device on another server under its own numeric; and when the
