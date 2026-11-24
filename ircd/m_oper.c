@@ -717,6 +717,9 @@ int m_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
        * session, the device is refused; the primary's own connection, or
        * an /OPER on this server, works. */
       if (IsBouncerAlias(sptr)) {
+        /* Two lines: one labeled-response batch, closed by parse_client()
+         * when the line is done. */
+        labeled_batch_start(sptr);
         sendcmdto_one(&me, CMD_NOTICE, sptr, "%C :OPER on another server "
                       "is not available from this connection of your "
                       "session", sptr);
@@ -776,6 +779,13 @@ int ms_oper(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   if (!IsServer(sptr) && !IsOper(sptr)) {
     if (parc < 4)
+      return send_reply(sptr, ERR_NOOPERHOST);
+
+    /* A device (alias) of a bouncer session is refused here too, and not
+     * passed on: its own server refuses it now (m_oper), a server on an
+     * older build still sends it, and opering it leaves the session +o
+     * with no privileges on every server. */
+    if (IsBouncerAlias(sptr))
       return send_reply(sptr, ERR_NOOPERHOST);
 
     if (!(acptr = FindNServer(parv[1])))

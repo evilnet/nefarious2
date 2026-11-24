@@ -12839,9 +12839,17 @@ static void bounce_send_member_snomask(struct Client *target,
   peer = cli_from(target);
   if (!peer || !IsServer(peer) || !IsIRCv3Aware(peer))
     return;
-  sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, target, "K %s%s %u %Tu",
+  /* ... and the server that made the change, when it was not us: the
+   * stamp orders two changes by (stamp, origin), and a line that only
+   * repeats a stored change (the BX C answer) is ours on the wire.  Judged
+   * by our numeric, the server that made the change dropped its own mask
+   * coming back for a new device whenever its numeric was the lower one.
+   * An older receiver ignores the extra parameter. */
+  sendcmdto_one(&me, CMD_BOUNCER_TRANSFER, target, "K %s%s %u %Tu %s",
                 cli_yxx(cli_user(target)->server), cli_yxx(target),
-                sess->hs_snomask, sess->hs_snomask_ts);
+                sess->hs_snomask, sess->hs_snomask_ts,
+                sess->hs_snomask_origin[0] ? sess->hs_snomask_origin
+                                           : cli_yxx(&me));
 }
 
 /** Give live local session member @a cptr the session's mask @a mask:
@@ -17377,12 +17385,20 @@ void bounce_drain_pending_registrations(void)
  * connected -- to each other member's server, routed toward the member,
  * so every server delivers its own server notices to its own members.
  *
- * Format: BX K <member_numeric YYXXX> <snomask_decimal>
+ * Format: BX K <member_numeric YYXXX> <snomask_decimal> [<stamp> [<origin YY>]]
  *
  * The member may be an alias or the primary.  A live local member gets
  * the mask, +s iff it is non-zero, and is told; a local held ghost's mask
  * went with its socket, so the session keeps it for the revive.  Nothing
  * is synced onward from here: the sender addresses every member itself.
+ *
+ * Changes are ordered by (stamp, origin), the origin being the server that
+ * MADE the change: named on the line, or the line's own source from a
+ * sender on an older build.  The later one is kept.  A line under the
+ * stamp and origin already kept is that same change for another of our
+ * members -- a sender tells each member on its own line, and repeats a
+ * stored change to a newly attached device (the BX C answer) -- and is
+ * applied to it; the record is not written again.
  */
 static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr,
                                 int parc, char *parv[])
@@ -17391,6 +17407,7 @@ static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr,
   struct BouncerSession *sess;
   unsigned int snomask;
   time_t ts;
+  const char *origin;
   int is_replay = bx_drain_in_progress;
 
   if (parc < 4)
@@ -17413,8 +17430,9 @@ static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr,
     if (!is_replay) {
       defer_bx_for_alias(parv[2], cptr, sptr, parc, parv);
       sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_TRANSFER, cptr,
-                               "K %s %s%s%s", parv[2], parv[3],
-                               parc > 4 ? " " : "", parc > 4 ? parv[4] : "");
+                               "K %s %s%s%s%s%s", parv[2], parv[3],
+                               parc > 4 ? " " : "", parc > 4 ? parv[4] : "",
+                               parc > 5 ? " " : "", parc > 5 ? parv[5] : "");
     }
     return 0;
   }
@@ -17424,9 +17442,10 @@ static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr,
      * where it came from: a relay that broadcasts (an older server) would
      * otherwise bounce it between us. */
     if (!is_replay && cli_from(target) != cptr)
-      sendcmdto_one(sptr, CMD_BOUNCER_TRANSFER, target, "K %s %s%s%s",
+      sendcmdto_one(sptr, CMD_BOUNCER_TRANSFER, target, "K %s %s%s%s%s%s",
                     parv[2], parv[3],
-                    parc > 4 ? " " : "", parc > 4 ? parv[4] : "");
+                    parc > 4 ? " " : "", parc > 4 ? parv[4] : "",
+                    parc > 5 ? " " : "", parc > 5 ? parv[5] : "");
     return 0;
   }
 
@@ -17436,8 +17455,12 @@ static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr,
 
   snomask = (unsigned int)strtoul(parv[3], NULL, 10);
   ts = (parc > 4) ? (time_t)strtoul(parv[4], NULL, 10) : 0;
+  /* The server that made the change: named on the line, or (a sender on
+   * an older build) the line's own. */
+  origin = (parc > 5 && parv[5][0] && strlen(parv[5]) <= 2) ? parv[5]
+                                                             : cli_yxx(sptr);
   if (ts == sess->hs_snomask_ts
-      && 0 == strcmp(cli_yxx(sptr), sess->hs_snomask_origin)) {
+      && 0 == strcmp(origin, sess->hs_snomask_origin)) {
     /* The change we already took, addressed to another of our members: a
      * sender tells each member of the session on its own line, all under
      * one stamp.  Dropped as "not later", every member here but the first
@@ -17448,7 +17471,7 @@ static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr,
       bounce_put_member_snomask(target, snomask, 1);
     return 0;
   }
-  if (!bounce_snomask_later(sess, ts, cli_yxx(sptr))) {
+  if (!bounce_snomask_later(sess, ts, origin)) {
     /* An older change crossing a newer one: whoever made the newer one
      * has sent it everywhere, this one included. */
     Debug((DEBUG_INFO, "BX K: %s %u stamp %Tu from %s is older than %Tu",
@@ -17456,7 +17479,7 @@ static int bounce_alias_snomask(struct Client *cptr, struct Client *sptr,
     return 0;
   }
   sess->hs_snomask_ts = ts;
-  ircd_strncpy(sess->hs_snomask_origin, cli_yxx(sptr),
+  ircd_strncpy(sess->hs_snomask_origin, origin,
                sizeof(sess->hs_snomask_origin));
 
   if (IsBouncerHold(target)) {
