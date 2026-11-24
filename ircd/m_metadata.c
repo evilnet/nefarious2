@@ -676,22 +676,6 @@ enum {
   METADATA_CEILING_KEYS  = -5  /* received new key past the key ceiling */
 };
 
-/** The most keys that count toward the cap a server keeps for one target
- * it did not write: four times METADATA_MAX_KEYS, and never under four
- * times its default (20).  The cap itself is the writing server's (owner,
- * 2026-11-24): a server applies a peer's row whatever its own cap says,
- * or a server with a lower cap -- or both halves of a split filling the
- * last places with different keys -- would hold another set of keys than
- * its peers for good, which no pull can repair.  The ceiling only stops a
- * runaway peer. */
-static int metadata_key_ceiling(void)
-{
-  int max_keys = feature_int(FEAT_METADATA_MAX_KEYS);
-
-  if (max_keys < 20)
-    max_keys = 20;
-  return max_keys * 4;
-}
 
 /* Validate a metadata write against the configured limits.  Returns
  * METADATA_LIMIT_OK if allowed, else the code of the failed check.
@@ -1085,6 +1069,18 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
     send_keyvalue(sptr, target, key, value,
                   visibility == METADATA_VIS_PRIVATE ? "private" : "*");
     return 0;
+  }
+
+  /* A delete is told as the row it replaces was visible (the account
+   * rule, md_notify_vis(); review 2026-11-24): a client's delete carries
+   * no visibility of its own. */
+  if (!value) {
+    struct md_version cur;
+    char curbuf[METADATA_VALUE_LEN];
+
+    if (metadata_channel_get_version(target_channel, key, &cur, curbuf,
+                                     sizeof(curbuf)) == 0 && !cur.tombstone)
+      visibility = cur.vis;
   }
 
   /* Perform the set/delete: stamped here, now (metadata_channel_write). */
@@ -2418,6 +2414,8 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
       int limit_rc = metadata_check_received(NULL, target_channel, 1, NULL,
                                              key, value);
 
+      /* Not relayed: a stamp-0 row this server cannot hold is of no use
+       * to anyone (the stamped forms relay a refused row). */
       if (limit_rc != METADATA_LIMIT_OK) {
         mdsync_limit_notice(cptr, target, key, metadata_limit_why(limit_rc));
         return 0;
@@ -2430,6 +2428,28 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     in.vis = visibility;
     in.value = value;
     in.vlen = value ? strlen(value) : 0;
+    /* The CLEAR floor holds for it as for a stamped row (review,
+     * 2026-11-24): at 0.0.0 it is older than any floor, so a key the
+     * CLEAR never saw becomes a tombstone at the floor, sent to every
+     * link. */
+    {
+      struct md_stamp floor;
+
+      if (metadata_channel_floor_converts(target_channel, key, &in, &floor)) {
+        struct md_version t;
+
+        memset(&t, 0, sizeof(t));
+        t.st = floor;
+        t.tombstone = 1;
+        merge_rc = metadata_channel_merge(target_channel, key, &t, &old_vis);
+        if (merge_rc == 1)
+          metadata_notify_subscribers(target_channel->chname, key, NULL, old_vis);
+        if (merge_rc == 1 || merge_rc == 2)
+          metadata_emit_channel_versioned(&me, NULL, NULL, target_channel->chname,
+                                          key, &t);
+        return 0;
+      }
+    }
     merge_rc = metadata_channel_merge(target_channel, key, &in, &old_vis);
     if (merge_rc != 1 && merge_rc != 2)
       return 0;

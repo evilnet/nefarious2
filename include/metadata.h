@@ -579,6 +579,17 @@ extern int metadata_key_counts(const char *key, int is_channel);
  * user keys and the mode-synced keys that are not server-managed). */
 extern int metadata_max_keys_total(void);
 
+/** The most keys that count toward the cap a server keeps for one target
+ * it did not write: four times METADATA_MAX_KEYS, and never under four
+ * times its default (20).  The cap itself is the writing server's (owner,
+ * 2026-11-24): a server applies a peer's row whatever its own cap says,
+ * or a server with a lower cap -- or both halves of a split filling the
+ * last places with different keys -- would hold another set of keys than
+ * its peers for good, which no pull can repair.  The ceiling only stops a
+ * runaway peer.  A channel's tombstones are held to it too (the oldest
+ * goes past it). */
+extern int metadata_key_ceiling(void);
+
 /** Check if a viewer can see a metadata entry.
  * @param[in] viewer Client viewing the metadata.
  * @param[in] owner Client owning the metadata (NULL for channel metadata).

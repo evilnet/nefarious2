@@ -1460,7 +1460,7 @@ static struct FeatureDesc {
   F_I(WEBPUSH_KEY_ROTATE, 0, 7776000, 0), /* 90 days between VAPID key rotations; 0 = never */
   F_I(WEBPUSH_IDLE, 0, 900, 0), /* a connection attends while it spoke within this many seconds; 0 = held/away only */
   F_I(WEBPUSH_MULTILINE_LINES, 0, 8, 0), /* lines of a multiline message pushed, one notification each; below 1 acts as 1, clamped to at most 64 */
-  F_I(METADATA_MAX_KEYS, 0, 20, feature_notify_metadata_capvalue),  /* A user's or channel's own keys; mode-synced, IRCv3-registry and draft/persistence/ keys stand outside it, and draft/metadata-2's max-keys adds those a client may set on itself (metadata_max_keys_total). The writing server's: a peer's row is applied whatever this says (m_metadata.c metadata_key_ceiling) */
+  F_I(METADATA_MAX_KEYS, 0, 20, feature_notify_metadata_capvalue),  /* A user's or channel's own keys; mode-synced, IRCv3-registry and draft/persistence/ keys stand outside it, and draft/metadata-2's max-keys adds those a client may set on itself (metadata_max_keys_total). The writing server's: a peer's row is applied whatever this says (metadata.c metadata_key_ceiling) */
   F_I(METADATA_MAX_VALUE_BYTES, 0, 300, feature_notify_metadata_capvalue),  /* A client SET is also refused when its 761 line could pass 510 bytes (m_metadata.c metadata_value_fits_line): 300 fits a user's key of up to 63 bytes set public */
   F_I(METADATA_MAX_SUBS, 0, 50, feature_notify_metadata_capvalue),
   F_I(METADATA_RATE_LIMIT, 0, 10, 0),

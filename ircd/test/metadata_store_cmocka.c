@@ -893,6 +893,33 @@ static void a_channel_clear_floor_converts_older_rows(void **state)
   drop_chan(c);
 }
 
+/* A channel's tombstones are bounded (review, 2026-11-24): past the key
+ * ceiling (4x METADATA_MAX_KEYS, at least 80) the oldest goes. */
+static void a_channels_tombstones_are_bounded(void **state)
+{
+  struct Channel *c = new_chan("#many", 0);
+  struct MetadataEntry *e;
+  struct md_version v;
+  char key[16];
+  int i, n = 0, oldest_kept = 1;
+  int ov;
+
+  (void)state;
+  for (i = 0; i < 100; i++) {
+    snprintf(key, sizeof(key), "d%03d", i);
+    v = dead_at(ago(1000 - i));       /* each newer than the last */
+    metadata_channel_merge(c, key, &v, &ov);
+  }
+  for (e = c->metadata_dead; e; e = e->next) {
+    n++;
+    if (!strcmp(e->key, "d000") || !strcmp(e->key, "d019"))
+      oldest_kept = 0;
+  }
+  assert_int_equal(n, 80);
+  assert_true(oldest_kept);             /* d000..d019 went, oldest first */
+  drop_chan(c);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -931,6 +958,7 @@ int main(void)
     cmocka_unit_test_setup_teardown(a_loaded_channel_keeps_the_stored_stamps, setup, teardown),
     cmocka_unit_test_setup_teardown(a_channel_write_here_is_the_newest, setup, teardown),
     cmocka_unit_test_setup_teardown(a_channel_clear_floor_converts_older_rows, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_channels_tombstones_are_bounded, setup, teardown),
     cmocka_unit_test_setup_teardown(the_count_runs_to_the_callers_limit, setup, teardown),
   };
 

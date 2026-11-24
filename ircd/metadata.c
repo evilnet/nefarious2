@@ -2188,6 +2188,16 @@ int metadata_key_counts(const char *key, int is_channel)
 }
 
 /** See include/metadata.h. */
+int metadata_key_ceiling(void)
+{
+  int max_keys = feature_int(FEAT_METADATA_MAX_KEYS);
+
+  if (max_keys < 20)
+    max_keys = 20;
+  return max_keys * 4;
+}
+
+/** See include/metadata.h. */
 int metadata_max_keys_total(void)
 {
   int total = feature_int(FEAT_METADATA_MAX_KEYS);
@@ -3436,6 +3446,7 @@ static int chan_dead_put(struct Channel *chptr, const char *key,
                          const struct md_stamp *st)
 {
   struct MetadataEntry *e = chan_dead_find(chptr, key);
+  int n = 0;
 
   if (!e) {
     e = create_entry(key, NULL);
@@ -3445,6 +3456,27 @@ static int chan_dead_put(struct Channel *chptr, const char *key,
     chptr->metadata_dead = e;
   }
   e->st = *st;
+
+  /* Bounded (review, 2026-11-24): a chanop could set and delete key after
+   * key, each delete a tombstone for its whole life (for ever with the
+   * lifetime 0), every one of them in every burst.  Past the key ceiling
+   * the oldest goes; at worst a value deleted that long ago comes back
+   * from a peer that still holds it (best effort, nothing indefinite). */
+  for (e = chptr->metadata_dead; e; e = e->next)
+    if (md_key_replicable(e->key))
+      n++;
+  while (n > metadata_key_ceiling()) {
+    struct MetadataEntry *old = NULL, *p;
+
+    for (p = chptr->metadata_dead; p; p = p->next)
+      if (md_key_replicable(p->key)
+          && (!old || md_stamp_cmp(&p->st, &old->st) < 0))
+        old = p;
+    if (!old)
+      break;
+    chan_dead_del(chptr, old->key);
+    n--;
+  }
   return 0;
 }
 
