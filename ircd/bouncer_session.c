@@ -8430,12 +8430,11 @@ bsc_forward:
       break;  /* malformed */
     }
 
-    session = bounce_find_by_token_sessid(account, sessid);
-    if (session)
-      bounce_apply_remote_oper_grant(cptr, session, opername, granted_at);
-
-    /* Forward to other peers (this server bounces it onward like the
-     * other BS subcommands). */
+    /* Forward to other peers first (this server bounces it onward like
+     * the other BS subcommands): a clear may de-oper our own user below
+     * and announce that -o, and a peer that saw the -o while its record
+     * still held the name would clear, write and announce a clear of its
+     * own. */
     if (opername && *opername)
       sendcmdto_serv_butone_v3(sptr, CMD_BOUNCER_SESSION,
                             cptr,
@@ -8446,6 +8445,10 @@ bsc_forward:
                             cptr,
                             "O %s %s",
                             account, sessid);
+
+    session = bounce_find_by_token_sessid(account, sessid);
+    if (session)
+      bounce_apply_remote_oper_grant(cptr, session, opername, granted_at);
     break;
   }
 

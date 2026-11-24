@@ -140,6 +140,9 @@ extern void umode_sync_apply_butone(struct Client *cptr, int flag, int on,
                                     struct Client *untold);
 extern void send_umode_out(struct Client* cptr, struct Client* sptr,
                           struct Flags* old, int prop);
+extern void send_umode_out_device_toward_primary(struct Client *device,
+                                                 struct Client *primary,
+                                                 struct Flags *device_old);
 extern void send_umode_out_device_oper(struct Client *device,
                                        struct Client *primary,
                                        struct Flags *primary_old);

@@ -210,7 +210,15 @@ ms_mode(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
   {
     struct Client *acptr;
 
-    acptr = FindUser(parv[1]);
+    /* A device's (alias's) user mode line is for its session's primary,
+     * whatever the nick it names resolves to here: a rename of the primary
+     * that crosses the line would otherwise drop it, or land it on the new
+     * holder of that nick. */
+    if (IsBouncerAlias(sptr) && cli_user(sptr)
+        && cli_user(sptr)->alias_primary && !IsChannelName(parv[1]))
+      acptr = cli_user(sptr)->alias_primary;
+    else
+      acptr = FindUser(parv[1]);
     if (!acptr)
     {
       return 0;

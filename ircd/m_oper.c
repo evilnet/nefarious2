@@ -395,12 +395,15 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
       MyFree(cli_user(sptr)->opername);
     DupString(cli_user(sptr)->opername, aconf->name);
 
-    if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary)
-      /* A device: its socket is told here.  The network is told after
-       * the session sync below, under the primary's numeric
-       * (send_umode_out_device_oper()). */
+    if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary) {
+      /* A device.  A primary on another server gets the device's line
+       * now, ahead of the session sync and its notice mask; the device's
+       * socket is told; the rest of the network is told after the sync,
+       * under the primary's numeric (send_umode_out_device_oper()). */
+      send_umode_out_device_toward_primary(sptr, cli_user(sptr)->alias_primary,
+                                           &old_mode);
       send_umode(sptr, sptr, &old_mode, ALL_UMODES);
-    else
+    } else
       send_umode_out(sptr, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
   } else {
     client_send_privs(&me, sptr, sptr);

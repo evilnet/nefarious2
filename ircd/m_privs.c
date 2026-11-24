@@ -153,8 +153,14 @@ int ms_privs(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      * grant's list is taken back the same way.  The primary's server
      * takes the list again when the device's mode line makes its user an
      * oper (m_mode.c). */
+    /* Never onto a primary that is an oper while this copy of the device
+     * is not: the device's grant is then not the session's (the primary
+     * holds its own -- a local one on its server, or one that got there
+     * first), and its lines, the "PRIV_NONE" ahead of them above all,
+     * would empty or replace a list the primary was granted. */
     if (IsBouncerAlias(acptr) && cli_user(acptr)
-        && cli_user(acptr)->alias_primary) {
+        && cli_user(acptr)->alias_primary
+        && (IsAnOper(acptr) || !IsAnOper(cli_user(acptr)->alias_primary))) {
       memcpy(&cli_privs(cli_user(acptr)->alias_primary),
              &cli_privs(acptr), sizeof(struct Privs));
     }

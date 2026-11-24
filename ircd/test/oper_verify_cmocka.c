@@ -132,6 +132,9 @@ void client_send_privs(struct Client *from, struct Client *to,
 void client_sendtoserv_privs(struct Client *client) {}
 void send_umode_out_device_oper(struct Client *device, struct Client *primary,
                                 struct Flags *primary_old) {}
+void send_umode_out_device_toward_primary(struct Client *device,
+                                          struct Client *primary,
+                                          struct Flags *device_old) {}
 int feature_int(enum Feature feat) { return 0; }
 int feature_bool(enum Feature feat) { return 0; }
 void userstats_count_sync(struct Client *cptr) {}

@@ -2342,15 +2342,45 @@ static void send_umode_out_device(struct Client *device, struct Client *primary,
  * oper (a device beside its primary, and a device between the primary's
  * server and them).
  *
- * The one link that gets the DEVICE's line is the one toward the primary
- * when it is another server's user: that server applies the line to its
- * user and takes the device's list for it (m_mode.c), and tells its own
- * side.  A local grant (+O) is no network state: no list is sent, and the
- * mode change goes without +o.
+ * The link toward a primary on another server is not told here: it got the
+ * DEVICE's line before the sync (send_umode_out_device_toward_primary()),
+ * and its server tells its own side.  A local grant (+O) is no network
+ * state: no list is sent, and the mode change goes without +o.
  *
  * @param[in] device      The local device that opered.
  * @param[in] primary     Its session's primary.
  * @param[in] primary_old The primary's flags before the session sync. */
+/** The first half of telling the network about an /OPER on a device, for a
+ * primary that is ANOTHER server's user: the device's own mode line, under
+ * the device's numeric, toward that server only.  It applies the line to
+ * its user and takes the device's privilege list for it (m_mode.c).
+ *
+ * Sent BEFORE the session sync, as it always was: the sync sends the
+ * session's notice mask (BX K) to the primary's server, and a mask that
+ * arrives before the +o is cut down to a non-oper's there and kept so.
+ *
+ * @param[in] device     The local device that opered.
+ * @param[in] primary    Its session's primary.
+ * @param[in] device_old The device's flags before the grant. */
+void send_umode_out_device_toward_primary(struct Client *device,
+                                          struct Client *primary,
+                                          struct Flags *device_old)
+{
+  struct Client *toward;
+  int global = (IsOper(device) && HasPriv(device, PRIV_PROPAGATE)) ? 1 : 0;
+
+  if (MyConnect(primary))
+    return;
+  toward = cli_from(primary);
+  if (!IsIRCv3Aware(toward))
+    return;
+  send_umode(NULL, device, device_old,
+             global ? SEND_UMODES : SEND_UMODES_BUT_OPER);
+  if (*umodeBuf)
+    sendcmdto_one(device, CMD_MODE, toward, "%s %s", cli_name(primary),
+                  umodeBuf);
+}
+
 void send_umode_out_device_oper(struct Client *device, struct Client *primary,
                                 struct Flags *primary_old)
 {
@@ -2375,11 +2405,8 @@ void send_umode_out_device_oper(struct Client *device, struct Client *primary,
   {
     if (!(acptr = LocalClientArray[i]) || !IsServer(acptr))
       continue;
-    if (acptr == toward) {
-      if (*modes)
-        sendcmdto_one(device, CMD_MODE, acptr, "%s %s", cli_name(primary), modes);
-      continue;
-    }
+    if (acptr == toward)
+      continue;   /* told already: send_umode_out_device_toward_primary() */
     if (global)
       client_send_privs(cli_user(primary)->server, acptr, primary);
     if (*modes)
@@ -3139,47 +3166,14 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
         }
         sendcmdto_serv_butone(sptr, CMD_MODE, cptr, "%s", bufh);
 
-        /* If this remote primary has local aliases, parse the mode
-         * string and apply flag changes to the primary's Client struct,
-         * then sync to aliases so they stay in mode-sync. */
-        if (!IsBouncerAlias(acptr)) {
-          struct BouncerSession *sess = bounce_get_session(acptr);
-          if (sess && sess->hs_alias_count > 0) {
-            char **pp;
-            char *mm;
-            int mwhat = MODE_ADD;
-            unsigned int mi;
-            for (pp = &parv[2]; *pp && pp < &parv[parc]; pp++) {
-              char **mode_arg = pp;  /* last parameter this mode string used */
-              for (mm = *pp; *mm; mm++) {
-                if (*mm == '+') { mwhat = MODE_ADD; continue; }
-                if (*mm == '-') { mwhat = MODE_DEL; continue; }
-                /* The modes that take an argument consume the next
-                 * parameter, as the parse below does: an account, a
-                 * cloaked host or a sethost is not a string of mode
-                 * letters (the 'o' in a host set +o on the replica, and
-                 * the sync handed it to the local aliases). */
-                if (mode_arg + 1 < &parv[parc] && *(mode_arg + 1)
-                    && ((*mm == 's' && is_snomask(*(mode_arg + 1)))
-                        || (mwhat == MODE_ADD
-                            && (*mm == 'r' || *mm == 'C' || *mm == 'c'
-                                || *mm == 'f' || *mm == 'h'))))
-                  mode_arg++;
-                for (mi = 0; mi < USERMODELIST_SIZE; mi++) {
-                  if (userModeList[mi].c == *mm) {
-                    if (mwhat == MODE_ADD)
-                      SetFlag(acptr, userModeList[mi].flag);
-                    else
-                      ClrFlag(acptr, userModeList[mi].flag);
-                    break;
-                  }
-                }
-              }
-              pp = mode_arg;
-            }
-            bounce_sync_session_umodes(acptr, NULL, NULL);
-          }
-        }
+        /* Our copy of the user, and our devices of its session, follow
+         * the user's own server: it applies the change and announces it
+         * to every link, this one included.  The copy used to be changed
+         * here at once when the session had a device; that announcement
+         * was then no change here and was not passed on, so the servers
+         * on the line's own side (the legacy servers, X3 itself) never
+         * saw a mode X3 had set -- an oper they did not know of -- and a
+         * -o left the copy its privileges. */
 
         return 0;
       }
