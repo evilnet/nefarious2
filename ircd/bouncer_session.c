@@ -12911,6 +12911,44 @@ static void bounce_strip_oper_privs(struct Client *cptr)
   }
 }
 
+/** Give @a to, a member of a session, the oper privileges of @a from, the
+ * member this server's sync treats as the session's state (its copy of the
+ * primary, or the member that just opered).
+ *
+ * The privilege list is kept on EVERY copy of every member, another
+ * server's device included, never only on our own sockets: a device that
+ * becomes its session's primary (bounce_promote_alias(), BX P) is then
+ * already holding the list on every server, and a device that attaches
+ * there afterwards copies it.  Kept on local connections only, a promoted
+ * device's copy elsewhere had +o and no privileges, nobody sent PRIVS for
+ * its numeric (X3 opers only a user it sees as no oper), and every device
+ * attaching on that server was an oper that could do nothing (production,
+ * 2026-11-23: "517 CHECK :Command disabled", no operator line in WHOIS).
+ *
+ * The list is a Client field; the oper handler is the Connection's, so it
+ * is set only where the socket is (#13).  A member that is no oper holds
+ * no privileges (#14).  One that is an oper while @a from is not (a BX C
+ * whose modes are ahead of the primary's own mode line) keeps what it has
+ * until the sync that follows that line.  The mode flags and the counters
+ * are the caller's (bounce_copy_umodes()). */
+static void bounce_copy_privs(struct Client *from, struct Client *to)
+{
+  if (!from || !to || from == to)
+    return;
+  if (IsAnOper(from) && IsAnOper(to)) {
+    memcpy(&cli_privs(to), &cli_privs(from), sizeof(cli_privs(to)));
+    if (MyConnect(to))
+      cli_handler(to) = OPER_HANDLER;
+    return;
+  }
+  if (IsAnOper(to))
+    return;
+  if (MyConnect(to))
+    bounce_strip_oper_privs(to);
+  else
+    memset(&cli_privs(to), 0, sizeof(cli_privs(to)));
+}
+
 /** Give revived @a ghost its real realname back, spread as SETNAME is
  * (m_setname.c): the BX-aware servers by SETNAME, the legacy ones by SI
  * (stock ms_svsinfo takes it from any server), this server's aliases, and
@@ -13192,13 +13230,7 @@ void bounce_sync_session_umodes_butone(struct Client *source,
   struct Client *_t = (target);                                            \
   if (_t && _t != source && IsUser(_t)) {                                  \
     bounce_copy_umodes(source, _t);                                        \
-    if (MyConnect(_t)) {                                                   \
-      if (IsAnOper(source)) {                                              \
-        memcpy(&cli_privs(_t), &cli_privs(source), sizeof(cli_privs(_t))); \
-        cli_handler(_t) = OPER_HANDLER;                                    \
-      } else                                                               \
-        bounce_strip_oper_privs(_t);                                       \
-    }                                                                      \
+    bounce_copy_privs(source, _t);                                         \
   }                                                                        \
 } while (0)
 
@@ -14923,6 +14955,10 @@ track_alias:
    * primary on this server hasn't received the mode change yet. */
   if (alias_modes && *alias_modes)
     user_apply_umode_str(alias, alias_modes);
+
+  /* ... and the primary's privileges, on this copy too: the device may be
+   * the session's primary one day (bounce_copy_privs()). */
+  bounce_copy_privs(primary, alias);
 
   /* Track the alias in its session's record (a re-filed alias has its
    * record chosen above), once. */
