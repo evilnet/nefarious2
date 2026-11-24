@@ -131,7 +131,10 @@ int m_ircops(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
   for (acptr = GlobalClientList; acptr; acptr = cli_next(acptr))
   {
+    /* A bouncer session is one oper, its primary: a device (alias) is
+     * neither listed nor counted beside it. */
     if (acptr->cli_user && IsOper(acptr) && !IsChannelService(acptr)
+        && !IsBouncerAlias(acptr)
         && !IsService(acptr->cli_user->server))
     {
       if ((parc == 1) || (acptr->cli_user->server == server))
