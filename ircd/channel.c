@@ -5270,13 +5270,8 @@ mode_channel_registered_hook(struct Channel *chptr, struct Client *cptr,
     return;
 
   if (adding) {
-    struct MetadataEntry *md;
-    /* Persist the channel's current ephemeral memory permanently
-     * (memory -> store), then hydrate any store-only rows back into
-     * memory. */
-    for (md = chptr->metadata; md; md = md->next)
-      metadata_account_set_permanent(chptr->chname, md->key, md->value,
-                                     md->visibility);
+    /* Memory -> store under each row's own stamp, then the store's rows
+     * back into memory, both by the LWW rule (metadata_channel_load). */
     metadata_channel_load(chptr);
   } else {
     /* Store wipe; memory cleared below. */

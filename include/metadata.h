@@ -94,6 +94,9 @@ struct MetadataEntry {
   char key[METADATA_KEY_LEN];           /**< Key name */
   char *value;                          /**< Value (dynamically allocated) */
   int visibility;                       /**< Visibility level */
+  struct md_stamp st;                   /**< A channel's row: its LWW stamp
+                                         *   (0.0.0: none).  A user's
+                                         *   entries leave it zero. */
   struct MetadataEntry *next;           /**< Next entry in list */
 };
 
@@ -494,6 +497,70 @@ extern int metadata_account_count_keys(const char *account, int limit);
  * @return Non-zero if the key is server-managed.
  */
 extern int metadata_key_is_server_managed(const char *key);
+
+/** Remove every stored row of @a name (an account or a channel), value
+ * rows and clock rows alike, leaving no tombstone -- a channel that lost
+ * on TS (metadata_channel_forget()), whose rows must not beat the
+ * winner's.  Unlike metadata_account_clear(), which deletes with a fresh
+ * stamp.  @return 0, or -1 (no store, a name over CHANNELLEN, an error). */
+extern int metadata_account_forget(const char *name);
+
+/* Channel metadata, LWW-stamped like an account's (metadata audit
+ * 2026-11-23 item 1; owner's rulings 2026-11-24).  Every channel keeps
+ * its rows' stamps and its tombstones in memory (chptr->metadata,
+ * chptr->metadata_dead); a +R channel keeps them in the store too,
+ * under each row's own stamp.  A tombstone lives tombstone_lifetime(),
+ * as an account's does. */
+
+/** @a key's version on @a chptr: memory, else (+R) the store.
+ * @return 0 (a live row or a tombstone in @a out), 1 (none), -1 (error). */
+extern int metadata_channel_get_version(struct Channel *chptr, const char *key,
+                                        struct md_version *out, char *valbuf,
+                                        size_t vlen);
+
+/** Merge one stamped row into @a chptr by the LWW rule (md_lww_take): on
+ * taking it, memory changes and a +R channel's store gets the row under
+ * its own stamp; the stamp is folded into the HLC.  @a old_vis (may be
+ * NULL) gets the visibility a change is told with: the replaced live
+ * row's, else the row's own.
+ * @return 1 taken, 2 taken but saying the same thing, 0 kept the local
+ * version, -1 error. */
+extern int metadata_channel_merge(struct Channel *chptr, const char *key,
+                                  const struct md_version *in, int *old_vis);
+
+/** A write made here (a client's SET or delete, HISTORY SET): stamped now
+ * (after every stamp this server has seen) and merged.  @a out (may be
+ * NULL) gets the version written, for the wire; its value is @a value.
+ * @return as metadata_channel_merge(). */
+extern int metadata_channel_write(struct Channel *chptr, const char *key,
+                                  const char *value, int vis,
+                                  struct md_version *out);
+
+/** @a chptr lost on channel TS (owner, 2026-11-24): drop every row, every
+ * tombstone and the CLEAR floor, and its stored rows
+ * (metadata_account_forget()), so the winner's rows are taken whatever
+ * their stamps.  Tells no one: the caller does. */
+extern void metadata_channel_forget(struct Channel *chptr);
+
+/** Raise @a chptr's CLEAR floor to @a st (memory; +R: the store too). */
+extern void metadata_channel_floor_raise(struct Channel *chptr,
+                                         const struct md_stamp *st);
+
+/** Whether the live row @a in of @a key, written before @a chptr's CLEAR
+ * floor (md_floor_converts()), becomes a tombstone at the floor's stamp
+ * (@a floor gets it), as an account's does (metadata_floor_converts()). */
+extern int metadata_channel_floor_converts(struct Channel *chptr,
+                                           const char *key,
+                                           const struct md_version *in,
+                                           struct md_stamp *floor);
+
+/** Visit @a chptr's live rows and its tombstones still in force (the
+ * link burst's set); @a cb returning non-zero stops the walk. */
+extern void metadata_channel_foreach_version(struct Channel *chptr,
+                                             int (*cb)(const char *key,
+                                                       const struct md_version *v,
+                                                       void *arg),
+                                             void *arg);
 
 /** Whether @a key counts toward METADATA_MAX_KEYS on a target (owner,
  * 2026-11-24).  The cap is for a target's own keys: a server-managed key

@@ -36,6 +36,7 @@
 #include <string.h>
 #include <cmocka.h>
 
+#include "channel.h"
 #include "client.h"
 #include "crdt_hlc.h"
 #include "db_cursor.h"
@@ -626,6 +627,272 @@ static void the_advertised_total(void **state)
   assert_int_equal(metadata_max_keys_total(), 34);
 }
 
+/* ------------------------------------------------------------------ */
+/* Channel metadata, LWW-stamped (audit 2026-11-23 item 1; owner's     */
+/* rulings 2026-11-24): the account rule, in memory for every channel, */
+/* in the store too for a +R one                                       */
+/* ------------------------------------------------------------------ */
+
+static struct Channel *new_chan(const char *name, int registered)
+{
+  struct Channel *c = calloc(1, sizeof(*c) + strlen(name));
+
+  assert_non_null(c);
+  strcpy(c->chname, name);
+  if (registered)
+    c->mode.mode |= MODE_REGISTERED;
+  return c;
+}
+
+static void drop_chan(struct Channel *c)
+{
+  metadata_free_channel(c);
+  free(c);
+}
+
+/** @a secs before CurrentTime, in stamp milliseconds. */
+static uint64_t ago(int secs)
+{
+  return ((uint64_t)CurrentTime - secs) * 1000;
+}
+
+static struct md_version live_at(uint64_t ms, const char *value)
+{
+  struct md_version v;
+
+  memset(&v, 0, sizeof(v));
+  v.st.ms = ms;
+  v.st.node = 7;
+  v.vis = METADATA_VIS_PUBLIC;
+  v.value = value;
+  v.vlen = strlen(value);
+  return v;
+}
+
+static struct md_version dead_at(uint64_t ms)
+{
+  struct md_version v;
+
+  memset(&v, 0, sizeof(v));
+  v.st.ms = ms;
+  v.st.node = 7;
+  v.tombstone = 1;
+  return v;
+}
+
+static const char *chan_value(struct Channel *c, const char *key)
+{
+  struct MetadataEntry *e;
+
+  for (e = c->metadata; e; e = e->next)
+    if (!strcmp(e->key, key))
+      return e->value;
+  return NULL;
+}
+
+static void a_newer_channel_row_wins(void **state)
+{
+  struct Channel *c = new_chan("#lww", 0);
+  struct md_version v;
+  int ov;
+
+  (void)state;
+  v = live_at(ago(100), "a");
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 1);
+  assert_string_equal(chan_value(c, "k"), "a");
+  v = live_at(ago(200), "b");                  /* older: kept */
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 0);
+  assert_string_equal(chan_value(c, "k"), "a");
+  v = live_at(ago(50), "c");
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 1);
+  assert_string_equal(chan_value(c, "k"), "c");
+  v = live_at(ago(40), "c");                   /* newer, same value */
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 2);
+  drop_chan(c);
+}
+
+static void a_channel_tombstone_blocks_an_older_row(void **state)
+{
+  struct Channel *c = new_chan("#tomb", 0);
+  struct md_version v;
+  int ov;
+
+  (void)state;
+  v = live_at(ago(100), "a");
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 1);
+  v = dead_at(ago(90));
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 1);
+  assert_null(chan_value(c, "k"));
+  v = live_at(ago(95), "b");                   /* older than the delete */
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 0);
+  assert_null(chan_value(c, "k"));
+  v = live_at(ago(80), "c");
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 1);
+  assert_string_equal(chan_value(c, "k"), "c");
+  drop_chan(c);
+}
+
+/* Ruling (c): a row with no stamp (the legacy form) is 0.0.0. */
+static void an_unstamped_channel_row_loses(void **state)
+{
+  struct Channel *c = new_chan("#zero", 0);
+  struct md_version v;
+  int ov;
+
+  (void)state;
+  v = live_at(0, "z");
+  v.st.node = 0;
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 1);   /* nothing to beat */
+  v = live_at(ago(100), "a");
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 1);
+  v = live_at(0, "y");
+  v.st.node = 0;
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 0);
+  assert_string_equal(chan_value(c, "k"), "a");
+  drop_chan(c);
+}
+
+/* A +R channel's store keeps the row's own stamp, and a channel object
+ * that has not loaded the store is still held to it. */
+static void a_registered_channel_stores_the_rows_stamp(void **state)
+{
+  struct Channel *c = new_chan("#reg", 1);
+  struct md_version v, out;
+  char buf[64];
+  int ov;
+
+  (void)state;
+  v = live_at(ago(100), "a");
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 1);
+  assert_int_equal(metadata_account_get_version("#reg", "k", &out, buf, sizeof(buf)), 0);
+  assert_int_equal(out.st.ms, ago(100));
+  assert_int_equal(out.st.node, 7);
+  v = dead_at(ago(50));
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 1);
+  assert_int_equal(metadata_account_get_version("#reg", "k", &out, buf, sizeof(buf)), 0);
+  assert_true(out.tombstone);
+  assert_int_equal(out.st.ms, ago(50));
+  drop_chan(c);
+
+  c = new_chan("#reg", 1);                     /* memory empty */
+  v = live_at(ago(70), "x");
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 0);
+  assert_null(chan_value(c, "k"));
+  drop_chan(c);
+}
+
+static void a_channel_tombstone_expires(void **state)
+{
+  struct Channel *c = new_chan("#exp", 0);
+  struct md_version v;
+  int ov;
+
+  (void)state;
+  tombstone_ttl = 3600;
+  v = dead_at(ago(7200));                      /* past its lifetime */
+  /* A delete of a key never held: taken, nothing to tell (2). */
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 2);
+  v = live_at(ago(8000), "old");
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 1);
+  assert_string_equal(chan_value(c, "k"), "old");
+  v = dead_at(ago(600));                       /* within it */
+  assert_int_equal(metadata_channel_merge(c, "j", &v, &ov), 2);
+  v = live_at(ago(700), "older");
+  assert_int_equal(metadata_channel_merge(c, "j", &v, &ov), 0);
+  drop_chan(c);
+}
+
+/* Ruling (b): a channel that loses on TS keeps nothing -- memory, its
+ * tombstones and a +R channel's stored rows, with no tombstone left
+ * behind that could beat the winner's rows. */
+static void a_ts_lost_channel_keeps_nothing(void **state)
+{
+  struct Channel *c = new_chan("#lost", 1);
+  struct md_version v, out;
+  char buf[64];
+  int ov;
+
+  (void)state;
+  v = live_at(ago(100), "a");
+  assert_int_equal(metadata_channel_merge(c, "k1", &v, &ov), 1);
+  v = dead_at(ago(90));
+  assert_int_equal(metadata_channel_merge(c, "k2", &v, &ov), 2);
+  metadata_channel_forget(c);
+  assert_null(c->metadata);
+  assert_int_equal(metadata_account_get_version("#lost", "k1", &out, buf, sizeof(buf)), 1);
+  assert_int_equal(metadata_account_get_version("#lost", "k2", &out, buf, sizeof(buf)), 1);
+  v = live_at(ago(500), "w");                  /* the winner's, older */
+  assert_int_equal(metadata_channel_merge(c, "k2", &v, &ov), 1);
+  assert_string_equal(chan_value(c, "k2"), "w");
+  drop_chan(c);
+}
+
+/* +R: loading the store brings each row's stamp, tombstones included. */
+static void a_loaded_channel_keeps_the_stored_stamps(void **state)
+{
+  struct Channel *c = new_chan("#hyd", 1);
+  struct md_stamp st;
+  struct md_version v;
+  int ov;
+
+  (void)state;
+  memset(&st, 0, sizeof(st));
+  st.node = 3;
+  st.ms = ago(100);
+  assert_int_equal(metadata_account_put_versioned("#hyd", "k1", "v1", 0, &st), 0);
+  st.ms = ago(90);
+  assert_int_equal(metadata_account_put_versioned("#hyd", "k2", NULL, 0, &st), 0);
+  metadata_channel_load(c);
+  assert_string_equal(chan_value(c, "k1"), "v1");
+  assert_int_equal(c->metadata->st.ms, ago(100));
+  v = live_at(ago(150), "older");
+  assert_int_equal(metadata_channel_merge(c, "k1", &v, &ov), 0);
+  v = live_at(ago(95), "older");
+  assert_int_equal(metadata_channel_merge(c, "k2", &v, &ov), 0);
+  drop_chan(c);
+}
+
+/* A write made here is stamped after every stamp this server has seen. */
+static void a_channel_write_here_is_the_newest(void **state)
+{
+  struct Channel *c = new_chan("#mine", 0);
+  struct md_version v, out;
+  int ov;
+
+  (void)state;
+  v = live_at((uint64_t)CurrentTime * 1000 + 5000, "theirs");
+  assert_int_equal(metadata_channel_merge(c, "k", &v, &ov), 1);
+  assert_int_equal(metadata_channel_write(c, "k", "mine", METADATA_VIS_PUBLIC, &out), 1);
+  assert_true(md_stamp_cmp(&out.st, &v.st) > 0);
+  assert_string_equal(chan_value(c, "k"), "mine");
+  assert_int_equal(metadata_channel_write(c, "k", NULL, METADATA_VIS_PUBLIC, &out), 1);
+  assert_true(out.tombstone);
+  assert_null(chan_value(c, "k"));
+  drop_chan(c);
+}
+
+/* A CLEAR's floor: a row of a clearable key written before it goes. */
+static void a_channel_clear_floor_converts_older_rows(void **state)
+{
+  struct Channel *c = new_chan("#flr", 0);
+  struct md_stamp st, floor;
+  struct md_version v;
+
+  (void)state;
+  memset(&st, 0, sizeof(st));
+  st.ms = ago(100);
+  st.node = 7;
+  metadata_channel_floor_raise(c, &st);
+  v = live_at(ago(300), "before");
+  assert_int_equal(metadata_channel_floor_converts(c, "k", &v, &floor), 1);
+  assert_int_equal(floor.ms, ago(100));
+  v = live_at(ago(50), "after");
+  assert_int_equal(metadata_channel_floor_converts(c, "k", &v, &floor), 0);
+  v = live_at(ago(300), "server's");
+  assert_int_equal(metadata_channel_floor_converts(c, "draft/persistence/x", &v, &floor), 0);
+  drop_chan(c);
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -655,6 +922,15 @@ int main(void)
     cmocka_unit_test_setup_teardown(the_cap_counts_an_accounts_own_keys, setup, teardown),
     cmocka_unit_test_setup_teardown(a_channel_counts_by_the_channel_list, setup, teardown),
     cmocka_unit_test(the_advertised_total),
+    cmocka_unit_test_setup_teardown(a_newer_channel_row_wins, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_channel_tombstone_blocks_an_older_row, setup, teardown),
+    cmocka_unit_test_setup_teardown(an_unstamped_channel_row_loses, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_registered_channel_stores_the_rows_stamp, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_channel_tombstone_expires, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_ts_lost_channel_keeps_nothing, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_loaded_channel_keeps_the_stored_stamps, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_channel_write_here_is_the_newest, setup, teardown),
+    cmocka_unit_test_setup_teardown(a_channel_clear_floor_converts_older_rows, setup, teardown),
     cmocka_unit_test_setup_teardown(the_count_runs_to_the_callers_limit, setup, teardown),
   };
 

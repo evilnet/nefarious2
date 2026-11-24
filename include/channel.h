@@ -418,6 +418,9 @@ struct Channel {
 						*  The topic
 						*/
   struct MetadataEntry* metadata;  /**< Channel metadata (draft/metadata-2) */
+  struct MetadataEntry* metadata_dead; /**< Its tombstones (value NULL, the
+                                        *   delete's stamp in st), and the
+                                        *   CLEAR floor ("$cleared") */
   char               chname[1];	   /**< Dynamically allocated string of the
 				     * channel name
 				     */

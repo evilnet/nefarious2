@@ -660,6 +660,54 @@ static int metadata_write_versioned(const char *account, const char *key,
   return (rc == DB_OK) ? 0 : -1;
 }
 
+/** See include/metadata.h. */
+int metadata_account_forget(const char *name)
+{
+  struct db_cf *cfs[2];
+  struct db_writebatch *wb;
+  char prefix[CHANNELLEN + 2];
+  int prefixlen, i, rc = DB_OK;
+
+  if (!metadata_lmdb_available || !name)
+    return -1;
+  prefixlen = strlen(name);
+  if (prefixlen > CHANNELLEN)
+    return -1;
+  db_casefold_bytes(prefix, name, prefixlen);
+  prefix[prefixlen++] = KEY_SEP;
+
+  wb = db_writebatch_new(metadata_db_env);
+  if (!wb)
+    return -1;
+  /* Value rows and clock rows alike: no tombstone is left, so nothing
+   * here can beat a row that arrives afterwards. */
+  cfs[0] = metadata_cf;
+  cfs[1] = metadata_clock_cf;
+  for (i = 0; i < 2; i++) {
+    struct db_iter *it = db_iter_open(metadata_db_env, cfs[i], /*snap=*/NULL);
+
+    if (!it) {
+      db_writebatch_destroy(wb);
+      return -1;
+    }
+    for (rc = db_iter_seek(it, prefix, (size_t)prefixlen);
+         rc == DB_OK && db_iter_valid(it);
+         rc = db_iter_next(it)) {
+      size_t klen;
+      const void *kbuf = db_iter_key(it, &klen);
+
+      if (klen < (size_t)prefixlen ||
+          memcmp(kbuf, prefix, (size_t)prefixlen) != 0)
+        break;
+      db_writebatch_del(wb, cfs[i], kbuf, klen);
+    }
+    db_iter_close(it);
+  }
+  rc = db_writebatch_commit(wb, /*sync_durably=*/0);
+  db_writebatch_destroy(wb);
+  return (rc == DB_OK) ? 0 : -1;
+}
+
 int metadata_clock_seed(void)
 {
   struct db_iter *it;
@@ -1561,21 +1609,6 @@ int metadata_account_count_keys(const char *account, int limit)
  * caller-frees contract.
  * @param[in] chptr Channel to hydrate.
  */
-void metadata_channel_load(struct Channel *chptr)
-{
-  struct MetadataEntry *list, *entry;
-
-  if (!chptr)
-    return;
-
-  list = metadata_account_list(chptr->chname);
-  for (entry = list; entry; entry = entry->next) {
-    if (!metadata_get_channel(chptr, entry->key))
-      metadata_channel_memory_put(chptr, entry->key, entry->value,
-                                  entry->visibility);
-  }
-  free_entry_list(list);
-}
 
 /** How long a tombstone (the CLEAR floor included) lives, in seconds:
  * METADATA_TOMBSTONE_TTL, never less than the stale-data limit
@@ -1758,6 +1791,7 @@ int metadata_account_set_permanent(const char *account, const char *key, const c
 struct MetadataEntry *metadata_account_list(const char *account) { return NULL; }
 int metadata_account_has_rows(const char *account) { (void)account; return 0; }
 int metadata_account_clear(const char *account) { return -1; }
+int metadata_account_forget(const char *name) { (void)name; return -1; }
 int metadata_account_count_keys(const char *account, int limit) { return 0; }
 int metadata_account_purge_expired(void) { return -1; }
 int metadata_account_foreach_key(void (*cb)(const void *key, size_t klen, void *arg), void *arg) { (void)cb; (void)arg; return -1; }
@@ -1765,7 +1799,6 @@ int metadata_account_put_versioned(const char *account, const char *key, const c
 int metadata_account_get_version(const char *account, const char *key, struct md_version *out, char *valbuf, size_t vlen) { (void)account; (void)key; (void)out; (void)valbuf; (void)vlen; return -1; }
 int metadata_account_merge(const char *account, const char *key, const struct md_version *in) { (void)account; (void)key; (void)in; return -1; }
 int metadata_account_foreach_version(const char *account, int (*cb)(const char *key, const struct md_version *v, void *arg), void *arg) { (void)account; (void)cb; (void)arg; return -1; }
-void metadata_channel_load(struct Channel *chptr) { (void)chptr; }
 int metadata_readmarker_get(const char *account, const char *target, char *timestamp) { (void)account; (void)target; (void)timestamp; return -1; }
 int metadata_readmarker_set(const char *account, const char *target, const char *timestamp) { (void)account; (void)target; (void)timestamp; return -1; }
 int metadata_readmarker_foreach(const char *account, int (*cb)(const char *target, const char *ts, void *arg), void *arg) { (void)account; (void)cb; (void)arg; return -1; }
@@ -1805,6 +1838,7 @@ static struct MetadataEntry *create_entry(const char *key, const char *value)
   }
 
   entry->visibility = METADATA_VIS_PUBLIC;
+  memset(&entry->st, 0, sizeof(entry->st));
   entry->next = NULL;
 
   return entry;
@@ -3342,6 +3376,336 @@ struct MetadataEntry *metadata_get_channel(struct Channel *chptr, const char *ke
  * @param[in] visibility Visibility level (METADATA_VIS_PUBLIC or METADATA_VIS_PRIVATE).
  * @return 0 on success, -1 on error.
  */
+/* ========== Channel metadata, LWW-stamped ========== */
+/* Metadata audit 2026-11-23 item 1; owner's rulings 2026-11-24.  See
+ * include/metadata.h. */
+
+/** Whether @a chptr keeps its rows in the store too. */
+static int chan_stored(const struct Channel *chptr)
+{
+  return (chptr->mode.mode & MODE_REGISTERED) && metadata_lmdb_is_available();
+}
+
+/** Whether a tombstone (or the floor) stamped @a st is past its life
+ * (floor_ttl(): the tombstones' lifetime, 0 for ever). */
+static int chan_dead_expired(const struct md_stamp *st)
+{
+  uint64_t ttl = floor_ttl();
+
+  return ttl && !md_floor_in_force(st, (uint64_t)CurrentTime, ttl);
+}
+
+/** @a chptr's tombstone for @a key, or NULL.  One past its life is
+ * dropped on the way. */
+static struct MetadataEntry *chan_dead_find(struct Channel *chptr, const char *key)
+{
+  struct MetadataEntry *e, *prev = NULL;
+
+  for (e = chptr->metadata_dead; e; prev = e, e = e->next) {
+    if (ircd_strcmp(e->key, key) != 0)
+      continue;
+    if (chan_dead_expired(&e->st)) {
+      if (prev)
+        prev->next = e->next;
+      else
+        chptr->metadata_dead = e->next;
+      metadata_free_entry(e);
+      return NULL;
+    }
+    return e;
+  }
+  return NULL;
+}
+
+static void chan_dead_del(struct Channel *chptr, const char *key)
+{
+  struct MetadataEntry *e, *prev = NULL;
+
+  for (e = chptr->metadata_dead; e; prev = e, e = e->next)
+    if (ircd_strcmp(e->key, key) == 0) {
+      if (prev)
+        prev->next = e->next;
+      else
+        chptr->metadata_dead = e->next;
+      metadata_free_entry(e);
+      return;
+    }
+}
+
+static int chan_dead_put(struct Channel *chptr, const char *key,
+                         const struct md_stamp *st)
+{
+  struct MetadataEntry *e = chan_dead_find(chptr, key);
+
+  if (!e) {
+    e = create_entry(key, NULL);
+    if (!e)
+      return -1;
+    e->next = chptr->metadata_dead;
+    chptr->metadata_dead = e;
+  }
+  e->st = *st;
+  return 0;
+}
+
+/** See include/metadata.h. */
+int metadata_channel_get_version(struct Channel *chptr, const char *key,
+                                 struct md_version *out, char *valbuf,
+                                 size_t vlen)
+{
+  struct MetadataEntry *e;
+
+  if (!chptr || !key || !out)
+    return -1;
+  memset(out, 0, sizeof(*out));
+  for (e = chptr->metadata; e; e = e->next)
+    if (ircd_strcmp(e->key, key) == 0) {
+      out->st = e->st;
+      out->vis = e->visibility;
+      out->value = e->value;
+      out->vlen = e->value ? strlen(e->value) : 0;
+      return 0;
+    }
+  if ((e = chan_dead_find(chptr, key))) {
+    out->st = e->st;
+    out->tombstone = 1;
+    return 0;
+  }
+  if (chan_stored(chptr))
+    return metadata_account_get_version(chptr->chname, key, out, valbuf, vlen);
+  return 1;
+}
+
+/** Take the version @a in of @a key into @a chptr's memory. */
+static int chan_memory_take(struct Channel *chptr, const char *key,
+                            const struct md_version *in, const char *value)
+{
+  struct MetadataEntry *e;
+
+  if (in->tombstone) {
+    metadata_channel_memory_del(chptr, key);
+    return chan_dead_put(chptr, key, &in->st);
+  }
+  e = metadata_channel_memory_put(chptr, key, value, in->vis);
+  if (!e)
+    return -1;
+  e->st = in->st;
+  chan_dead_del(chptr, key);
+  return 0;
+}
+
+/** See include/metadata.h. */
+int metadata_channel_merge(struct Channel *chptr, const char *key,
+                           const struct md_version *in, int *old_vis)
+{
+  struct md_version cur;
+  char curbuf[METADATA_VALUE_LEN];
+  char value[METADATA_VALUE_LEN];
+  struct HLC remote;
+  int rc, same;
+
+  if (!chptr || !key || !in || strlen(key) >= METADATA_KEY_LEN)
+    return -1;
+  if (!in->tombstone) {
+    if (in->vlen >= sizeof(value) || (in->vlen && !in->value))
+      return -1;
+    if (in->vlen)
+      memcpy(value, in->value, in->vlen);
+    value[in->vlen] = '\0';
+  }
+
+  rc = metadata_channel_get_version(chptr, key, &cur, curbuf, sizeof(curbuf));
+  if (rc < 0)
+    return -1;
+  if (!md_lww_take(rc == 1 ? NULL : &cur, in))
+    return 0;
+  same = md_row_unchanged(rc == 1 ? NULL : &cur, in);
+  if (old_vis)
+    *old_vis = (rc == 0 && !cur.tombstone) ? cur.vis : in->vis;
+
+  remote.physical_ms = in->st.ms;
+  remote.logical = in->st.logical;
+  remote.node_id = in->st.node;
+  hlc_global_receive(&remote, hlc_max_forward_ms(), NULL);
+
+  if (chan_stored(chptr)
+      && metadata_account_put_versioned(chptr->chname, key,
+                                        in->tombstone ? NULL : value,
+                                        in->vis, &in->st) != 0)
+    return -1;
+  if (chan_memory_take(chptr, key, in, value) < 0)
+    return -1;
+  return same ? 2 : 1;
+}
+
+/** See include/metadata.h. */
+int metadata_channel_write(struct Channel *chptr, const char *key,
+                           const char *value, int vis, struct md_version *out)
+{
+  struct md_version v;
+
+  memset(&v, 0, sizeof(v));
+  v.st = metadata_stamp_now();
+  v.tombstone = (value == NULL);
+  v.vis = vis;
+  v.value = value;
+  v.vlen = value ? strlen(value) : 0;
+  if (out)
+    *out = v;
+  return metadata_channel_merge(chptr, key, &v, NULL);
+}
+
+/** See include/metadata.h. */
+void metadata_channel_forget(struct Channel *chptr)
+{
+  if (!chptr)
+    return;
+  free_entry_list(chptr->metadata);
+  chptr->metadata = NULL;
+  free_entry_list(chptr->metadata_dead);
+  chptr->metadata_dead = NULL;
+  if (metadata_lmdb_is_available())
+    metadata_account_forget(chptr->chname);
+}
+
+/** See include/metadata.h. */
+void metadata_channel_floor_raise(struct Channel *chptr, const struct md_stamp *st)
+{
+  struct MetadataEntry *e;
+
+  if (!chptr || !st)
+    return;
+  e = chan_dead_find(chptr, MD_KEY_CLEAR_FLOOR);
+  if (md_floor_raises(e ? &e->st : NULL, st))
+    chan_dead_put(chptr, MD_KEY_CLEAR_FLOOR, st);
+  if (chan_stored(chptr))
+    metadata_account_floor_raise(chptr->chname, st);
+}
+
+/** See include/metadata.h. */
+int metadata_channel_floor_converts(struct Channel *chptr, const char *key,
+                                    const struct md_version *in,
+                                    struct md_stamp *floor)
+{
+  struct MetadataEntry *e;
+
+  if (!chptr || !in || in->tombstone || !floor || !metadata_key_clearable(key))
+    return 0;
+  if ((e = chan_dead_find(chptr, MD_KEY_CLEAR_FLOOR)))
+    *floor = e->st;
+  else if (!chan_stored(chptr) || !metadata_account_floor_get(chptr->chname, floor))
+    return 0;
+  return md_floor_converts(floor, in, 1, (uint64_t)CurrentTime, floor_ttl());
+}
+
+/** See include/metadata.h. */
+void metadata_channel_foreach_version(struct Channel *chptr,
+                                      int (*cb)(const char *key,
+                                                const struct md_version *v,
+                                                void *arg),
+                                      void *arg)
+{
+  struct MetadataEntry *e, *next;
+  struct md_version v;
+
+  if (!chptr || !cb)
+    return;
+  for (e = chptr->metadata; e; e = e->next) {
+    memset(&v, 0, sizeof(v));
+    v.st = e->st;
+    v.vis = e->visibility;
+    v.value = e->value;
+    v.vlen = e->value ? strlen(e->value) : 0;
+    if (cb(e->key, &v, arg))
+      return;
+  }
+  for (e = chptr->metadata_dead; e; e = next) {
+    next = e->next;
+    if (!md_key_replicable(e->key))
+      continue;                        /* the CLEAR floor stays here */
+    if (!chan_dead_find(chptr, e->key))
+      continue;                        /* past its life: dropped */
+    memset(&v, 0, sizeof(v));
+    v.st = e->st;
+    v.tombstone = 1;
+    if (cb(e->key, &v, arg))
+      return;
+  }
+}
+
+/** metadata_channel_load()'s memory -> store leg: each memory row and
+ * tombstone into the store by the LWW rule, under its own stamp. */
+static int chan_store_cb(const char *key, const struct md_version *v, void *arg)
+{
+  struct Channel *chptr = arg;
+
+  metadata_account_merge(chptr->chname, key, v);
+  return 0;
+}
+
+/** metadata_channel_load()'s store -> memory leg: a stored row or
+ * tombstone newer than memory's goes into memory. */
+static int chan_hydrate_cb(const char *key, const struct md_version *v, void *arg)
+{
+  struct Channel *chptr = arg;
+  struct MetadataEntry *e;
+  struct md_version cur;
+  int have = 0;
+  char value[METADATA_VALUE_LEN];
+
+  if (!md_key_replicable(key) || strlen(key) >= METADATA_KEY_LEN)
+    return 0;
+  if (!v->tombstone && v->vlen >= sizeof(value))
+    return 0;
+  memset(&cur, 0, sizeof(cur));
+  for (e = chptr->metadata; e; e = e->next)
+    if (ircd_strcmp(e->key, key) == 0) {
+      cur.st = e->st;
+      cur.vis = e->visibility;
+      cur.value = e->value;
+      cur.vlen = strlen(e->value);
+      have = 1;
+      break;
+    }
+  if (!have && (e = chan_dead_find(chptr, key))) {
+    cur.st = e->st;
+    cur.tombstone = 1;
+    have = 1;
+  }
+  if (!md_lww_take(have ? &cur : NULL, v))
+    return 0;
+  if (!v->tombstone) {
+    if (v->vlen)
+      memcpy(value, v->value, v->vlen);
+    value[v->vlen] = '\0';
+  }
+  chan_memory_take(chptr, key, v, value);
+  return 0;
+}
+
+void metadata_channel_load(struct Channel *chptr)
+{
+  struct MetadataEntry *e;
+  struct md_stamp floor;
+
+  if (!chptr || !metadata_lmdb_is_available())
+    return;
+
+  /* Memory -> store: every row keeps its own stamp (a fresh one would
+   * beat a peer's newer write). */
+  metadata_channel_foreach_version(chptr, chan_store_cb, chptr);
+  if ((e = chan_dead_find(chptr, MD_KEY_CLEAR_FLOOR)))
+    metadata_account_floor_raise(chptr->chname, &e->st);
+
+  /* Store -> memory, stamps and tombstones included. */
+  metadata_account_foreach_version(chptr->chname, chan_hydrate_cb, chptr);
+  if (metadata_account_floor_get(chptr->chname, &floor)) {
+    e = chan_dead_find(chptr, MD_KEY_CLEAR_FLOOR);
+    if (md_floor_raises(e ? &e->st : NULL, &floor))
+      chan_dead_put(chptr, MD_KEY_CLEAR_FLOOR, &floor);
+  }
+}
+
 int metadata_set_channel(struct Channel *chptr, const char *key, const char *value, int visibility)
 {
   if (!chptr || !key)
@@ -3412,6 +3776,10 @@ int metadata_count_channel(struct Channel *chptr)
 void metadata_free_channel(struct Channel *chptr)
 {
   metadata_clear_channel(chptr);
+  if (chptr) {
+    free_entry_list(chptr->metadata_dead);
+    chptr->metadata_dead = NULL;
+  }
 }
 
 /* ========== Subscription functions ========== */
