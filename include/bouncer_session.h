@@ -1189,6 +1189,11 @@ struct Flags;
 extern void bounce_sync_session_umodes(struct Client *source,
                                        const struct Flags *source_before,
                                        struct Client *told);
+/** The oper privileges of session member @a member changed on this server
+ * without a mode change (a PRIVS line named it): give every device of its
+ * session the primary's list, as the mode mirror does at a mode change.
+ * A no-op for a client that is in no session. */
+extern void bounce_member_privs_changed(struct Client *member);
 /** bounce_sync_session_umodes(), with one more connection copied but not
  * told: @a untold, a connection still in its registration burst, which
  * hears its modes once, from its sign-on mode line (send_umode_signon()).

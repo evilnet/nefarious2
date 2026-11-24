@@ -13163,6 +13163,50 @@ static void bounce_apply_remote_oper_grant(struct BouncerSession *sess,
   }
 }
 
+/** The oper privileges of session member @a member changed on this server
+ * without a mode change: a PRIVS line named it (m_privs.c).  Give every
+ * device of its session the primary's list.
+ *
+ * The mode mirror copies the list at each mode change of the primary, and
+ * a PRIVS line used to change only the client it named.  A burst sends a
+ * user's N, with its +o, and its PRIVS line after it; two halves of a
+ * session that become one inside that N (the swap, a held ghost's yield)
+ * mirror the surviving primary onto the losing side's connections before
+ * the list has arrived -- they were left +o with no privileges until the
+ * primary's next mode change (bed, 2026-11-23: a hub primary and a leaf
+ * device, opered, the leaf split and relinked; the hub connection's CHECK
+ * was answered 517).
+ *
+ * A PRIVS line that names a device has already been copied onto its
+ * primary by the caller.
+ *
+ * Only a copy, never a clear, and only between two opers: an /OPER on a
+ * device sends the device's list in several PRIVS lines BEFORE its mode
+ * line, each given to the device's copy and then to the primary.  Cleared
+ * here between two lines -- neither is an oper yet -- the device's copy
+ * lost the earlier lines and the primary ended with the last one only
+ * (review, 2026-11-23).  Whoever stops being an oper is cleared by the
+ * mode line's own sync (bounce_copy_privs()). */
+void bounce_member_privs_changed(struct Client *member)
+{
+  struct BouncerSession *sess;
+  struct Client *primary;
+  int i;
+
+  if (!member || !IsUser(member))
+    return;
+  sess = bounce_get_session(member);
+  if (!sess || !(primary = sess->hs_client) || !IsUser(primary)
+      || !IsAnOper(primary))
+    return;
+  for (i = 0; i < sess->hs_alias_count; i++) {
+    struct Client *alias = findNUser(sess->hs_aliases[i].ba_numeric);
+
+    if (alias && IsBouncerAlias(alias) && IsAnOper(alias))
+      bounce_copy_privs(primary, alias);
+  }
+}
+
 /** Sync umode (and oper privileges, handler, snomask) across all
  * members of @a source's bouncer session, treating @a source as the
  * canonical state.  Used by /OPER, /DEOPER, and the general

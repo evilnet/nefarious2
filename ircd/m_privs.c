@@ -27,6 +27,7 @@
 
 #include "config.h"
 
+#include "bouncer_session.h"
 #include "client.h"
 #include "hash.h"
 #include "ircd.h"
@@ -150,6 +151,8 @@ int ms_privs(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
       memcpy(&cli_privs(cli_user(acptr)->alias_primary),
              &cli_privs(acptr), sizeof(struct Privs));
     }
+    /* ... and every device of the session holds the primary's list. */
+    bounce_member_privs_changed(acptr);
 
     /* GITSYNC is the one fork-only privilege (client.c's privtab); a
      * legacy peer doesn't know it and would just drop the word as
