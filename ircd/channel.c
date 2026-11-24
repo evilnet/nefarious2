@@ -59,6 +59,7 @@
 #include "chathistory_recv.h"
 #include "history_trim_codec.h"
 #include "metadata.h"
+#include "metadata_sync.h"
 
 /* #include <assert.h> -- Now using assert in ircd_log.h */
 #include <stdio.h>
@@ -1726,6 +1727,38 @@ void channel_modes(struct Client *cptr, char *mbuf, char *pbuf, int buflen,
   *mbuf = '\0';
 }
 
+/** A channel that lost on TS keeps no metadata (owner, 2026-11-24;
+ * metadata audit 2026-11-23 item 1), as it keeps none of its modes or
+ * its topic: each key goes, its local subscribers told, and its
+ * tombstones and stored rows with them (metadata_channel_forget(), which
+ * leaves no tombstone to beat the winner's rows).
+ * @param[in] chptr The channel, which existed here before the TS loss. */
+void channel_metadata_ts_lost(struct Channel *chptr)
+{
+  struct MetadataEntry *md;
+
+  if (!chptr)
+    return;
+  for (md = chptr->metadata; md; md = md->next)
+    metadata_notify_subscribers(chptr->chname, md->key, NULL, md->visibility);
+  metadata_channel_forget(chptr);
+}
+
+/** send_channel_modes()'s metadata walk: the link, the channel. */
+struct burst_md_ctx {
+  struct Client *link;
+  const char *chname;
+};
+
+/** One channel row (or tombstone) to the bursting link. */
+static int burst_md_row(const char *key, const struct md_version *v, void *arg)
+{
+  struct burst_md_ctx *ctx = arg;
+
+  metadata_emit_channel_versioned(&me, ctx->link, NULL, ctx->chname, key, v);
+  return 0;
+}
+
 /** Compare two members oplevel
  *
  * @param mp1	Pointer to a pointer to a membership
@@ -2009,14 +2042,15 @@ void send_channel_modes(struct Client *cptr, struct Channel *chptr)
 
   /* Burst channel metadata if enabled.  MD is an IRCv3-aware extension —
    * legacy peers (X3, vanilla ircu) log PARSE ERROR on receipt. */
+  /* Every row with its stamp, and every tombstone still in force, so a
+   * peer converges by the LWW rule and learns a delete it missed
+   * (metadata audit 2026-11-23 item 1). */
   if (feature_bool(FEAT_METADATA_BURST) && IsIRCv3Aware(cptr)) {
-    struct MetadataEntry *entry;
-    for (entry = chptr->metadata; entry; entry = entry->next) {
-      sendcmdto_one(&me, CMD_METADATA, cptr, "%s %s %s :%s",
-                    chptr->chname, entry->key,
-                    entry->visibility == METADATA_VIS_PRIVATE ? "P" : "*",
-                    entry->value ? entry->value : "");
-    }
+    struct burst_md_ctx ctx;
+
+    ctx.link = cptr;
+    ctx.chname = chptr->chname;
+    metadata_channel_foreach_version(chptr, burst_md_row, &ctx);
   }
 }
 

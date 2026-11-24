@@ -3708,21 +3708,10 @@ void metadata_channel_load(struct Channel *chptr)
 
 int metadata_set_channel(struct Channel *chptr, const char *key, const char *value, int visibility)
 {
-  if (!chptr || !key)
-    return -1;
-
-  if (value) {
-    if (!metadata_channel_memory_put(chptr, key, value, visibility))
-      return -1;
-  } else {
-    metadata_channel_memory_del(chptr, key);
-  }
-
-  /* +R persist leg — see function header. */
-  if ((chptr->mode.mode & MODE_REGISTERED) && metadata_lmdb_is_available())
-    metadata_account_set_permanent(chptr->chname, key, value, visibility);
-
-  return 0;
+  /* A write made here, stamped now (metadata_channel_write(): memory, and
+   * a +R channel's store under the same stamp).  Sends nothing: a caller
+   * that must tell peers uses metadata_channel_write() for the row. */
+  return metadata_channel_write(chptr, key, value, visibility, NULL) < 0 ? -1 : 0;
 }
 
 /** List all metadata for a channel.

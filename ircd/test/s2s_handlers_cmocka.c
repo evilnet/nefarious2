@@ -790,6 +790,18 @@ void relocate_tombstone_ts_lost(struct Channel *chptr)
   (void)chptr;
 }
 
+/* Channel metadata on a TS loss (channel.c) and the burst's mark
+ * (metadata_sync.c): not this suite's subject. */
+void channel_metadata_ts_lost(struct Channel *chptr)
+{
+  (void)chptr;
+}
+
+void metadata_burst_mark(struct Client *link, struct Channel *chptr, int lost)
+{
+  (void)link; (void)chptr; (void)lost;
+}
+
 int bounce_session_has_plaintext(struct Client *cptr)
 {
   (void)cptr;

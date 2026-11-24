@@ -43,6 +43,7 @@
 #include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "metadata.h"
+#include "metadata_sync.h"
 #include "msg.h"
 #include "numeric.h"
 #include "send.h"
@@ -102,6 +103,7 @@ static int history_set(struct Client *sptr, struct Channel *chptr,
 {
   char metadata_key[64];
   char metadata_value[64];
+  struct md_version written;   /* the stamped row, for the wire */
   int num_value;
 
   if (!setting || !*setting || !value || !*value) {
@@ -146,14 +148,16 @@ static int history_set(struct Client *sptr, struct Channel *chptr,
   }
 
   /* Set the metadata */
-  if (metadata_set_channel(chptr, metadata_key, metadata_value, 0) == 0) {
+  /* Stamped here, now, and sent as the stamped channel row (metadata
+   * audit 2026-11-23 item 1). */
+  if (metadata_channel_write(chptr, metadata_key, metadata_value, 0,
+                             &written) >= 1) {
     sendcmdto_one(&me, CMD_NOTICE, sptr,
                   "%C :HISTORY: %s %s set to %s",
                   sptr, chptr->chname, setting, metadata_value);
-
-    /* Broadcast to other servers */
-    sendcmdto_serv_butone_v3(&me, CMD_METADATA, NULL, "%s %s :%s",
-                          chptr->chname, metadata_key, metadata_value);
+    metadata_notify_subscribers(chptr->chname, metadata_key, metadata_value, 0);
+    metadata_emit_channel_versioned(&me, NULL, NULL, chptr->chname,
+                                    metadata_key, &written);
   } else {
     sendcmdto_one(&me, CMD_NOTICE, sptr,
                   "%C :HISTORY: Failed to set %s",

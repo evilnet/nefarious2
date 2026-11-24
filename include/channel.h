@@ -674,6 +674,8 @@ extern int has_voice(struct Client *cptr, struct Channel *chptr);
    this function can't make any assumptions that it has a channel
 */
 extern int IsInvited(struct Client* cptr, const void* chptr);
+/** A channel that lost on TS drops its metadata (channel.c). */
+extern void channel_metadata_ts_lost(struct Channel *chptr);
 extern void send_channel_modes(struct Client *cptr, struct Channel *chptr);
 extern char *pretty_mask(char *mask);
 extern char *pretty_extmask(char *mask);

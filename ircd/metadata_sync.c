@@ -67,6 +67,33 @@ struct md_chunk *mdsync_link_chunk(struct Client *link)
   return st ? &st->chunk : NULL;
 }
 
+void metadata_burst_mark(struct Client *link, struct Channel *chptr, int lost)
+{
+  struct MdSyncLink *st;
+
+  if (!link || !IsServer(link))
+    return;
+  if (!lost || !chptr) {
+    if (cli_serv(link) && cli_serv(link)->mdsync)
+      cli_serv(link)->mdsync->burst_lost = NULL;
+    return;
+  }
+  st = mdsync_link_state(link);
+  if (!st)
+    return;
+  st->burst_lost = chptr;
+  st->burst_lost_ts = chptr->creationtime;
+}
+
+int metadata_burst_lost(struct Client *link, struct Channel *chptr)
+{
+  struct MdSyncLink *st;
+
+  if (!link || !chptr || !cli_serv(link) || !(st = cli_serv(link)->mdsync))
+    return 0;
+  return st->burst_lost == chptr && st->burst_lost_ts == chptr->creationtime;
+}
+
 void mdsync_link_free(struct Client *server)
 {
   struct Server *serv;
@@ -84,38 +111,43 @@ void mdsync_link_free(struct Client *server)
   serv->mdsync = NULL;
 }
 
-/** Send one already-formatted MD =account line to its destination(s):
- * a single client/link when @a one is non-NULL, else every IRCv3-aware
- * server except @a butone. */
+/** Send one already-formatted stamped MD line -- @a sigil and @a target:
+ * '=' and an account, or '%' and a channel's name -- to its
+ * destination(s): a single client/link when @a one is non-NULL, else
+ * every IRCv3-aware server except @a butone. */
 static void mdsync_send_line(struct Client *src, struct Client *one,
-                             struct Client *butone, const char *account,
-                             const char *stamp_text, const char *key,
-                             const char *flags, const char *piece)
+                             struct Client *butone, char sigil,
+                             const char *target, const char *stamp_text,
+                             const char *key, const char *flags,
+                             const char *piece)
 {
   if (one) {
-    /* metadata_emit_versioned has already refused a @a one that is not
+    /* md_emit_versioned has already refused a @a one that is not
      * IRCv3-aware; checked again here so this helper is safe alone. */
     if (!IsIRCv3Aware(one))
       return;
     if (piece)
-      sendcmdto_one(src, CMD_METADATA, one, "=%s %s %s %s :%s",
-                   account, stamp_text, key, flags, piece);
+      sendcmdto_one(src, CMD_METADATA, one, "%c%s %s %s %s :%s",
+                   sigil, target, stamp_text, key, flags, piece);
     else
-      sendcmdto_one(src, CMD_METADATA, one, "=%s %s %s %s",
-                   account, stamp_text, key, flags);
+      sendcmdto_one(src, CMD_METADATA, one, "%c%s %s %s %s",
+                   sigil, target, stamp_text, key, flags);
   } else {
     if (piece)
-      sendcmdto_serv_butone_v3(src, CMD_METADATA, butone, "=%s %s %s %s :%s",
-                               account, stamp_text, key, flags, piece);
+      sendcmdto_serv_butone_v3(src, CMD_METADATA, butone, "%c%s %s %s %s :%s",
+                               sigil, target, stamp_text, key, flags, piece);
     else
-      sendcmdto_serv_butone_v3(src, CMD_METADATA, butone, "=%s %s %s %s",
-                               account, stamp_text, key, flags);
+      sendcmdto_serv_butone_v3(src, CMD_METADATA, butone, "%c%s %s %s %s",
+                               sigil, target, stamp_text, key, flags);
   }
 }
 
-void metadata_emit_versioned(struct Client *src, struct Client *one,
-                             struct Client *butone, const char *account,
-                             const char *key, const struct md_version *v)
+/** metadata_emit_versioned() and metadata_emit_channel_versioned(): the
+ * row of @a target (an account under '=', a channel under '%'). */
+static void md_emit_versioned(struct Client *src, struct Client *one,
+                              struct Client *butone, char sigil,
+                              const char *account, const char *key,
+                              const struct md_version *v)
 {
   char stamp_text[MD_STAMP_BUFSIZE];
   char piece[MDSYNC_CHUNK_BYTES + 1];
@@ -140,7 +172,7 @@ void metadata_emit_versioned(struct Client *src, struct Client *one,
     return;
 
   if (v->tombstone) {
-    mdsync_send_line(src, one, butone, account, stamp_text, key, "D", NULL);
+    mdsync_send_line(src, one, butone, sigil, account, stamp_text, key, "D", NULL);
     return;
   }
 
@@ -149,7 +181,7 @@ void metadata_emit_versioned(struct Client *src, struct Client *one,
 
   if (total == 0) {
     /* A live row with an empty value: one line, no continuation. */
-    mdsync_send_line(src, one, butone, account, stamp_text, key, flag_base, "");
+    mdsync_send_line(src, one, butone, sigil, account, stamp_text, key, flag_base, "");
     return;
   }
 
@@ -169,13 +201,27 @@ void metadata_emit_versioned(struct Client *src, struct Client *one,
       flags[0] = flag_base[0];
       flags[1] = '+';
       flags[2] = '\0';
-      mdsync_send_line(src, one, butone, account, stamp_text, key, flags, piece);
+      mdsync_send_line(src, one, butone, sigil, account, stamp_text, key, flags, piece);
     } else {
-      mdsync_send_line(src, one, butone, account, stamp_text, key, flag_base, piece);
+      mdsync_send_line(src, one, butone, sigil, account, stamp_text, key, flag_base, piece);
     }
 
     sent += chunklen;
   }
+}
+
+void metadata_emit_versioned(struct Client *src, struct Client *one,
+                             struct Client *butone, const char *account,
+                             const char *key, const struct md_version *v)
+{
+  md_emit_versioned(src, one, butone, '=', account, key, v);
+}
+
+void metadata_emit_channel_versioned(struct Client *src, struct Client *one,
+                                     struct Client *butone, const char *chname,
+                                     const char *key, const struct md_version *v)
+{
+  md_emit_versioned(src, one, butone, '%', chname, key, v);
 }
 
 int metadata_account_write(struct Client *src, const char *account,

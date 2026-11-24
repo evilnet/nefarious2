@@ -39,6 +39,14 @@ struct MdSyncEobEntry {
 
 struct MdSyncLink {
   struct md_chunk chunk;  /**< reassembly state for a `+`-continued row */
+  /** The channel this link is bursting that lost on TS to ours (its
+   * creation time with it, so a later channel at the same address is
+   * never taken for it), or NULL: the channel rows that follow its BURST
+   * lines are the loser's and are dropped (metadata_burst_lost()).  Set
+   * and cleared by every BURST line from the link, cleared at its
+   * END_OF_BURST. */
+  struct Channel *burst_lost;
+  time_t burst_lost_ts;
   time_t limit_notice_last;  /**< CurrentTime of the last SNO_NETWORK
                                *   over-limit notice sent for this link
                                *   (0 = none yet); Task 5, W4 plan 1.8. */
@@ -103,6 +111,28 @@ extern void metadata_emit_versioned(struct Client *src, struct Client *one,
                                     struct Client *butone,
                                     const char *account, const char *key,
                                     const struct md_version *v);
+
+/** As metadata_emit_versioned(), for channel @a chname's row: the form
+ * "MD %<channel> <stamp> <key> <flags> [:piece]" (metadata audit
+ * 2026-11-23 item 1). */
+/** A BURST line from @a link for @a chptr: @a lost is non-zero when the
+ * channel lost on TS to ours (its incoming creation time newer), and the
+ * link's channel rows for it that follow are dropped until its next BURST
+ * line or its END_OF_BURST (owner, 2026-11-24: a TS-losing channel keeps
+ * no metadata).  @a chptr NULL clears the mark. */
+extern void metadata_burst_mark(struct Client *link, struct Channel *chptr,
+                                int lost);
+
+/** Whether a channel row from @a link for @a chptr belongs to that link's
+ * burst of a channel that lost on TS (metadata_burst_mark()). */
+extern int metadata_burst_lost(struct Client *link, struct Channel *chptr);
+
+extern void metadata_emit_channel_versioned(struct Client *src,
+                                            struct Client *one,
+                                            struct Client *butone,
+                                            const char *chname,
+                                            const char *key,
+                                            const struct md_version *v);
 
 /** Write one account-store row as this server's own event: mint a stamp,
  * store the row (or its tombstone), apply it to every client logged

@@ -619,19 +619,13 @@ static int metadata_cmd_get(struct Client *sptr, int parc, char *parv[])
           if (*val) {
             send_keyvalue(sptr, target, key, val, vis_str);
             found = 1;
-
-            /* Load into channel's in-memory metadata (if channel exists) —
-             * cache-fill only.  metadata_set_channel is now the +R persist
-             * chokepoint (B1): calling it here would re-persist and
-             * doc-mint a value this read merely fetched from the TTL
-             * cache.  metadata_channel_memory_put is the memory-only
-             * counterpart — reads never write (Global Constraints) —
-             * mirroring metadata_memory_put's use in the user GET-fallback
-             * above; vis comes from the decoded out-param above, not a
-             * local "P:" parse. */
-            if (target_channel) {
-              metadata_channel_memory_put(target_channel, key, val, vis);
-            }
+            /* Answered from the store only: nothing goes into the
+             * channel's memory.  A +R channel's memory already holds its
+             * stored rows (metadata_channel_load() at +R), so a row found
+             * here is one the live channel does not hold (from before it
+             * last emptied and came back unregistered); copied into
+             * memory without its stamp, the next burst would have sent it
+             * as the channel's own (metadata audit 2026-11-23 item 1). */
           }
         }
       }
@@ -899,6 +893,7 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
   struct Client *target_client = NULL;
   struct Channel *target_channel = NULL;
   int rc;
+  struct md_version written;   /* a channel write's row, for the wire */
 
   if (parc < 4) {
     send_fail(sptr, "METADATA", "INVALID_PARAMS", NULL,
@@ -1092,8 +1087,8 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Perform the set/delete */
-  rc = metadata_set_channel(target_channel, key, value, visibility);
+  /* Perform the set/delete: stamped here, now (metadata_channel_write). */
+  rc = metadata_channel_write(target_channel, key, value, visibility, &written);
 
   if (rc < 0) {
     send_fail(sptr, "METADATA", "INTERNAL_ERROR", key,
@@ -1111,16 +1106,10 @@ static int metadata_cmd_set(struct Client *sptr, int parc, char *parv[])
    * session owner) -- see metadata_notify_subscribers. */
   metadata_notify_subscribers(target, key, value, visibility);
 
-  /* Propagate to other servers with visibility */
-  if (value) {
-    sendcmdto_serv_butone_v3(sptr, CMD_METADATA, NULL, "%s %s %s :%s",
-                          target, key,
-                          visibility == METADATA_VIS_PRIVATE ? "P" : "*",
-                          value);
-  } else {
-    sendcmdto_serv_butone_v3(sptr, CMD_METADATA, NULL, "%s %s",
-                          target, key);
-  }
+  /* Propagate to other servers: the stamped row (a delete is its
+   * tombstone), under the channel's own name. */
+  metadata_emit_channel_versioned(sptr, NULL, NULL, target_channel->chname,
+                                  key, &written);
 
   return 0;
 }
@@ -1340,79 +1329,54 @@ static int metadata_cmd_clear(struct Client *sptr, int parc, char *parv[])
     return 0;
   }
 
-  /* Channel target from here on (a user's CLEAR returned above).
-   * Broadcast a per-key unset for every key we are about to clear, BEFORE
-   * clearing (the clear frees the list we enumerate). CLEAR previously
-   * emitted NOTHING to other servers: the SET path broadcasts and populates
-   * the target's in-memory metadata on EVERY server, but no layer ever
-   * invalidated those remote copies, so remote nodes kept serving deleted
-   * values until the user quit (clocktest M8 finding, 2026-07-24). The
-   * value-less "MD <target> <key>" form is the existing unset wire format;
-   * ms_metadata applies it under the doc-mirror suspend guard and relays it
-   * onward. (A USER target's CLEAR is metadata_clear_user's, above.)
-   * For CHANNEL targets, metadata_set_channel(NULL) on each
-   * RELAY deletes that relay's own +R store row too (the +R persist leg,
-   * mint self-skipped under the suspend guard) — only the ORIGIN was left
-   * out: metadata_clear_channel() below is memory-only and is never routed
-   * through metadata_set_channel(), so the origin's own store rows leaked
-   * and no doc tombstone was ever minted. The doc still held the SETs, so
-   * reconcile_metadata_set_cb (doc-present + store-missing) re-healed the
-   * "cleared" values back into every store within ~30s — mesh-wide
-   * resurrection for any +R channel CLEAR. Closed below (Metadata P2 final
-   * review finding).
-   * Enumeration source is the in-memory list. Bounded by the key budget. */
+  /* Channel target from here on (a user's CLEAR returned above).  One
+   * stamp for the whole CLEAR (metadata audit 2026-11-23 item 1): each
+   * key the channel holds becomes a tombstone at it -- in memory, in a +R
+   * channel's store under that stamp, and on the wire, so every server
+   * converges on the deletes and a stale copy elsewhere cannot come back
+   * -- and the channel's CLEAR floor rises to it, so a key set elsewhere
+   * before the CLEAR goes when it reaches this server
+   * (metadata_channel_floor_converts()).  The requester gets a
+   * `metadata` batch with one RPL_KEYNOTSET per cleared key (#605). */
   {
-    struct MetadataEntry *entry = metadata_list_channel(target_channel);
-    for (; entry; entry = entry->next)
-      sendcmdto_serv_butone_v3(sptr, CMD_METADATA, NULL, "%s %s",
-                               target, entry->key);
-  }
+    struct MetadataEntry *entry;
+    struct md_stamp st = metadata_stamp_now();
+    struct clear_key { char key[METADATA_KEY_LEN]; int vis; } *keys;
+    int n = 0, i;
 
-  /* #605: the requester gets a `metadata` batch with one RPL_KEYNOTSET
-   * per cleared key (this used to send NOTHING -- the dangling
-   * "send empty keyvalue?" question below).  Enumerate BEFORE the wipe,
-   * same source as the S2S loop above. */
-  {
-    struct MetadataEntry *entry = metadata_list_channel(target_channel);
+    for (entry = metadata_list_channel(target_channel); entry; entry = entry->next)
+      n++;
+    keys = n ? (struct clear_key *)MyMalloc(sizeof(*keys) * n) : NULL;
+    n = 0;
+    if (keys)
+      for (entry = metadata_list_channel(target_channel); entry; entry = entry->next) {
+        ircd_strncpy(keys[n].key, entry->key, sizeof(keys[n].key));
+        keys[n].vis = entry->visibility;
+        n++;
+      }
+
     send_batch_start(sptr, "metadata");
-    for (; entry; entry = entry->next)
-      send_reply(sptr, RPL_KEYNOTSET, target, entry->key);
+    for (i = 0; i < n; i++)
+      send_reply(sptr, RPL_KEYNOTSET, target, keys[i].key);
     send_batch_end(sptr);
-  }
 
-  {
-    metadata_clear_channel(target_channel);
+    for (i = 0; i < n; i++) {
+      struct md_version t;
+      int old_vis;
 
-    /* Close the resurrection gap the comment above describes: wipe the
-     * ORIGIN's own leaked "#chan\0*" store rows (metadata_account_clear —
-     * the same call channel.c's -R hook, mode_channel_registered_hook(),
-     * uses for the exact same wipe; on crdt-mesh it also mints the per-key
-     * doc tombstones there).
-     *
-     * This is scoped to THIS call site rather than folded into
-     * metadata_clear_channel() itself, deliberately: that function has a
-     * SECOND caller — metadata_free_channel() (metadata.c), reached from
-     * destruct_channel() on ordinary empty-channel GC (sub1_from_channel(),
-     * every node, whenever the channel's local membership independently
-     * drains to 0 — not a CLEAR, and not origin-gated). channel.c's own
-     * mode_channel_registered_hook() header already documents that exact
-     * call site as one that "MUST stay unhooked" from a store wipe: a +R
-     * channel going momentarily empty must not destroy its persisted
-     * metadata. Folding this into metadata_clear_channel() would have
-     * silently re-created that hazard (every node wiping a registered
-     * channel's permanent store the moment it emptied out) instead of
-     * fixing the narrower CLEAR-only bug.
-     *
-     * Minting only here is single-writer-correct: metadata_cmd_clear runs
-     * exclusively on the node that received the client's CLEAR — CLEAR has
-     * no wire form of its own (it degrades to the per-key MD unsets
-     * broadcast above, which every relay applies to its own store under
-     * its own suspend bracket, per the comment above) — so exactly one
-     * node ever mints these tombstones and every other node just
-     * LWW-converges to them. */
-    if ((target_channel->mode.mode & MODE_REGISTERED) &&
-        metadata_lmdb_is_available())
-      metadata_account_clear(target_channel->chname);
+      memset(&t, 0, sizeof(t));
+      t.st = st;
+      t.tombstone = 1;
+      if (metadata_channel_merge(target_channel, keys[i].key, &t, &old_vis) < 1)
+        continue;
+      metadata_notify_subscribers(target_channel->chname, keys[i].key, NULL,
+                                  keys[i].vis);
+      metadata_emit_channel_versioned(sptr, NULL, NULL, target_channel->chname,
+                                      keys[i].key, &t);
+    }
+    metadata_channel_floor_raise(target_channel, &st);
+    if (keys)
+      MyFree(keys);
   }
 
   return 0;
@@ -2191,6 +2155,134 @@ static int ms_metadata_stamped(struct Client *cptr, struct Client *sptr,
   return 0;
 }
 
+/** "MD %<channel> <stamp> <key> <flags> [:piece]": a channel's row,
+ * LWW-stamped (metadata audit 2026-11-23 item 1; owner's rulings
+ * 2026-11-24).  The stamped account form's grammar and checks
+ * (ms_metadata_stamped()), merged into the channel
+ * (metadata_channel_merge()): a row a subscriber here has not seen is
+ * told, a taken row is relayed, a kept one is not. */
+static int ms_metadata_channel_stamped(struct Client *cptr, struct Client *sptr,
+                                       int parc, char *parv[], const char *target)
+{
+  const char *chname = target + 1;
+  const char *stamp_text, *wire_key, *flags_tok, *piece;
+  struct md_stamp st;
+  int vis = METADATA_VIS_PUBLIC;
+  int tombstone = 0;
+  int more = 0;
+  struct md_chunk *chunk;
+  struct Channel *chptr;
+  struct md_version in;
+  struct md_stamp floor;
+  int merge_rc, old_vis;
+
+  if (parc < 4)
+    return 0;
+  stamp_text = parv[2];
+  wire_key = parv[3];
+  flags_tok = (parc >= 5) ? parv[4] : NULL;
+  piece = (parc >= 6) ? parv[5] : "";
+
+  /* The identity checks, the same for every piece of a row (see
+   * ms_metadata_stamped()).  A channel's key is held in memory, so it
+   * must fit METADATA_KEY_LEN. */
+  if (strlen(chname) > CHANNELLEN)
+    return 0;
+  if (!md_wire_key_valid(wire_key) || strlen(wire_key) >= METADATA_KEY_LEN)
+    return 0;
+  if (md_stamp_parse(stamp_text, &st) < 0)
+    return 0;
+
+  chunk = mdsync_link_chunk(cptr);
+  if (!chunk)
+    return 0;
+  if (!flags_tok || md_flags_parse(flags_tok, &vis, &tombstone, &more) < 0) {
+    int follows = !flags_tok || !flags_tok[0] || flags_tok[1]
+                  || flags_tok[0] == '+';
+
+    md_chunk_abandon(chunk, chname, stamp_text, wire_key, follows);
+    return 0;
+  }
+  if (md_chunk_feed(chunk, chname, stamp_text, wire_key, vis, more, piece)
+      != MD_CHUNK_DONE)
+    return 0;
+
+  if (md_stamp_ahead(&st, hlc_wall_clock_ms(), hlc_max_forward_ms())) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "ms_metadata: stamped row for %s/%s from %C reads too far "
+              "ahead of our clock — dropped, not relayed",
+              chname, wire_key, sptr);
+    return 0;
+  }
+
+  /* Every server holds every channel that has members; one this server
+   * does not have is gone here, and the row with it. */
+  chptr = FindChannel(chname);
+  if (!chptr)
+    return 0;
+  /* The burst of a channel that lost on TS to ours: its rows go with it
+   * (owner, 2026-11-24). */
+  if (metadata_burst_lost(cptr, chptr))
+    return 0;
+
+  in.st = st;
+  in.tombstone = tombstone;
+  in.vis = vis;
+  in.value = tombstone ? NULL : chunk->value;
+  in.vlen = tombstone ? 0 : chunk->len;
+
+  /* The channel's CLEAR floor, as an account's (ms_metadata_stamped()):
+   * a live row written before the CLEAR becomes a tombstone at the
+   * floor's stamp, sent to every link, the sender included. */
+  if (metadata_channel_floor_converts(chptr, wire_key, &in, &floor)) {
+    struct md_version t;
+
+    memset(&t, 0, sizeof(t));
+    t.st = floor;
+    t.tombstone = 1;
+    merge_rc = metadata_channel_merge(chptr, wire_key, &t, &old_vis);
+    if (merge_rc == 1 || merge_rc == 2) {
+      if (merge_rc == 1)
+        metadata_notify_subscribers(chptr->chname, wire_key, NULL, old_vis);
+      metadata_emit_channel_versioned(&me, NULL, NULL, chptr->chname, wire_key, &t);
+    } else if (merge_rc == 0) {
+      struct md_version cur;
+      char valbuf[METADATA_VALUE_LEN];
+
+      if (metadata_channel_get_version(chptr, wire_key, &cur, valbuf,
+                                       sizeof(valbuf)) == 0)
+        metadata_emit_channel_versioned(&me, cptr, NULL, chptr->chname,
+                                        wire_key, &cur);
+    }
+    return 0;
+  }
+
+  /* The receive check only (metadata_check_received()); a refusal is
+   * told to opers and still relayed. */
+  if (!tombstone) {
+    int limit_rc = metadata_check_received(NULL, chptr, 1, NULL, wire_key,
+                                           chunk->value);
+
+    if (limit_rc != METADATA_LIMIT_OK) {
+      mdsync_limit_notice(cptr, target, wire_key, metadata_limit_why(limit_rc));
+      metadata_emit_channel_versioned(sptr, NULL, cptr, chptr->chname,
+                                      wire_key, &in);
+      return 0;
+    }
+  }
+
+  merge_rc = metadata_channel_merge(chptr, wire_key, &in, &old_vis);
+  if (merge_rc != 1 && merge_rc != 2)
+    return 0;   /* kept the local version (0), or an error (-1): no relay */
+  /* 2: nothing a subscriber has seen changes (the account rule). */
+  if (merge_rc == 1)
+    metadata_notify_subscribers(chptr->chname, wire_key,
+                                tombstone ? NULL : chunk->value,
+                                tombstone ? old_vis : vis);
+  metadata_emit_channel_versioned(sptr, NULL, cptr, chptr->chname, wire_key, &in);
+  return 0;
+}
+
 int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 {
   const char *target;
@@ -2213,6 +2305,10 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
    * before any of the legacy target/key/value parsing runs. */
   if (kind == MD_T_ACCOUNT_STAMPED)
     return ms_metadata_stamped(cptr, sptr, parc, parv, target);
+
+  /* "%#channel": the stamped channel form, same layout as "=account". */
+  if (kind == MD_T_CHANNEL_STAMPED)
+    return ms_metadata_channel_stamped(cptr, sptr, parc, parv, target);
 
   if (kind == MD_T_SESSION)
     return ms_metadata_session(cptr, sptr, parc, parv, target);
@@ -2306,10 +2402,43 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
 
   /* Find target */
   if (IsChannelName(target)) {
+    struct md_version in;
+    int merge_rc, old_vis;
+
     is_channel = 1;
     target_channel = FindChannel(target);
     if (!target_channel)
       return 0;
+    if (metadata_burst_lost(cptr, target_channel))
+      return 0;
+    /* The unstamped channel form: a row with no stamp is 0.0.0 (owner,
+     * 2026-11-24), so it loses to any stamped one (metadata audit item
+     * 1).  Taken, it is told and relayed as the stamped form. */
+    if (value) {
+      int limit_rc = metadata_check_received(NULL, target_channel, 1, NULL,
+                                             key, value);
+
+      if (limit_rc != METADATA_LIMIT_OK) {
+        mdsync_limit_notice(cptr, target, key, metadata_limit_why(limit_rc));
+        return 0;
+      }
+    }
+    if (strlen(key) >= METADATA_KEY_LEN)
+      return 0;
+    memset(&in, 0, sizeof(in));
+    in.tombstone = (value == NULL);
+    in.vis = visibility;
+    in.value = value;
+    in.vlen = value ? strlen(value) : 0;
+    merge_rc = metadata_channel_merge(target_channel, key, &in, &old_vis);
+    if (merge_rc != 1 && merge_rc != 2)
+      return 0;
+    if (merge_rc == 1)
+      metadata_notify_subscribers(target_channel->chname, key, value,
+                                  value ? visibility : old_vis);
+    metadata_emit_channel_versioned(sptr, NULL, cptr, target_channel->chname,
+                                    key, &in);
+    return 0;
   } else {
     target_client = FindUser(target);
     if (!target_client)
@@ -2347,25 +2476,11 @@ int ms_metadata(struct Client *cptr, struct Client *sptr, int parc, char *parv[]
     if (limit_rc != METADATA_LIMIT_OK) {
       mdsync_limit_notice(cptr, target, key, metadata_limit_why(limit_rc));
     } else {
-      /* Apply the change with visibility */
-      if (is_channel) {
-        metadata_set_channel(target_channel, key, value, visibility);
-      } else if (target_client) {
+      /* Apply the change with visibility (a user target: a channel's
+       * row returned above).  metadata_set_client() persists
+       * PERMANENTLY for authed users (metadata_account_set_permanent). */
+      if (target_client)
         metadata_set_client(target_client, key, value, visibility);
-      }
-
-      /* B5: no separate LMDB cache step here.  metadata_set_client()
-       * above already persists PERMANENTLY for authed users
-       * (metadata_account_set_permanent); for a +R channel
-       * metadata_set_channel() does the same (B1, gated on
-       * MODE_REGISTERED).  An unregistered channel is memory+relay
-       * only by design (spec §C3) -- this block used to TTL-cache its
-       * rows under the plain channel name via metadata_account_set(),
-       * the era-1 "remote TTL channel cache" B5 retires: nothing ever
-       * reloaded those rows (metadata_channel_load only hydrates on
-       * +R), so they were pure store debris that the read-only GET
-       * channel fallback below could still resurrect into memory. The
-       * store now keeps no row at all for an unregistered channel. */
 
       /* Notify local subscribers (vis-aware -- see
        * metadata_notify_subscribers). */

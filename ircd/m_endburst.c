@@ -228,6 +228,8 @@ int ms_end_of_burst(struct Client* cptr, struct Client* sptr, int parc, char* pa
      * presence_burst_sync just above. */
     if (IsIRCv3Aware(sptr))
       mdsync_link_eob(sptr);
+    /* Its burst is over: no channel row of it is a TS loser's now. */
+    metadata_burst_mark(cptr, NULL, 0);
 
     /* W3 Task 16 (fix rounds 2 and 4): the holder's away barrier -- a
      * PING behind our burst, now that the link's end of burst has come and

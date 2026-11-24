@@ -96,6 +96,7 @@
 #include "ircd_string.h"
 #include "list.h"
 #include "match.h"
+#include "metadata_sync.h"
 #include "msg.h"
 #include "numeric.h"
 #include "numnicks.h"
@@ -751,6 +752,12 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
      * is over (its record, its +z and its redirect). */
     if (chptr->creationtime)
       relocate_tombstone_ts_lost(chptr);
+    /* Its metadata goes with its modes and topic (owner, 2026-11-24): the
+     * winner's rows follow its BURST, stamped.  A channel new here has
+     * none to lose, and a +R channel's stored rows from before it last
+     * emptied here are kept for the winner's +R to load. */
+    if (chptr->creationtime)
+      channel_metadata_ts_lost(chptr);
     chptr->creationtime = timestamp;
 
     modebuf_init(mbuf = &modebuf, &me, cptr, chptr,
@@ -793,6 +800,12 @@ int ms_burst(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
 
     parse_flags |= MODE_PARSE_SET; /* set new modes */
   }
+
+  /* Our channel won (the incoming one is younger): the channel rows this
+   * link sends after this BURST are the loser's, and are dropped
+   * (metadata_burst_lost()).  Any other outcome clears the mark. */
+  metadata_burst_mark(cptr, chptr,
+                      chptr->creationtime && chptr->creationtime < timestamp);
 
   burst_relay_init(&relay, sptr, cptr, chptr);
 
