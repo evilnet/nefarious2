@@ -660,6 +660,69 @@ static int metadata_write_versioned(const char *account, const char *key,
   return (rc == DB_OK) ? 0 : -1;
 }
 
+int metadata_clock_seed(void)
+{
+  struct db_iter *it;
+  struct md_stamp newest = { 0, 0, 0 };
+  struct HLC seed;
+  uint64_t now, bound;
+  int found = 0;
+  int rc;
+
+  if (!metadata_lmdb_available)
+    return -1;
+
+  /* Every stamped row, account or channel, live or tombstone, has its
+   * stamp in the clock column family.  The clock starts from the wall
+   * time only (hlc_init), and a stamp this server took in before it
+   * stopped -- a peer's clock it adopted, up to HLC_MAX_FORWARD_MS ahead,
+   * or its own before a wall clock step back -- can sit ahead of that.  A
+   * write stamped below the row it replaces is kept here and lost at
+   * every peer (their row wins), and the next pull undoes it here too. */
+  it = db_iter_open(metadata_db_env, metadata_clock_cf, /*snap=*/NULL);
+  if (!it)
+    return -1;
+  for (rc = db_iter_seek_first(it);
+       rc == DB_OK && db_iter_valid(it);
+       rc = db_iter_next(it)) {
+    size_t vlen;
+    const void *vbuf = db_iter_value(it, &vlen);
+    struct md_stamp st;
+    int tombstone = 0;
+
+    if (md_clock_decode((const char *)vbuf, vlen, &st, &tombstone) != 0)
+      continue;
+    if (!found || md_stamp_cmp(&st, &newest) > 0) {
+      newest = st;
+      found = 1;
+    }
+  }
+  db_iter_close(it);
+  if (!found)
+    return 0;
+
+  /* No further than a peer's reading may move it: a store written under
+   * a wrong clock (days ahead) must not pin every stamp and message time
+   * of this server there. */
+  now = hlc_wall_clock_ms();
+  bound = hlc_max_forward_ms();
+  if (bound > 0 && newest.ms > now && newest.ms - now > bound) {
+    log_write(LS_SYSTEM, L_WARNING, 0,
+              "metadata: the store holds a stamp %llu ms ahead of the "
+              "clock; the clock is moved only HLC_MAX_FORWARD_MS (%llu ms) "
+              "ahead, and writes to rows stamped beyond that lose to them",
+              (unsigned long long)(newest.ms - now),
+              (unsigned long long)bound);
+    newest.ms = now + bound;
+    newest.logical = 0;
+  }
+  seed.physical_ms = newest.ms;
+  seed.logical = newest.logical;
+  seed.node_id = newest.node;
+  hlc_global_receive(&seed, bound, NULL);
+  return 0;
+}
+
 /** Internal helper for metadata_account_set with explicit timestamp.
  * Pass timestamp=0 for permanent values (no TTL expiry).  Stamp-now
  * plus metadata_write_versioned: every existing writer (SET and

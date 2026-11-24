@@ -647,6 +647,16 @@ extern void metadata_client_memory_set(struct Client *cptr, const char *key,
  */
 extern struct md_stamp metadata_stamp_now(void);
 
+/** At start-up, once the store is open: move this server's clock past the
+ * newest stamp the store holds (account and channel rows, live or
+ * tombstone), so a write made right after a restart is never stamped
+ * below the row it replaces.  A stored stamp further ahead of the wall
+ * clock than HLC_MAX_FORWARD_MS moves the clock only as far as that bound
+ * (the most a peer's reading may move it), with a warning.
+ * @return 0 when the store was read, -1 when there is no store.
+ */
+extern int metadata_clock_seed(void);
+
 /** Write (or tombstone) one stamped account-metadata row: the value row
  * and its clock row (metadata_clock column family) in one write batch.
  * metadata_account_set_ts (the backing of metadata_account_set /

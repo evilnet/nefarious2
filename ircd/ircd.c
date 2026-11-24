@@ -1328,6 +1328,10 @@ int main(int argc, char **argv) {
     if (feature_bool(FEAT_CAP_draft_metadata_2) && meta_arg.rc != 0)
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "Failed to initialize metadata database");
+    else if (feature_bool(FEAT_CAP_draft_metadata_2))
+      /* The clock (hlc_init above) past every stamp the store holds,
+       * before the first write can be stamped. */
+      metadata_clock_seed();
     if (feature_bool(FEAT_CAP_draft_webpush) && web_arg.rc != 0)
       log_write(LS_SYSTEM, L_WARNING, 0,
                 "Failed to initialize webpush database");

@@ -13,6 +13,10 @@
  *    stale-data limit, stale_lifetime()) whatever METADATA_TOMBSTONE_TTL
  *    says, so a server back within the limit can still be told of the
  *    deletions it missed; METADATA_TOMBSTONE_TTL 0 still keeps them.
+ *  - metadata_clock_seed(): at start-up the clock is moved past every
+ *    stamp the store holds (within HLC_MAX_FORWARD_MS), so a write made
+ *    right after a restart is never stamped below the row it replaces.
+ *    The clock here is the REAL ../crdt_hlc.o.
  *
  * metadata_lmdb_init() opens its environment with db_env_open(), which
  * the fake refuses (it has no on-disk env): the link wraps it
@@ -54,6 +58,7 @@ time_t CurrentTime = 1700000000;
 static int cache_ttl;             /**< METADATA_CACHE_TTL */
 static int tombstone_ttl;         /**< METADATA_TOMBSTONE_TTL */
 static int stale_after;           /**< STALE_AFTER */
+static int max_forward;           /**< HLC_MAX_FORWARD_MS */
 
 int feature_int(enum Feature feat)
 {
@@ -61,6 +66,7 @@ int feature_int(enum Feature feat)
   case FEAT_METADATA_CACHE_TTL:     return cache_ttl;
   case FEAT_METADATA_TOMBSTONE_TTL: return tombstone_ttl;
   case FEAT_METADATA_MAX_KEYS:      return 20;
+  case FEAT_HLC_MAX_FORWARD_MS:     return max_forward;
   default:                          return 0;
   }
 }
@@ -129,20 +135,28 @@ static void put_value(const char *account, const char *key, const char *value)
   put_raw("metadata", account, key, value, strlen(value));
 }
 
+/** A clock row with the whole stamp @a st: live or a tombstone. */
+static void put_clock_st(const char *account, const char *key,
+                         const struct md_stamp *st, int tombstone)
+{
+  char buf[MD_STAMP_BUFSIZE + 2];
+  int n;
+
+  n = md_clock_encode(buf, sizeof(buf), st, tombstone);
+  assert_true(n > 0);
+  put_raw("metadata_clock", account, key, buf, (size_t)n);
+}
+
 /** A clock row: live (a value row's stamp) or a tombstone. */
 static void put_clock(const char *account, const char *key, uint64_t ms,
                       int tombstone)
 {
   struct md_stamp st;
-  char buf[MD_STAMP_BUFSIZE + 2];
-  int n;
 
   memset(&st, 0, sizeof(st));
   st.ms = ms;
   st.node = 1;
-  n = md_clock_encode(buf, sizeof(buf), &st, tombstone);
-  assert_true(n > 0);
-  put_raw("metadata_clock", account, key, buf, (size_t)n);
+  put_clock_st(account, key, &st, tombstone);
 }
 
 static int listed(const char *account)
@@ -170,6 +184,7 @@ static int setup(void **state)
   tombstone_ttl = 0;
   stale_after = 60;   /* the smallest limit; the cases below that need
                        * another set it */
+  max_forward = 0;    /* unbounded, as crdt_hlc reads 0 */
   env = NULL;
   assert_int_equal(metadata_lmdb_init("unused"), 0);
   assert_non_null(env);
@@ -445,6 +460,94 @@ static void the_clear_floor_lives_at_least_the_limit(void **state)
   assert_true(metadata_account_floor_in_force("pat"));
 }
 
+/* ------------------------------------------------------------------ */
+/* metadata_clock_seed: the clock starts past what the store holds      */
+/* ------------------------------------------------------------------ */
+
+/** Rows stamped ahead of the wall clock (a peer's clock this server had
+ * adopted before it restarted): a stamp minted after the seed sorts after
+ * every one of them -- the newest is a tombstone of another account, and
+ * a channel's clock row lives in the same column family. */
+static void the_clock_starts_past_every_stored_stamp(void **state)
+{
+  uint64_t now = hlc_wall_clock_ms();
+  struct md_stamp a = { now + 10000, 3, 9 };
+  struct md_stamp newest = { now + 30000, 7, 9 };
+  struct md_stamp chan = { now + 20000, 0, 9 };
+  struct md_stamp st;
+
+  hlc_init(5);
+  put_clock_st("ann", "avatar", &a, 0);
+  put_clock_st("bob", "url", &newest, 1);
+  put_clock_st("#chan", "topicx", &chan, 0);
+  st = metadata_stamp_now();
+  assert_true(md_stamp_cmp(&st, &newest) < 0);   /* the bug: below it */
+
+  assert_int_equal(metadata_clock_seed(), 0);
+  st = metadata_stamp_now();
+  assert_true(md_stamp_cmp(&st, &newest) > 0);
+  assert_int_equal(st.node, 5);
+}
+
+/** A stamp further ahead than HLC_MAX_FORWARD_MS (a store written under
+ * a wrong clock) moves the clock no further than the bound -- the most
+ * a peer's reading could move it. */
+static void the_seed_is_bounded_like_a_peer(void **state)
+{
+  uint64_t before = hlc_wall_clock_ms(), after;
+  struct md_stamp far = { before + 3600000, 0, 9 };
+  struct md_stamp st;
+
+  max_forward = 60000;
+  hlc_init(5);
+  put_clock_st("cat", "bio", &far, 0);
+  assert_int_equal(metadata_clock_seed(), 0);
+  st = metadata_stamp_now();
+  after = hlc_wall_clock_ms();
+  assert_true(st.ms >= before + 60000);
+  assert_true(st.ms <= after + 60000);
+}
+
+/** A clock row that does not decode is passed over; the rest still
+ * count. */
+static void bad_rows_are_passed_over(void **state)
+{
+  uint64_t now = hlc_wall_clock_ms();
+  struct md_stamp ok = { now + 5000, 1, 9 };
+  struct md_stamp st;
+
+  hlc_init(5);
+  put_raw("metadata_clock", "dan", "bad", "Lx.y.z", 6);
+  put_raw("metadata_clock", "dan", "worse", "", 0);
+  put_clock_st("dan", "avatar", &ok, 0);
+  assert_int_equal(metadata_clock_seed(), 0);
+  st = metadata_stamp_now();
+  assert_true(md_stamp_cmp(&st, &ok) > 0);
+}
+
+/** A store whose stamps are all behind the wall clock leaves it be. */
+static void old_rows_leave_the_clock_be(void **state)
+{
+  uint64_t now = hlc_wall_clock_ms();
+  struct md_stamp old = { now - 5000, 0, 9 };
+  struct md_stamp st;
+
+  hlc_init(5);
+  put_clock_st("eve", "avatar", &old, 0);
+  assert_int_equal(metadata_clock_seed(), 0);
+  st = metadata_stamp_now();
+  assert_true(st.ms >= now);
+  assert_true(st.ms <= hlc_wall_clock_ms());
+}
+
+/** No store: nothing to read, the clock is left alone. */
+static void without_a_store_the_seed_does_nothing(void **state)
+{
+  metadata_lmdb_shutdown();
+  assert_int_equal(metadata_clock_seed(), -1);
+  assert_int_equal(metadata_lmdb_init("unused"), 0);   /* teardown's */
+}
+
 int main(void)
 {
   const struct CMUnitTest tests[] = {
@@ -465,6 +568,11 @@ int main(void)
     cmocka_unit_test_setup_teardown(tombstone_ttl_0_keeps_them_past_the_limit, setup, teardown),
     cmocka_unit_test_setup_teardown(a_limit_below_a_minute_is_a_minute, setup, teardown),
     cmocka_unit_test_setup_teardown(the_clear_floor_lives_at_least_the_limit, setup, teardown),
+    cmocka_unit_test_setup_teardown(the_clock_starts_past_every_stored_stamp, setup, teardown),
+    cmocka_unit_test_setup_teardown(the_seed_is_bounded_like_a_peer, setup, teardown),
+    cmocka_unit_test_setup_teardown(bad_rows_are_passed_over, setup, teardown),
+    cmocka_unit_test_setup_teardown(old_rows_leave_the_clock_be, setup, teardown),
+    cmocka_unit_test_setup_teardown(without_a_store_the_seed_does_nothing, setup, teardown),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);
@@ -475,7 +583,7 @@ int main(void)
 /* ------------------------------------------------------------------ */
 
 /* What metadata.o reaches beyond the store: the client side (memory,
- * notifications, replies), the clock, bouncer sessions.  The paths under
+ * notifications, replies), bouncer sessions (the clock is the real one).  The paths under
  * test reach none of it. */
 static void never(const char *what) __attribute__((noreturn));
 static void never(const char *what)
@@ -489,9 +597,6 @@ const char *batch_current_id(struct Client *cli) { never("batch_current_id"); }
 struct BouncerSession *bounce_get_session(struct Client *cptr) { never("bounce_get_session"); }
 int bounce_umode_flag_synced(int flag) { never("bounce_umode_flag_synced"); }
 const char *get_visibility_str(struct MetadataEntry *entry) { never("get_visibility_str"); }
-struct HLC hlc_global_event(void) { never("hlc_global_event"); }
-int hlc_global_receive(const struct HLC *remote, uint64_t max_forward_ms, uint64_t *ahead_ms) { never("hlc_global_receive"); }
-uint64_t hlc_max_forward_ms(void) { never("hlc_max_forward_ms"); }
 void mdsync_on_attach(struct Client *cptr, const char *account) { never("mdsync_on_attach"); }
 void metadata_emit_versioned(struct Client *src, struct Client *one, struct Client *butone, const char *account, const char *key, const struct md_version *v) { never("metadata_emit_versioned"); }
 void metadata_notify_subscribers_butone(const char *target, const char *key, const char *value, int visibility, struct Client *butone) { never("metadata_notify_subscribers_butone"); }
