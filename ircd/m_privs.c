@@ -147,14 +147,14 @@ int ms_privs(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
      * numeric, but the primary needs the same privileges so oper
      * capabilities (CHECK, KILL, etc.) work from the primary too.
      *
-     * Only while both are opers.  The lines of an /OPER on a device come
-     * BEFORE its mode line: the primary takes the device's list when that
-     * line makes it an oper (m_mode.c), not here -- copied here it held
-     * privileges while no oper, and kept them when the device's grant was
-     * a local one (+O), which stays on the device's server. */
+     * A replace, line by line, of the primary's list by the device
+     * copy's: a grant's lines add up on the device copy, which its server
+     * starts from nothing first ("PRIV_NONE", do_oper), and a local
+     * grant's list is taken back the same way.  The primary's server
+     * takes the list again when the device's mode line makes its user an
+     * oper (m_mode.c). */
     if (IsBouncerAlias(acptr) && cli_user(acptr)
-        && cli_user(acptr)->alias_primary
-        && IsAnOper(acptr) && IsAnOper(cli_user(acptr)->alias_primary)) {
+        && cli_user(acptr)->alias_primary) {
       memcpy(&cli_privs(cli_user(acptr)->alias_primary),
              &cli_privs(acptr), sizeof(struct Privs));
     }

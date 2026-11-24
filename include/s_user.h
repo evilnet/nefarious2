@@ -140,6 +140,9 @@ extern void umode_sync_apply_butone(struct Client *cptr, int flag, int on,
                                     struct Client *untold);
 extern void send_umode_out(struct Client* cptr, struct Client* sptr,
                           struct Flags* old, int prop);
+extern void send_umode_out_device_oper(struct Client *device,
+                                       struct Client *primary,
+                                       struct Flags *primary_old);
 extern int whisper(struct Client* source, const char* nick,
                    const char* channel, const char* text, int is_notice);
 extern void send_user_info(struct Client* to, char* names, int rpl,

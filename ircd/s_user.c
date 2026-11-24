@@ -2329,6 +2329,62 @@ static void send_umode_out_device(struct Client *device, struct Client *primary,
 }
 
 
+/** Tell the network that a session's user became an oper by an /OPER on
+ * one of its devices, here: the session sync has just given @a primary
+ * (our user, or our copy of another server's) the device's oper state.
+ *
+ * Under the PRIMARY's numeric, the one every server knows: its privilege
+ * list (a global grant only), then its mode change.  The device's own
+ * mode line used to go to every link under the device's numeric, which a
+ * legacy server and X3 do not know; and a fork server that had already
+ * set +o on its copy passed on no change when the primary's server
+ * announced it -- so the legacy servers and X3 behind it never saw the
+ * oper (a device beside its primary, and a device between the primary's
+ * server and them).
+ *
+ * The one link that gets the DEVICE's line is the one toward the primary
+ * when it is another server's user: that server applies the line to its
+ * user and takes the device's list for it (m_mode.c), and tells its own
+ * side.  A local grant (+O) is no network state: no list is sent, and the
+ * mode change goes without +o.
+ *
+ * @param[in] device      The local device that opered.
+ * @param[in] primary     Its session's primary.
+ * @param[in] primary_old The primary's flags before the session sync. */
+void send_umode_out_device_oper(struct Client *device, struct Client *primary,
+                                struct Flags *primary_old)
+{
+  struct Client *toward = MyConnect(primary) ? NULL : cli_from(primary);
+  struct Client *acptr;
+  char modes[BUFSIZE];
+  int global = IsOper(primary) ? 1 : 0;
+  int i;
+
+  send_umode(NULL, primary, primary_old,
+             global ? SEND_UMODES : SEND_UMODES_BUT_OPER);
+  ircd_strncpy(modes, umodeBuf, sizeof(modes));
+
+  /* A first hop that does not know devices: told as every other link. */
+  if (toward && !IsIRCv3Aware(toward))
+    toward = NULL;
+
+  for (i = HighestFd; i >= 0; i--)
+  {
+    if (!(acptr = LocalClientArray[i]) || !IsServer(acptr))
+      continue;
+    if (acptr == toward) {
+      if (*modes)
+        sendcmdto_one(device, CMD_MODE, acptr, "%s %s", cli_name(primary), modes);
+      continue;
+    }
+    if (global)
+      client_send_privs(cli_user(primary)->server, acptr, primary);
+    if (*modes)
+      sendcmdto_one(primary, CMD_MODE, acptr, "%s %s", cli_name(primary), modes);
+  }
+}
+
+
 /** Call \a fmt for each Client named in \a names.
  * @param[in] sptr Client requesting information.
  * @param[in] names Space-delimited list of nicknames.
@@ -3823,7 +3879,10 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     assert(UserStats.inv_clients <= UserStats.clients + UserStats.unknowns);
     if (MyUser(sptr) && IsBouncerAlias(sptr) && sptr != acptr
         && !MyConnect(acptr) && IsIRCv3Aware(cli_from(acptr)))
-      send_umode_out_device(sptr, acptr, &setflags, prop);
+      /* +o is network state for another server's user whatever privilege
+       * list our copy of it holds: a -o read from a copy without
+       * PRIV_PROPAGATE would be told to nobody. */
+      send_umode_out_device(sptr, acptr, &setflags, 1);
     else
       send_umode_out(cptr, acptr, &setflags, prop);
 

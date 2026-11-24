@@ -5196,7 +5196,8 @@ static void bounce_apply_oper_grant(struct Client *cptr,
  * by bounce_handle_bs's case 'O' to apply (or clear) a session's
  * oper grant on every locally-attached member when the change
  * arrives over BS O from another server. */
-static void bounce_apply_remote_oper_grant(struct BouncerSession *sess,
+static void bounce_apply_remote_oper_grant(struct Client *cptr,
+                                            struct BouncerSession *sess,
                                             const char *opername,
                                             time_t granted_at);
 
@@ -8431,7 +8432,7 @@ bsc_forward:
 
     session = bounce_find_by_token_sessid(account, sessid);
     if (session)
-      bounce_apply_remote_oper_grant(session, opername, granted_at);
+      bounce_apply_remote_oper_grant(cptr, session, opername, granted_at);
 
     /* Forward to other peers (this server bounces it onward like the
      * other BS subcommands). */
@@ -13078,7 +13079,9 @@ static void bounce_apply_oper_grant(struct Client *cptr,
 /** Record on @a sess the oper grant another server announced (BS O):
  * @a opername NULL or empty clears it.
  *
- * The record only.  It is what a restart of the session's holder reads
+ * A grant is the record only: it opers nobody.  A clear also de-opers our
+ * own user if it is still an oper (below).  The record is what a restart
+ * of the session's holder reads
  * (bounce_db_restore(): the grant comes back where this server's config
  * has the block, user 2026-11-23), and what CHECK shows.  The LIVE state
  * of the session's connections -- +o, the privilege list, the oper
@@ -13094,7 +13097,8 @@ static void bounce_apply_oper_grant(struct Client *cptr,
  *    connections by it;
  *  - a clear stripped our own primary before the device's -o arrived, so
  *    that line changed nothing here and the network was never told. */
-static void bounce_apply_remote_oper_grant(struct BouncerSession *sess,
+static void bounce_apply_remote_oper_grant(struct Client *cptr,
+                                            struct BouncerSession *sess,
                                             const char *opername,
                                             time_t granted_at)
 {
@@ -13125,6 +13129,33 @@ static void bounce_apply_remote_oper_grant(struct BouncerSession *sess,
       bounce_session_mark_dirty(sess);
     else
       bounce_session_persist_now(sess, 1);
+  }
+
+  /* A clear is the session's user giving oper up, on a device of another
+   * server.  Its mode line (-o, under the device's numeric) follows, from
+   * a server that sends one; a server on an older build sends that line
+   * under the primary's numeric, which we drop as coming the wrong way --
+   * the clear is then all we are told.  So our own user is de-opered here
+   * and now, as by a server's -o: the socket and our devices are told,
+   * and the network is.  (It used to be stripped in silence: the mode
+   * line that followed changed nothing, and nobody else learned.)  The
+   * record is already clear, so the -o does not announce a clear again. */
+  if (!sess->hs_oper_name[0] && cptr && IsServer(cptr)) {
+    struct Client *primary = sess->hs_client;
+
+    if (primary && MyUser(primary) && IsAnOper(primary)) {
+      char numeric[8];
+      char modes[] = "-oO";
+      char *parv[4];
+
+      ircd_snprintf(0, numeric, sizeof(numeric), "%s%s", NumNick(primary));
+      parv[0] = cli_name(cptr);
+      parv[1] = numeric;
+      parv[2] = modes;
+      parv[3] = NULL;
+      set_user_mode(cptr, cptr, 3, parv,
+                    ALLOWMODES_ANY | ALLOWMODES_ALIAS_SYNC);
+    }
   }
 }
 

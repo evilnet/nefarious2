@@ -355,6 +355,11 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
   client_set_privs(sptr, aconf);
   ClearOper(sptr);
 
+  /* ... and a LOCAL grant (+O) of a device stays on this server: the list
+   * client_set_privs() just announced is taken back from the copies. */
+  if (MyUser(sptr) && IsBouncerAlias(sptr) && !HasPriv(sptr, PRIV_PROPAGATE))
+    sendcmdto_serv_butone_v3(&me, CMD_PRIVS, NULL, "%C PRIV_NONE", sptr);
+
   snomask = ConfSnoMask(aconf) & SNO_ALL;
   snomask |= aconf->snomask & SNO_ALL;
 
@@ -390,7 +395,13 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
       MyFree(cli_user(sptr)->opername);
     DupString(cli_user(sptr)->opername, aconf->name);
 
-    send_umode_out(sptr, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
+    if (IsBouncerAlias(sptr) && cli_user(sptr)->alias_primary)
+      /* A device: its socket is told here.  The network is told after
+       * the session sync below, under the primary's numeric
+       * (send_umode_out_device_oper()). */
+      send_umode(sptr, sptr, &old_mode, ALL_UMODES);
+    else
+      send_umode_out(sptr, sptr, &old_mode, HasPriv(sptr, PRIV_PROPAGATE));
   } else {
     client_send_privs(&me, sptr, sptr);
 
@@ -465,31 +476,22 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
    * session — handles /OPER on alias as well as on primary.  Must be
    * after all mode and ConfUmode changes are applied.
    *
-   * A device that opers beside its primary, both ours: the sync gives the
-   * primary the oper state and tells its socket, and nobody else.  The
-   * only mode line so far went out under the device's numeric, which the
-   * legacy servers and X3 do not know, so the network never saw the
-   * session's user become an oper.  Tell it the list and the mode change
-   * under the primary's numeric.  (A primary on another server is told by
-   * its own server, when the device's mode line reaches it: m_mode.c.) */
+   * A device that opers: the sync gives its primary (our user, or our
+   * copy of another server's) the oper state, and the network is then
+   * told under the primary's numeric (send_umode_out_device_oper()). */
   {
     struct Client *primary = (MyUser(sptr) && IsBouncerAlias(sptr)
                               && cli_user(sptr))
                              ? cli_user(sptr)->alias_primary : NULL;
     struct Flags primary_before;
 
-    if (primary && MyUser(primary))
+    if (primary)
       primary_before = cli_flags(primary);
-    else
-      primary = NULL;
 
     bounce_sync_session_umodes(sptr, NULL, sptr);
 
-    if (primary && IsAnOper(primary)) {
-      client_sendtoserv_privs(primary);
-      send_umode_out(NULL, primary, &primary_before,
-                     HasPriv(primary, PRIV_PROPAGATE));
-    }
+    if (primary)
+      send_umode_out_device_oper(sptr, primary, &primary_before);
   }
 
   send_reply(sptr, RPL_YOUREOPER);

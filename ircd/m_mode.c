@@ -89,6 +89,7 @@
 #include "ircd_features.h"
 #include "ircd_log.h"
 #include "ircd_reply.h"
+#include "ircd_snprintf.h"
 #include "ircd_string.h"
 #include "msg.h"
 #include "numeric.h"
@@ -221,19 +222,57 @@ ms_mode(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
      * applied the user rules. */
     if (IsBouncerAlias(sptr) && cli_user(sptr)
         && cli_user(sptr)->alias_primary == acptr) {
-      /* Check if +o is being set: the mode letters only (parv[2]), never
-       * a mode's argument -- a host or an account is not a string of
-       * mode letters. */
+      /* The line names the primary by nick, and set_user_mode() looks a
+       * server's target up as a NUMERIC first: a session whose nick is
+       * another user's numeric would have its device's modes forced onto
+       * that user.  The client found here is the one that is changed: it
+       * is handed on by its own numeric. */
+      char numeric[8];
+      char *nparv[MAXPARA + 2];
+      int ni;
       int setting_oper = 0;
       char *mm;
       int mwhat = MODE_ADD;
+
+      if (!MyUser(acptr)) {
+        /* Not our user: the device's line goes on toward the primary's
+         * server as it came, under the device's numeric.  Passed on as a
+         * server's mode change (what this did), the primary's server took
+         * no list for it and the session ended +o with no privileges; and
+         * setting it on our copy first made us swallow the change when
+         * that server announced it.  Our copy follows the announcement. */
+        struct Client *toward = cli_from(acptr);
+
+        if (toward != cptr && IsIRCv3Aware(toward)) {
+          char rest[BUFSIZE] = "";
+
+          for (ni = 2; ni < parc; ni++) {
+            if (strlen(rest) + strlen(parv[ni]) + 2 > sizeof(rest))
+              break;
+            strcat(rest, " ");
+            strcat(rest, parv[ni]);
+          }
+          sendcmdto_one(sptr, CMD_MODE, toward, "%s%s", parv[1], rest);
+        }
+        return 0;
+      }
+
+      ircd_snprintf(0, numeric, sizeof(numeric), "%s%s", NumNick(acptr));
+      for (ni = 0; ni < parc && ni <= MAXPARA; ni++)
+        nparv[ni] = parv[ni];
+      nparv[1] = numeric;
+      nparv[ni] = NULL;
+
+      /* Check if +o is being set: the mode letters only (parv[2]), never
+       * a mode's argument -- a host or an account is not a string of
+       * mode letters. */
       for (mm = parc > 2 ? parv[2] : ""; *mm; mm++) {
         if (*mm == '+') mwhat = MODE_ADD;
         else if (*mm == '-') mwhat = MODE_DEL;
         else if (*mm == 'o' && mwhat == MODE_ADD) setting_oper = 1;
       }
 
-      if (setting_oper && !IsOper(acptr) && MyUser(acptr)) {
+      if (setting_oper && !IsOper(acptr)) {
         /* A device of our user opered on its own server.  That server
          * checked the name and the password against ITS Operator block
          * and sent the block's privileges for the device (PRIVS lines,
@@ -252,17 +291,22 @@ ms_mode(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
         int rc;
 
         memcpy(&cli_privs(acptr), &cli_privs(sptr), sizeof(cli_privs(acptr)));
-        rc = set_user_mode(cptr, cptr, parc, parv,
+        /* The list before the mode line, as an /OPER sends them: a server
+         * that mirrors the mode line onto its own devices has the list by
+         * then. */
+        client_sendtoserv_privs(acptr);
+        rc = set_user_mode(cptr, cptr, parc, nparv,
                            ALLOWMODES_ANY | ALLOWMODES_ALIAS_SYNC);
-        if (IsAnOper(acptr))
-          client_sendtoserv_privs(acptr);
-        else
+        if (!IsAnOper(acptr)) {
+          /* The mode change made no oper of it: no list either. */
           memset(&cli_privs(acptr), 0, sizeof(cli_privs(acptr)));
+          sendcmdto_serv_butone(&me, CMD_PRIVS, NULL, "%C PRIV_NONE", acptr);
+        }
         return rc;
       }
 
       /* Every other mode change of a device: applied as its server sent it. */
-      return set_user_mode(cptr, cptr, parc, parv,
+      return set_user_mode(cptr, cptr, parc, nparv,
                            ALLOWMODES_ANY | ALLOWMODES_ALIAS_SYNC);
     }
 
