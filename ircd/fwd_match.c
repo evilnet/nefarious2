@@ -439,6 +439,22 @@ int fwd_reply_fit(int fam, const char *subject, int numeric, const char *params)
   return FWD_FIT_NO;
 }
 
+int fwd_cand_askers(const int *asker, const unsigned char *cand, int n)
+{
+  int i, j, distinct = 0;
+
+  for (i = 0; i < n; i++) {
+    if (!cand[i])
+      continue;
+    for (j = 0; j < i; j++)
+      if (cand[j] && asker[j] == asker[i])
+        break;
+    if (j == i)
+      distinct++;
+  }
+  return distinct;
+}
+
 int fwd_pick(const struct FwdView *v, int n, int numeric,
              const char *params, const char *link, const char *source,
              int source_true, unsigned int untracked,

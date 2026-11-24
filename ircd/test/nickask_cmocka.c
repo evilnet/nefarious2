@@ -40,8 +40,10 @@ int fwd_label_exact_ends(struct ForwardedLabel *fl, int n) { (void)fl; (void)n; 
 struct ForwardedLabel *fwd_label_find_for(struct Client *a, const char *m, struct Client **o)
 { (void)a; (void)m; if (o) *o = NULL; return NULL; }
 struct ForwardedLabel *fwd_label_match(struct Client *a, int n, const char *p, struct Client *l,
-                                       struct Client *s, struct Client **o, int *fit)
-{ (void)a; (void)n; (void)p; (void)l; (void)s; if (o) *o = NULL; if (fit) *fit = 0; return NULL; }
+                                       struct Client *s, struct Client **o, int *fit,
+                                       struct Client **ask, int max, int *nask)
+{ (void)a; (void)n; (void)p; (void)l; (void)s; (void)ask; (void)max;
+  if (o) *o = NULL; if (fit) *fit = 0; if (nask) *nask = 0; return NULL; }
 void fwd_label_open_batch(struct Client *a, struct ForwardedLabel *fl) { (void)a; (void)fl; }
 int fwd_label_reply_ends(struct Client *o, struct ForwardedLabel *fl, int fit) { (void)o; (void)fl; (void)fit; return 0; }
 struct Client *fwd_label_asker(struct Client *o, struct ForwardedLabel *fl) { (void)fl; return o; }

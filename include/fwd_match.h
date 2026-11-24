@@ -112,6 +112,19 @@ extern int fwd_numeric_generic(int numeric);
 extern int fwd_reply_fit(int fam, const char *subject, int numeric,
                          const char *params);
 
+/** How many different askers the candidates of a reply have.
+ *
+ * A reply fwd_pick() calls ambiguous may answer any of its candidates.
+ * When they are all one connection's, that connection is answered; when
+ * they are several connections', the reply must reach each of them --
+ * given to the oldest alone, the others got a fragment of their answer.
+ * @param[in] asker For each pending command, a number that is equal for
+ *   two commands exactly when the same connection sent them.
+ * @param[in] cand fwd_pick()'s candidate marks.
+ * @param[in] n How many commands.
+ * @return The number of different askers among the candidates. */
+extern int fwd_cand_askers(const int *asker, const unsigned char *cand, int n);
+
 /** A pending forwarded command, as fwd_pick() sees it. */
 struct FwdView {
   int fam;                  /**< family; FWD_FAM_NONE for a free slot */

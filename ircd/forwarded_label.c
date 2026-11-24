@@ -508,6 +508,19 @@ struct ForwardedLabel *fwd_label_find(struct Client *acptr, const char *msgid)
   return NULL;
 }
 
+struct Client *fwd_label_asker(struct Client *owner, struct ForwardedLabel *fl)
+{
+  struct Client *device;
+
+  if (!fl || !fl->fl_asker[0])
+    return owner;
+  device = findNUser(fl->fl_asker);
+  if (device && IsBouncerAlias(device) && cli_user(device)
+      && cli_user(device)->alias_primary == owner)
+    return device;
+  return NULL;
+}
+
 struct ForwardedLabel *fwd_label_find_for(struct Client *acptr, const char *msgid,
                                           struct Client **owner)
 {
@@ -530,7 +543,9 @@ struct ForwardedLabel *fwd_label_find_for(struct Client *acptr, const char *msgi
 struct ForwardedLabel *fwd_label_match(struct Client *acptr, int numeric,
                                        const char *params, struct Client *link,
                                        struct Client *source,
-                                       struct Client **owner, int *fit)
+                                       struct Client **owner, int *fit,
+                                       struct Client **askers, int max_askers,
+                                       int *n_askers)
 {
   struct Client *owners[FWD_OWNERS_MAX];
   struct FwdView v[FWD_OWNERS_MAX * MAX_FORWARDED_LABELS];
@@ -542,6 +557,8 @@ struct ForwardedLabel *fwd_label_match(struct Client *acptr, int numeric,
 
   *owner = NULL;
   *fit = FWD_FIT_NO;
+  if (n_askers)
+    *n_askers = 0;
   if (!acptr || !IsUser(acptr) || !link || !IsServer(link))
     return NULL;
 
@@ -593,9 +610,33 @@ struct ForwardedLabel *fwd_label_match(struct Client *acptr, int numeric,
      * cannot tell apart, or one that may be an untracked command's: none
      * of them is labeled from here on.  The reply goes out unlabeled;
      * the oldest still counts it (an end frees it). */
-    for (i = 0; i < n; i++)
-      if (cand[i])
-        fwd_label_unlabel(who[i], fls[i]);
+    int ids[FWD_OWNERS_MAX * MAX_FORWARDED_LABELS];
+    struct Client *seen[FWD_OWNERS_MAX * MAX_FORWARDED_LABELS];
+    int nseen = 0, k;
+
+    for (i = 0; i < n; i++) {
+      ids[i] = -1;
+      if (!cand[i])
+        continue;
+      fwd_label_unlabel(who[i], fls[i]);
+      /* Whose it may be: when the candidates are several connections',
+       * the caller sends the reply to each of them (fwd_cand_askers()). */
+      {
+        struct Client *a = fwd_label_asker(who[i], fls[i]);
+
+        for (k = 0; k < nseen; k++)
+          if (seen[k] == a)
+            break;
+        if (k == nseen)
+          seen[nseen++] = a;
+        ids[i] = k;
+      }
+    }
+    if (askers && n_askers && fwd_cand_askers(ids, cand, n) > 1) {
+      for (k = 0; k < nseen && *n_askers < max_askers; k++)
+        if (seen[k])
+          askers[(*n_askers)++] = seen[k];
+    }
   }
   /* labeled-response gone inert: forgotten (see fwd_label_find()) */
   if (!fls[pick]->fl_plain && !LabeledResponseInUse(who[pick])) {
@@ -604,19 +645,6 @@ struct ForwardedLabel *fwd_label_match(struct Client *acptr, int numeric,
   }
   *owner = who[pick];
   return fls[pick];
-}
-
-struct Client *fwd_label_asker(struct Client *owner, struct ForwardedLabel *fl)
-{
-  struct Client *device;
-
-  if (!fl || !fl->fl_asker[0])
-    return owner;
-  device = findNUser(fl->fl_asker);
-  if (device && IsBouncerAlias(device) && cli_user(device)
-      && cli_user(device)->alias_primary == owner)
-    return device;
-  return NULL;
 }
 
 int fwd_label_reply_ends(struct Client *owner, struct ForwardedLabel *fl, int fit)
@@ -667,7 +695,8 @@ void fwd_label_close_batch(struct Client *acptr, struct ForwardedLabel *fl)
 
   /* BATCH - only to a client that holds batch (one that dropped it is
    * sent no batch lines; its entry is just forgotten). */
-  if ((fl->fl_state == FWD_LABEL_ACTIVE || fl->fl_state == FWD_LABEL_DRAINING)
+  if (!fl->fl_plain
+      && (fl->fl_state == FWD_LABEL_ACTIVE || fl->fl_state == FWD_LABEL_DRAINING)
       && MyConnect(acptr) && CapOwnHas(acptr, CAP_BATCH))
     send_batch_marker(acptr, '-', fl->fl_batch_id, NULL, NULL, NULL, NULL);
 
@@ -740,7 +769,9 @@ void fwd_label_close_draining(struct Client *acptr)
 
   for (i = 0; i < MAX_FORWARDED_LABELS; i++) {
     struct ForwardedLabel *fl = &cli_fwd_labels(acptr)[i];
-    if (fl->fl_state == FWD_LABEL_DRAINING)
+    /* A plain entry waiting for the rest of its reply is no batch to
+     * end: its terminal, or the sweep, frees it. */
+    if (fl->fl_state == FWD_LABEL_DRAINING && !fl->fl_plain)
       fwd_label_close_batch(acptr, fl);
   }
 }

@@ -137,8 +137,10 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
     {
       const char *incoming_msgid = cli_s2s_msgid(cptr);
       struct Client *owner = NULL;
+      struct Client *askers[FWD_ASKERS_MAX];
       struct ForwardedLabel *fl = fwd_label_find_for(acptr, incoming_msgid, &owner);
       int fit = 0;
+      int nask = 0;
       int matched_plain = 0;
 
       if (fl && !fl->fl_plain) {
@@ -185,7 +187,8 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
        * the asker's, or cannot be told apart, goes out plain, below. */
       else if (!incoming_msgid[0]
                && (fl = fwd_label_match(acptr, numeric, parv[2], cptr, sptr,
-                                        &owner, &fit))) {
+                                        &owner, &fit, askers, FWD_ASKERS_MAX,
+                                        &nask))) {
         if (!fl->fl_plain) {
           if (fl->fl_state == FWD_LABEL_PENDING)
             fwd_label_open_batch(owner, fl);
@@ -197,7 +200,24 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
         matched_plain = 2;
       }
 
-      if (matched_plain) {
+      if (matched_plain == 2 && nask > 1) {
+        /* It could answer the commands of several connections, and names
+         * nothing that tells them apart: it goes to each of them.  Our own
+         * connections of a primary that is ours get it as an unmatched
+         * reply does, below (the primary and every local device); a
+         * device on another server under its own numeric; and when the
+         * reply is only passing through for a primary elsewhere, our
+         * devices here, and on toward that primary. */
+        int ai;
+
+        fwd_label_reply_ends(owner, fl, fit);
+        for (ai = 0; ai < nask; ai++) {
+          if (!MyConnect(askers[ai]))
+            sendcmdto_one(from, num, num, askers[ai], "%C %s", askers[ai], parv[2]);
+          else if (!MyConnect(acptr))
+            sendcmdto_one(from, num, num, askers[ai], "%C %s", acptr, parv[2]);
+        }
+      } else if (matched_plain) {
         /* Plain, to the connection that sent the command and to no other
          * (it used to go to the primary and be copied to every device of
          * the session there, and never reached a device on another
@@ -215,18 +235,29 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
           sendcmdto_one(from, num, num, to, "%C %s", to, parv[2]);
         }
         if (matched_plain == 1) {
-          if (fwd_label_exact_ends(fl, numeric))
-            fwd_label_close_batch(owner, fl);
+          if (fl->fl_state == FWD_LABEL_DRAINING)
+            fl->fl_state = FWD_LABEL_PENDING;   /* more of it arrived */
+          if (fwd_label_exact_ends(fl, numeric)) {
+            if ((numeric == 401 || numeric == 402)
+                && numeric != fl->fl_terminal && numeric != fl->fl_terminal2) {
+              /* A generic error in the middle (WHOIS of a nick the
+               * server does not know: 401, then 318): the rest is still
+               * to come, and is the asker's too.  Kept briefly, as a
+               * labeled batch is; freed here the 318 went to everyone. */
+              fl->fl_state = FWD_LABEL_DRAINING;
+              fl->fl_created = CurrentTime;
+            } else
+              fwd_label_close_batch(owner, fl);
+          }
           if (MyConnect(acptr))
             fwd_label_close_draining(acptr);
         } else
           fwd_label_reply_ends(owner, fl, fit);
         return 0;
-      }
-
-      /* Numeric with different/no msgid: close any DRAINING batches */
-      if (MyConnect(acptr))
+      } else if (MyConnect(acptr)) {
+        /* Numeric with different/no msgid: close any DRAINING batches */
         fwd_label_close_draining(acptr);
+      }
     }
 
     if (!MyConnect(acptr)) {

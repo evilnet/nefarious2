@@ -469,6 +469,25 @@ static void test_pick_oper_reply_from_elsewhere(void **state)
  * name: that tells two CHECKs sent to different servers apart, though
  * nothing in the lines does.  Two to the same server are answered in the
  * order sent. */
+/** The askers of a reply's candidates: one connection's commands are one
+ * asker however many they are; several connections' are several; what is
+ * no candidate does not count. */
+static void test_cand_askers(void **state)
+{
+  static const int one[] = { 7, 7, 7 };
+  static const int two[] = { 7, 9, 7 };
+  static const unsigned char all[] = { 1, 1, 1 };
+  static const unsigned char ends[] = { 1, 0, 1 };
+  static const unsigned char none[] = { 0, 0, 0 };
+
+  (void)state;
+  assert_int_equal(fwd_cand_askers(one, all, 3), 1);
+  assert_int_equal(fwd_cand_askers(two, all, 3), 2);
+  assert_int_equal(fwd_cand_askers(two, ends, 3), 1);   /* the 9 is no candidate */
+  assert_int_equal(fwd_cand_askers(two, none, 3), 0);
+  assert_int_equal(fwd_cand_askers(two, all, 0), 0);
+}
+
 static void test_pick_check_by_source(void **state)
 {
   int fit, amb;
@@ -521,6 +540,7 @@ int main(void)
     cmocka_unit_test_setup(test_pick_generic_with_untracked_unknown, setup),
     cmocka_unit_test_setup(test_pick_two_traces_same_server, setup),
     cmocka_unit_test_setup(test_pick_oper_reply_from_elsewhere, setup),
+    cmocka_unit_test_setup(test_cand_askers, setup),
     cmocka_unit_test_setup(test_pick_check_by_source, setup),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);

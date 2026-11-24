@@ -66,13 +66,25 @@ struct Client *fwd_label_asker(struct Client *owner, struct ForwardedLabel *fl);
  * @param[in] source  The server it names as its source.
  * @param[out] owner  The connection whose command it answers.
  * @param[out] fit    How it fits (enum FwdFit).
+ * @param[out] askers When the reply cannot be told apart between the
+ *   commands of SEVERAL connections: every one of them (a device on
+ *   another server included).  The caller sends the reply to each.
+ * @param[in] max_askers Room in \a askers.
+ * @param[out] n_askers How many were put there; 0 when the reply is one
+ *   connection's (\a owner's, or the device its entry names).
  * @return The entry, or NULL: the reply goes out as it would without
  *   labeled-response.
  */
 struct ForwardedLabel *fwd_label_match(struct Client *acptr, int numeric,
                                        const char *params, struct Client *link,
                                        struct Client *source,
-                                       struct Client **owner, int *fit);
+                                       struct Client **owner, int *fit,
+                                       struct Client **askers, int max_askers,
+                                       int *n_askers);
+
+/** Room for every asker fwd_label_match() can name: a session's primary
+ * and its devices. */
+#define FWD_ASKERS_MAX 64
 
 /** Account for a reply fwd_label_match() matched: an end frees the entry
  * (ending its batch if one is open); NAMES' 366 ends it at its last
