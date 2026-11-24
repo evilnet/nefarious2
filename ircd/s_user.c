@@ -2357,7 +2357,10 @@ void send_umode_out_device_oper(struct Client *device, struct Client *primary,
   struct Client *toward = MyConnect(primary) ? NULL : cli_from(primary);
   struct Client *acptr;
   char modes[BUFSIZE];
-  int global = IsOper(primary) ? 1 : 0;
+  /* What the DEVICE was granted decides what is announced, never what
+   * our copy of the primary happens to hold: a global grant is +o with
+   * PRIV_PROPAGATE on the connection that authenticated. */
+  int global = (IsOper(device) && HasPriv(device, PRIV_PROPAGATE)) ? 1 : 0;
   int i;
 
   send_umode(NULL, primary, primary_old,
