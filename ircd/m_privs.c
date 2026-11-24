@@ -145,9 +145,16 @@ int ms_privs(struct Client* cptr, struct Client* sptr, int parc, char* parv[])
 
     /* Alias→primary privilege sync: the PRIVS message targets the alias
      * numeric, but the primary needs the same privileges so oper
-     * capabilities (CHECK, KILL, etc.) work from the primary too. */
+     * capabilities (CHECK, KILL, etc.) work from the primary too.
+     *
+     * Only while both are opers.  The lines of an /OPER on a device come
+     * BEFORE its mode line: the primary takes the device's list when that
+     * line makes it an oper (m_mode.c), not here -- copied here it held
+     * privileges while no oper, and kept them when the device's grant was
+     * a local one (+O), which stays on the device's server. */
     if (IsBouncerAlias(acptr) && cli_user(acptr)
-        && cli_user(acptr)->alias_primary) {
+        && cli_user(acptr)->alias_primary
+        && IsAnOper(acptr) && IsAnOper(cli_user(acptr)->alias_primary)) {
       memcpy(&cli_privs(cli_user(acptr)->alias_primary),
              &cli_privs(acptr), sizeof(struct Privs));
     }

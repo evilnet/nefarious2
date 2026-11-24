@@ -451,8 +451,34 @@ void do_oper(struct Client* cptr, struct Client* sptr, struct ConfItem* aconf, i
 
   /* Sync oper mode flags across all members of this client's bouncer
    * session — handles /OPER on alias as well as on primary.  Must be
-   * after all mode and ConfUmode changes are applied. */
-  bounce_sync_session_umodes(sptr, NULL, sptr);
+   * after all mode and ConfUmode changes are applied.
+   *
+   * A device that opers beside its primary, both ours: the sync gives the
+   * primary the oper state and tells its socket, and nobody else.  The
+   * only mode line so far went out under the device's numeric, which the
+   * legacy servers and X3 do not know, so the network never saw the
+   * session's user become an oper.  Tell it the list and the mode change
+   * under the primary's numeric.  (A primary on another server is told by
+   * its own server, when the device's mode line reaches it: m_mode.c.) */
+  {
+    struct Client *primary = (MyUser(sptr) && IsBouncerAlias(sptr)
+                              && cli_user(sptr))
+                             ? cli_user(sptr)->alias_primary : NULL;
+    struct Flags primary_before;
+
+    if (primary && MyUser(primary))
+      primary_before = cli_flags(primary);
+    else
+      primary = NULL;
+
+    bounce_sync_session_umodes(sptr, NULL, sptr);
+
+    if (primary && IsAnOper(primary)) {
+      client_sendtoserv_privs(primary);
+      send_umode_out(NULL, primary, &primary_before,
+                     HasPriv(primary, PRIV_PROPAGATE));
+    }
+  }
 
   send_reply(sptr, RPL_YOUREOPER);
 

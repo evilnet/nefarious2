@@ -129,6 +129,7 @@ void send_labeled_ack(struct Client *cptr) {}
 void client_set_privs(struct Client *client, struct ConfItem *oper) {}
 void client_send_privs(struct Client *from, struct Client *to,
                        struct Client *client) {}
+void client_sendtoserv_privs(struct Client *client) {}
 int feature_int(enum Feature feat) { return 0; }
 int feature_bool(enum Feature feat) { return 0; }
 void userstats_count_sync(struct Client *cptr) {}

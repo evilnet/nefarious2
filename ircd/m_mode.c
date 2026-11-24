@@ -216,51 +216,52 @@ ms_mode(struct Client *cptr, struct Client *sptr, int parc, char *parv[])
     }
 
     /* Alias→primary mode sync: when the alias's mode changes (e.g. from
-     * OPER on the leaf), apply it to the primary on the hub.
-     * For +o, do a proper oper-up via do_oper() so the primary gets
-     * the right class, handler, snomask, privileges, etc.
-     * For other modes, fall through to set_user_mode(). */
+     * OPER on the leaf, or a MODE the device typed), apply it to the
+     * primary, our user, as a server's mode change: the device's server
+     * applied the user rules. */
     if (IsBouncerAlias(sptr) && cli_user(sptr)
         && cli_user(sptr)->alias_primary == acptr) {
-      /* Check if +o is being set */
+      /* Check if +o is being set: the mode letters only (parv[2]), never
+       * a mode's argument -- a host or an account is not a string of
+       * mode letters. */
       int setting_oper = 0;
-      int mi;
       char *mm;
       int mwhat = MODE_ADD;
-      for (mi = 2; mi < parc; mi++) {
-        for (mm = parv[mi]; *mm; mm++) {
-          if (*mm == '+') mwhat = MODE_ADD;
-          else if (*mm == '-') mwhat = MODE_DEL;
-          else if (*mm == 'o' && mwhat == MODE_ADD) setting_oper = 1;
-        }
+      for (mm = parc > 2 ? parv[2] : ""; *mm; mm++) {
+        if (*mm == '+') mwhat = MODE_ADD;
+        else if (*mm == '-') mwhat = MODE_DEL;
+        else if (*mm == 'o' && mwhat == MODE_ADD) setting_oper = 1;
       }
 
-      if (setting_oper && !IsOper(acptr)) {
-        /* Find a matching Operator block on this server.
-         * The leaf already validated name+password; we just need
-         * a host-matching ConfItem for the class/privileges. */
-        struct ConfItem *aconf;
-        for (aconf = GlobalConfList; aconf; aconf = aconf->next) {
-          if (!(aconf->status & CONF_OPERATOR))
-            continue;
-          if (aconf->username
-              && match(aconf->username, cli_user(acptr)->username))
-            continue;
-          if (aconf->addrbits < 0) {
-            if (match(aconf->host, cli_user(acptr)->realhost))
-              continue;
-          } else if (!ipmask_check(&cli_ip(acptr), &aconf->address.addr,
-                                    aconf->addrbits))
-            continue;
-          break;
-        }
-        if (aconf) {
-          do_oper(cli_from(acptr), acptr, aconf, OPER_FLAG_SILENT);
-          return 0;  /* do_oper handles MODE propagation */
-        }
+      if (setting_oper && !IsOper(acptr) && MyUser(acptr)) {
+        /* A device of our user opered on its own server.  That server
+         * checked the name and the password against ITS Operator block
+         * and sent the block's privileges for the device (PRIVS lines,
+         * before this line): the session takes that list.
+         *
+         * Never a block of this server's config: the user did not
+         * authenticate to one, most opers have an O:line on one server
+         * only, and the first block here whose host mask matched (what
+         * this did before) could grant privileges the user's own block
+         * withholds (user, 2026-11-23).
+         *
+         * The primary gets the list first, so the mode change below
+         * sees PRIV_PROPAGATE and the session sync hands the list to
+         * our own devices; then the network is told the list under the
+         * primary's numeric, the one the legacy servers and X3 know. */
+        int rc;
+
+        memcpy(&cli_privs(acptr), &cli_privs(sptr), sizeof(cli_privs(acptr)));
+        rc = set_user_mode(cptr, cptr, parc, parv,
+                           ALLOWMODES_ANY | ALLOWMODES_ALIAS_SYNC);
+        if (IsAnOper(acptr))
+          client_sendtoserv_privs(acptr);
+        else
+          memset(&cli_privs(acptr), 0, sizeof(cli_privs(acptr)));
+        return rc;
       }
 
-      /* Fallback for non-oper modes or no matching Operator block */
+      /* Every other mode change of a device: applied as its server sent it. */
       return set_user_mode(cptr, cptr, parc, parv,
                            ALLOWMODES_ANY | ALLOWMODES_ALIAS_SYNC);
     }

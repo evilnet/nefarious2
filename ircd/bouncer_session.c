@@ -8775,14 +8775,11 @@ int bounce_promote_alias(struct BouncerSession *session, int local_only)
       bounce_session_mark_dirty(session);
     /* Live again under the device: the last hold is over. */
     bounce_hold_reason_done(session, 0);
-    /* If the session has an oper grant and the new primary isn't yet
-     * opered (e.g. alias predated the grant, or grant survived a
-     * primary-disconnect-and-cleanup gap), re-grant from the local
-     * O:line matching hs_oper_name.  No-op when the alias is already
-     * opered (Step 1's sync helper kept it in lockstep) or when the
-     * new primary is remote (the remote server runs its own grant
-     * recovery against its own O:line config). */
-    bounce_apply_oper_grant(alias, session);
+    /* The promoted device already holds the session's oper state, on
+     * every server (bounce_copy_privs()).  It is not opered here from
+     * this server's Operator block of the grant's name: that block need
+     * not be the one the user authenticated to, and a local grant (+O)
+     * made on another server would reach this one by it. */
   }
 
   /* A2: Update remaining aliases' alias_primary to point to new primary.
@@ -13078,44 +13075,34 @@ static void bounce_apply_oper_grant(struct Client *cptr,
   }
 }
 
-/** Inverse of bounce_apply_oper_grant — clear oper state on a local
- * Client.  Mirrors set_user_mode's -o bookkeeping (s_user.c:2417+) so
- * UserStats.opers tracks across cross-server grant clears.  No-op for
- * remote Clients (the P10 MODE -o path handles those) and for
- * Clients that aren't currently opered. */
-static void bounce_clear_oper_locally(struct Client *cptr)
-{
-  if (!cptr || !MyConnect(cptr) || !IsUser(cptr))
-    return;
-  if (!IsOper(cptr) && !IsLocOp(cptr))
-    return;
-  ClearOper(cptr);
-  ClearLocOp(cptr);
-  ClearAdmin(cptr);
-  /* Reconcile the counter now that +o is cleared (flag-keyed: decrements iff
-   * this client was actually counted). */
-  userstats_count_sync(cptr);
-  bounce_strip_oper_privs(cptr);
-  /* The oper-only notice bits go with +o (set_user_mode's -o strips them
-   * the same way). */
-  bounce_reclamp_snomask(cptr);
-}
-
-/** Apply or clear a session's oper grant on every locally-attached
- * member (primary if local, plus all local aliases).  Called from the
- * BS O receive path; @a opername NULL or empty clears the grant. */
+/** Record on @a sess the oper grant another server announced (BS O):
+ * @a opername NULL or empty clears it.
+ *
+ * The record only.  It is what a restart of the session's holder reads
+ * (bounce_db_restore(): the grant comes back where this server's config
+ * has the block, user 2026-11-23), and what CHECK shows.  The LIVE state
+ * of the session's connections -- +o, the privilege list, the oper
+ * handler -- travels by the mode line and the PRIVS lines, on every
+ * server and for both ways to become an oper (/OPER and X3):
+ * bounce_copy_privs(), bounce_member_privs_changed(), m_mode.c.
+ *
+ * This used to oper every local member from THIS server's Operator block
+ * of the same name, and to clear them at a clear:
+ *  - the block here need not be the block the user authenticated to on
+ *    its own server (most opers have an O:line on one server), and a
+ *    local grant (+O), which no mode line carries, reached this server's
+ *    connections by it;
+ *  - a clear stripped our own primary before the device's -o arrived, so
+ *    that line changed nothing here and the network was never told. */
 static void bounce_apply_remote_oper_grant(struct BouncerSession *sess,
                                             const char *opername,
                                             time_t granted_at)
 {
-  struct Client *primary;
-  int i, changed;
+  int changed;
 
   if (!sess)
     return;
 
-  /* Update the session record itself so /CHECK and a future server
-   * restart see the right state. */
   if (opername && *opername) {
     changed = 0 != strcmp(sess->hs_oper_name, opername);
     ircd_strncpy(sess->hs_oper_name, opername, sizeof(sess->hs_oper_name));
@@ -13126,8 +13113,7 @@ static void bounce_apply_remote_oper_grant(struct BouncerSession *sess,
     sess->hs_oper_granted_at = 0;
   }
   /* Keyed on the session itself (bounce_mark_dirty gates on
-   * BOUNCE_ACTIVE, and this path runs for HOLDING sessions too: a peer
-   * broadcasts an oper grant while our local primary is in hold).  A
+   * BOUNCE_ACTIVE, and this path runs for HOLDING sessions too).  A
    * clear is written at once, durably: a record still carrying a revoked
    * grant would give it back at a restart (bounce_record_stamp()).  A
    * grant waits for the next persist tick -- lost at an unclean exit
@@ -13139,27 +13125,6 @@ static void bounce_apply_remote_oper_grant(struct BouncerSession *sess,
       bounce_session_mark_dirty(sess);
     else
       bounce_session_persist_now(sess, 1);
-  }
-
-  /* Apply to local primary, if any.  Remote primaries are handled by
-   * the P10 MODE +o / -o that arrives in the same TCP stream from the
-   * originating server. */
-  primary = sess->hs_client;
-  if (primary && MyConnect(primary)) {
-    if (sess->hs_oper_name[0])
-      bounce_apply_oper_grant(primary, sess);
-    else
-      bounce_clear_oper_locally(primary);
-  }
-  /* Plus every local alias. */
-  for (i = 0; i < sess->hs_alias_count; i++) {
-    struct Client *alias = findNUser(sess->hs_aliases[i].ba_numeric);
-    if (!alias || !IsBouncerAlias(alias) || !MyConnect(alias))
-      continue;
-    if (sess->hs_oper_name[0])
-      bounce_apply_oper_grant(alias, sess);
-    else
-      bounce_clear_oper_locally(alias);
   }
 }
 
