@@ -345,15 +345,26 @@ int hunt_server_cmd(struct Client *from, const char *cmd, const char *tok,
   if (MyConnect(asker)) {
     /* The label, and so the entry, is the connection's that sent the
      * command -- a bouncer device's own, though the command goes out
-     * under its primary's numeric.  A device's command sent on under a
-     * primary on another server is answered there, not here: it is not
-     * tracked (its label is ACKed now). */
+     * under its primary's numeric, whichever server that primary is on:
+     * the reply comes back through this server, addressed to the primary,
+     * and is handed to the device here (do_numeric()). */
     char msgid[S2S_MSGID_BUFSIZE];
     uint64_t time_ms;
-    if ((asker == from || MyConnect(from))
-        && fwd_label_forward(asker, cmd, acptr, parc, parv, msgid, &time_ms)
+    if (fwd_label_forward(asker, NULL, cmd, acptr, parc, parv, msgid, &time_ms)
         && feature_bool(FEAT_P10_MESSAGE_TAGS))
       sendcmdto_set_s2s_tags(time_ms, msgid);
+  } else if (asker != from && MyUser(from)) {
+    /* Another server's device, whose command we send on under its
+     * primary's numeric -- our user's.  The reply will come here addressed
+     * to the primary: the primary's entry remembers which device it is
+     * for, and the reply is sent on to it. */
+    char msgid[S2S_MSGID_BUFSIZE];
+    uint64_t time_ms;
+    if (fwd_label_forward(from, asker, cmd, acptr, parc, parv, msgid, &time_ms)) {
+      if (feature_bool(FEAT_P10_MESSAGE_TAGS))
+        sendcmdto_set_s2s_tags(time_ms, msgid);
+    } else
+      hunt_relay_msgid(asker);
   } else
     hunt_relay_msgid(asker);
 
@@ -445,15 +456,26 @@ int hunt_server_prio_cmd(struct Client *from, const char *cmd, const char *tok,
   if (MyConnect(asker)) {
     /* The label, and so the entry, is the connection's that sent the
      * command -- a bouncer device's own, though the command goes out
-     * under its primary's numeric.  A device's command sent on under a
-     * primary on another server is answered there, not here: it is not
-     * tracked (its label is ACKed now). */
+     * under its primary's numeric, whichever server that primary is on:
+     * the reply comes back through this server, addressed to the primary,
+     * and is handed to the device here (do_numeric()). */
     char msgid[S2S_MSGID_BUFSIZE];
     uint64_t time_ms;
-    if ((asker == from || MyConnect(from))
-        && fwd_label_forward(asker, cmd, acptr, parc, parv, msgid, &time_ms)
+    if (fwd_label_forward(asker, NULL, cmd, acptr, parc, parv, msgid, &time_ms)
         && feature_bool(FEAT_P10_MESSAGE_TAGS))
       sendcmdto_set_s2s_tags(time_ms, msgid);
+  } else if (asker != from && MyUser(from)) {
+    /* Another server's device, whose command we send on under its
+     * primary's numeric -- our user's.  The reply will come here addressed
+     * to the primary: the primary's entry remembers which device it is
+     * for, and the reply is sent on to it. */
+    char msgid[S2S_MSGID_BUFSIZE];
+    uint64_t time_ms;
+    if (fwd_label_forward(from, asker, cmd, acptr, parc, parv, msgid, &time_ms)) {
+      if (feature_bool(FEAT_P10_MESSAGE_TAGS))
+        sendcmdto_set_s2s_tags(time_ms, msgid);
+    } else
+      hunt_relay_msgid(asker);
   } else
     hunt_relay_msgid(asker);
 

@@ -34,12 +34,23 @@ struct ForwardedLabel;
  * @param[in] dest     Server the command is forwarded to.
  * @param[in] parc     Its parameter count (hunt_server_cmd()'s).
  * @param[in] parv     Its parameters.
+ * @param[in] asker    NULL when \a from sent the command itself; else the
+ *   bouncer device on another server whose command \a from, its primary
+ *   and our user, is sent on for (always tracked, never labeled).
  * @param[out] msgid   Receives the msgid (for the S2S compact tag).
  * @param[out] time_out Receives the HLC physical_ms for compact tag time.
  * @return 1 if the command is tracked (arm \a msgid), else 0.
  */
-int fwd_label_forward(struct Client *from, const char *cmd, struct Client *dest,
+int fwd_label_forward(struct Client *from, struct Client *asker,
+                      const char *cmd, struct Client *dest,
                       int parc, char *parv[], char *msgid, uint64_t *time_out);
+
+/** Who a matched plain reply is for: \a owner itself, or -- for an entry
+ * \a owner's server made for a bouncer device on another server, whose
+ * command it sent on under \a owner's numeric -- that device.
+ * @return The client to answer; NULL when the device is gone (nobody is
+ *   left to answer). */
+struct Client *fwd_label_asker(struct Client *owner, struct ForwardedLabel *fl);
 
 /** Find the tracked forwarded command a reply WITHOUT a msgid answers:
  * by its family and subject, over the link it came in on

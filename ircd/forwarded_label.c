@@ -248,10 +248,11 @@ static void fwd_label_untrack(struct Client *from, int fam)
  * device's command on under the primary's numeric (bouncer invariant
  * #10: legacy servers do not know the device), so its replies come back
  * addressed to the primary; the device's own Connection holds the entry,
- * for the label is the connection's that sent the command.
+ * for the label is the connection's that sent the command.  \a acptr may
+ * be a primary on another server: the reply is then passing through, and
+ * the owners are that primary's devices here.
  * @param[out] remote Set (if not NULL) when the session has a device on
- *   another server: its commands, sent on there under the primary's
- *   numeric, are answered to the primary here and are tracked nowhere.
+ *   another server.
  * @return How many were put in \a owners. */
 static int fwd_label_owners(struct Client *acptr, struct Client **owners, int max,
                             int *remote)
@@ -263,7 +264,11 @@ static int fwd_label_owners(struct Client *acptr, struct Client **owners, int ma
     *remote = 0;
   if (max < 1)
     return 0;
-  owners[n++] = acptr;
+  /* \a acptr itself only when it is our connection: a primary on another
+   * server has no entries here (its Connection is its link's), its
+   * devices here do. */
+  if (MyConnect(acptr))
+    owners[n++] = acptr;
   if (IsBouncerAlias(acptr) || !(bs = bounce_get_session(acptr)))
     return n;
   for (ai = 0; ai < bs->hs_alias_count; ai++) {
@@ -280,31 +285,35 @@ static int fwd_label_owners(struct Client *acptr, struct Client **owners, int ma
   return n;
 }
 
-/** Whether a reply to \a from's forwarded command could be answered with
- * a label on this server: \a from uses labeled-response, or another
- * connection of its bouncer session here does (the replies of every
- * member's commands come addressed to the primary, and must be kept
- * apart from the labeled member's). */
+/** Whether the replies to \a from's forwarded command have to be told
+ * apart from another command's on this server:
+ *  - \a from uses labeled-response, or another connection of its bouncer
+ *    session here does (the reply may have to carry a label, or must not
+ *    be taken for a labeled command's);
+ *  - \a from is a bouncer device: its command goes out under its
+ *    primary's numeric, or toward its primary's server, and the reply
+ *    comes back addressed to the primary;
+ *  - \a from is a primary whose session has another connection, here or
+ *    on another server: that connection's replies come addressed to it.
+ * Remembered for none of them, a reply was copied to every connection of
+ * the session on the primary's server, and never reached a device on
+ * another one.  Remembered, it goes to the connection whose command it
+ * answers (do_numeric()), labels or not. */
 static int fwd_labels_in_session(struct Client *from)
 {
   struct Client *owners[FWD_OWNERS_MAX];
-  struct Client *prim = from;
-  int n, i;
+  int n, remote;
 
   if (LabeledResponseInUse(from))
     return 1;
   if (IsBouncerAlias(from) && cli_user(from) && cli_user(from)->alias_primary)
-    prim = cli_user(from)->alias_primary;
-  if (!MyConnect(prim))
-    return 0;
-  n = fwd_label_owners(prim, owners, FWD_OWNERS_MAX, NULL);
-  for (i = 0; i < n; i++)
-    if (LabeledResponseInUse(owners[i]))
-      return 1;
-  return 0;
+    return 1;
+  n = fwd_label_owners(from, owners, FWD_OWNERS_MAX, &remote);
+  return n > 1 || remote;
 }
 
-int fwd_label_forward(struct Client *from, const char *cmd, struct Client *dest,
+int fwd_label_forward(struct Client *from, struct Client *asker,
+                      const char *cmd, struct Client *dest,
                       int parc, char *parv[], char *msgid, uint64_t *time_out)
 {
   struct ForwardedLabel *fl = NULL;
@@ -329,12 +338,13 @@ int fwd_label_forward(struct Client *from, const char *cmd, struct Client *dest,
     return 0;
   }
 
-  /* No connection that could be answered with labels -- this one, or
-   * another of its bouncer session here, whose replies come addressed to
-   * the same primary -- has nothing to keep apart, and is not tracked.
-   * The command is marked: if labels come into use before its replies
-   * are in, they are not taken for a labeled command's. */
-  if (!fwd_labels_in_session(from)) {
+  /* A connection with nothing to keep apart -- no labels in use on it or
+   * on another connection of its bouncer session here, and no other
+   * connection of that session here whose replies come addressed to the
+   * same primary -- is not tracked.  The command is marked: if labels
+   * come into use before its replies are in, they are not taken for a
+   * labeled command's. */
+  if (!asker && !fwd_labels_in_session(from)) {
     fwd_mark_untracked(from, 1u << fam);
     return 0;
   }
@@ -345,7 +355,7 @@ int fwd_label_forward(struct Client *from, const char *cmd, struct Client *dest,
    * reply then joins that batch if it can be taken over
    * (fwd_label_adoptable()), else the command is tracked unlabeled and
    * its reply goes out plain. */
-  labeled = LabeledResponseInUse(from) && cli_label(from)[0]
+  labeled = !asker && LabeledResponseInUse(from) && cli_label(from)[0]
             && (!cli_label_responded(from) || fwd_label_adoptable(from));
 
   /* (A family marked untracked is still tracked: a reply that may be the
@@ -404,6 +414,24 @@ int fwd_label_forward(struct Client *from, const char *cmd, struct Client *dest,
     cli_label(from)[0] = '\0';
   } else
     fl->fl_plain = 1;
+
+  if (asker) {
+    /* Sent on for a device on another server: the entry is its primary's
+     * (\a from), and says whose reply it is.  The msgid the command
+     * arrived with is kept, so the device's own server matches the reply
+     * by it too when we hand it back. */
+    struct Client *link = cli_from(asker);
+
+    snprintf(fl->fl_asker, sizeof(fl->fl_asker), "%s%s", NumNick(asker));
+    if (feature_bool(FEAT_P10_MESSAGE_TAGS) && link
+        && sendcmdto_stash_is_current(link) && cli_s2s_msgid(link)[0]
+        && strlen(cli_s2s_msgid(link)) < sizeof(fl->fl_msgid)) {
+      ircd_strncpy(fl->fl_msgid, cli_s2s_msgid(link), sizeof(fl->fl_msgid));
+      ircd_strncpy(msgid, fl->fl_msgid, 15);
+      *time_out = cli_s2s_time_ms(link);
+      return 1;
+    }
+  }
 
   /* Generate HLC msgid for compact tag correlation -- for an unlabeled
    * command too: a fork server's reply then comes back with it and is
@@ -466,8 +494,10 @@ struct ForwardedLabel *fwd_label_find(struct Client *acptr, const char *msgid)
        * the answer goes out as it would to a client without
        * labeled-response -- never into a batch the client cannot have.
        * (A CAP change that makes labels inert closes or forgets every
-       * entry at once, fwd_label_drop_all(); this is the backstop.) */
-      if (!LabeledResponseInUse(acptr)) {
+       * entry at once, fwd_label_drop_all(); this is the backstop.)
+       * An unlabeled command's entry needs no labels: it only says
+       * whose reply this is. */
+      if (!fl->fl_plain && !LabeledResponseInUse(acptr)) {
         memset(fl, 0, sizeof(*fl));
         return NULL;
       }
@@ -486,7 +516,7 @@ struct ForwardedLabel *fwd_label_find_for(struct Client *acptr, const char *msgi
   int no, o;
 
   *owner = NULL;
-  if (!acptr || !MyConnect(acptr) || !msgid || !msgid[0])
+  if (!acptr || !IsUser(acptr) || !msgid || !msgid[0])
     return NULL;
   no = fwd_label_owners(acptr, owners, FWD_OWNERS_MAX, NULL);
   for (o = 0; o < no; o++)
@@ -512,16 +542,17 @@ struct ForwardedLabel *fwd_label_match(struct Client *acptr, int numeric,
 
   *owner = NULL;
   *fit = FWD_FIT_NO;
-  if (!acptr || !MyConnect(acptr) || !link || !IsServer(link))
+  if (!acptr || !IsUser(acptr) || !link || !IsServer(link))
     return NULL;
 
   /* What none of these connections tracked may be answered by this reply
-   * too: their untracked commands, and -- for a session with a device on
-   * another server, whose commands go out there under the primary's
-   * numeric and come back here unseen -- anything at all. */
+   * too: their untracked commands.  (A session's device on another server
+   * used to make every reply one of those: its commands came back here
+   * unseen.  They are remembered now by the server that sends them on
+   * under the primary's numeric -- this one, in its primary's entries
+   * with fl_asker, or the device's own.) */
   no = fwd_label_owners(acptr, owners, FWD_OWNERS_MAX, &remote);
-  if (remote)
-    untracked = FWD_UNTRACKED_ALL;
+  (void)remote;
   for (o = 0; o < no; o++) {
     untracked |= fwd_untracked_mask(owners[o]);
     for (i = 0; i < MAX_FORWARDED_LABELS; i++) {
@@ -573,6 +604,19 @@ struct ForwardedLabel *fwd_label_match(struct Client *acptr, int numeric,
   }
   *owner = who[pick];
   return fls[pick];
+}
+
+struct Client *fwd_label_asker(struct Client *owner, struct ForwardedLabel *fl)
+{
+  struct Client *device;
+
+  if (!fl || !fl->fl_asker[0])
+    return owner;
+  device = findNUser(fl->fl_asker);
+  if (device && IsBouncerAlias(device) && cli_user(device)
+      && cli_user(device)->alias_primary == owner)
+    return device;
+  return NULL;
 }
 
 int fwd_label_reply_ends(struct Client *owner, struct ForwardedLabel *fl, int fit)

@@ -102,8 +102,6 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
     struct Client *from = (feature_bool(FEAT_HIS_REWRITE) && !IsOper(acptr)) ? &me : sptr;
 
     if (MyConnect(acptr)) {
-      const char *incoming_msgid = cli_s2s_msgid(cptr);
-
       /* The primary's server refused a bouncer device's nick request
        * (BX W): that request is answered, and a return of it can no
        * longer be applied.  Only a refusal of the nick the device asked
@@ -125,18 +123,25 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
           cli_nickask_ts(acptr) = 0;
       }
 
-      /* Check for forwarded label batch wrapping.  The command may be a
-       * bouncer device's, sent on under this primary's numeric: its
-       * entry, and its labeled answer, are the device's (owner). */
+    }
+
+    /* Whose forwarded command does it answer?  A bouncer device's command
+     * goes out under its primary's numeric (hunt_server_cmd(): legacy
+     * servers do not know the device), from the server where its route
+     * leaves the way to the primary -- the device's own, or the primary's.
+     * The reply comes back through that server addressed to the primary,
+     * and the entry is the asker's: the device's connection here, or --
+     * for a device on another server -- the primary's, naming the device.
+     * A matched reply goes to the asker and to nobody else; \a acptr may
+     * be a primary on another server, the reply passing through. */
+    {
+      const char *incoming_msgid = cli_s2s_msgid(cptr);
       struct Client *owner = NULL;
       struct ForwardedLabel *fl = fwd_label_find_for(acptr, incoming_msgid, &owner);
-      if (fl && fl->fl_plain) {
-        /* An unlabeled command's reply, matched by its msgid: it goes out
-         * plain, below; its end frees the entry. */
-        if (fwd_label_exact_ends(fl, numeric))
-          fwd_label_close_batch(owner, fl);
-        fl = NULL;
-      } else if (fl) {
+      int fit = 0;
+      int matched_plain = 0;
+
+      if (fl && !fl->fl_plain) {
         if (fl->fl_state == FWD_LABEL_PENDING)
           fwd_label_open_batch(owner, fl);
 
@@ -169,32 +174,62 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
         return 0;
       }
 
+      if (fl) {
+        /* An unlabeled command's reply, matched by its msgid. */
+        matched_plain = 1;
+      }
       /* No msgid: a legacy server answered (or a fork hop on the way
        * dropped it).  The reply is matched by what it names -- its
        * family and subject, over the link it came in on -- never by when
        * it arrives (fwd_label_match()); one that matches no command of
        * the asker's, or cannot be told apart, goes out plain, below. */
-      else if (!incoming_msgid[0]) {
-        int fit;
-
-        if ((fl = fwd_label_match(acptr, numeric, parv[2], cptr, sptr,
-                                  &owner, &fit))) {
-          if (!fl->fl_plain) {
-            if (fl->fl_state == FWD_LABEL_PENDING)
-              fwd_label_open_batch(owner, fl);
-            sendcmdto_set_fwd_batch(fl->fl_batch_id);
-            sendcmdto_one_tags(from, num, num, owner, "%C %s", acptr, parv[2]);
-            fwd_label_reply_ends(owner, fl, fit);
-            return 0;
-          }
+      else if (!incoming_msgid[0]
+               && (fl = fwd_label_match(acptr, numeric, parv[2], cptr, sptr,
+                                        &owner, &fit))) {
+        if (!fl->fl_plain) {
+          if (fl->fl_state == FWD_LABEL_PENDING)
+            fwd_label_open_batch(owner, fl);
+          sendcmdto_set_fwd_batch(fl->fl_batch_id);
+          sendcmdto_one_tags(from, num, num, owner, "%C %s", acptr, parv[2]);
           fwd_label_reply_ends(owner, fl, fit);
+          return 0;
         }
+        matched_plain = 2;
+      }
+
+      if (matched_plain) {
+        /* Plain, to the connection that sent the command and to no other
+         * (it used to go to the primary and be copied to every device of
+         * the session there, and never reached a device on another
+         * server). */
+        struct Client *to = fwd_label_asker(owner, fl);
+
+        if (to && MyConnect(to))
+          sendcmdto_one(from, num, num, to, "%C %s", acptr, parv[2]);
+        else if (to) {
+          /* A device on another server: under ITS numeric, so its server
+           * delivers the reply to it alone, with the msgid for that
+           * server to match its own entry by. */
+          if (cli_s2s_msgid(cptr)[0] && cli_s2s_time_ms(cptr))
+            sendcmdto_set_s2s_tags(cli_s2s_time_ms(cptr), cli_s2s_msgid(cptr));
+          sendcmdto_one(from, num, num, to, "%C %s", to, parv[2]);
+        }
+        if (matched_plain == 1) {
+          if (fwd_label_exact_ends(fl, numeric))
+            fwd_label_close_batch(owner, fl);
+          if (MyConnect(acptr))
+            fwd_label_close_draining(acptr);
+        } else
+          fwd_label_reply_ends(owner, fl, fit);
+        return 0;
       }
 
       /* Numeric with different/no msgid: close any DRAINING batches */
-      if (!fl)
+      if (MyConnect(acptr))
         fwd_label_close_draining(acptr);
-    } else {
+    }
+
+    if (!MyConnect(acptr)) {
       /* Remote client: relay numeric, preserving compact tag for correlation */
       if (cli_s2s_msgid(cptr)[0] && cli_s2s_time_ms(cptr))
         sendcmdto_set_s2s_tags(cli_s2s_time_ms(cptr), cli_s2s_msgid(cptr));
@@ -205,11 +240,13 @@ int do_numeric(int numeric, int nnn, struct Client *cptr, struct Client *sptr,
     /* Bouncer: a numeric that arrived over S2S addressed to a local
      * primary is a reply to something the SESSION did -- and after the
      * alias->primary egress rewrite (hunt_server_cmd, ircd_relay) the
-     * device that actually asked may be one of the aliases.  Mirror it
-     * to every local alias so replies never land only on another
-     * device.  Plain path only: label-batched numerics belong to the
-     * primary connection's batch and would be discarded by an alias
-     * that never opened it. */
+     * device that actually asked may be one of the aliases.  A reply
+     * matched to the forwarded command it answers has gone to the
+     * connection that sent it, above, and to no other.  What reaches
+     * here matched none (a command that is not tracked, a reply that
+     * names nothing, two commands it could answer equally): it is
+     * mirrored to every local alias, so it never lands only on another
+     * device than the one that asked. */
     if (MyConnect(acptr) && !IsBouncerAlias(acptr)) {
       struct BouncerSession *bs = bounce_get_session(acptr);
       if (bs && bs->hs_alias_count > 0) {

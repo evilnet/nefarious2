@@ -431,6 +431,10 @@ struct ForwardedLabel {
   char                     fl_subject[FWD_SUBJECT_MAX]; /**< What it asked about (fwd_match.h) */
   char                     fl_dest[4];     /**< Numeric of the server it was sent to */
   char                     fl_link[4];     /**< Numeric of our link it went out on */
+  char                     fl_asker[6];    /**< "" = this connection sent the command;
+                                                else the numeric of the bouncer device
+                                                on another server it was sent on for
+                                                (the entry is its primary's, fl_plain) */
   unsigned long            fl_seq;         /**< Send order (oldest answered first) */
   unsigned char            fl_family;      /**< enum FwdFamily */
   unsigned char            fl_plain;       /**< No label to answer: tracked to keep its replies apart */

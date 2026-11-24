@@ -44,6 +44,7 @@ struct ForwardedLabel *fwd_label_match(struct Client *a, int n, const char *p, s
 { (void)a; (void)n; (void)p; (void)l; (void)s; if (o) *o = NULL; if (fit) *fit = 0; return NULL; }
 void fwd_label_open_batch(struct Client *a, struct ForwardedLabel *fl) { (void)a; (void)fl; }
 int fwd_label_reply_ends(struct Client *o, struct ForwardedLabel *fl, int fit) { (void)o; (void)fl; (void)fit; return 0; }
+struct Client *fwd_label_asker(struct Client *o, struct ForwardedLabel *fl) { (void)fl; return o; }
 void sendcmdto_channel_butone(struct Client *f, const char *c, const char *t, struct Channel *to,
                               struct Client *one, unsigned int skip, unsigned char prefix,
                               const char *pattern, ...)
