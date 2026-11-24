@@ -2288,6 +2288,47 @@ void send_umode_out(struct Client *cptr, struct Client *sptr,
 }
 
 
+/** send_umode_out() for a mode change a local device (alias) made to its
+ * session's primary on ANOTHER server.
+ *
+ * The line used to go to every link under the primary's numeric.  The
+ * primary's own server drops a line for its user that arrives from another
+ * server (a wrong direction), so it never learned the change: it told
+ * nobody behind it, the primary's socket was not told, and a -o left that
+ * server, the legacy servers behind it and X3 holding an oper.
+ *
+ * Toward the primary's server the line now goes under the DEVICE's numeric,
+ * the carrier /OPER on a device already uses (m_mode.c, "Alias->primary
+ * mode sync"): that server applies it to its user as a server's mode
+ * change, tells the socket and its own devices, and announces it under the
+ * primary's numeric to every link.  The other links are told here, under
+ * the primary's numeric, as before.  The user rules (no self +o, the +p
+ * rule) were applied by this server, where the device typed the command.
+ *
+ * @param[in] device  The local device that changed the mode.
+ * @param[in] primary Its session's primary, another server's user.
+ * @param[in] old     The primary's flags before the change.
+ * @param[in] prop    If non-zero, also include FLAG_OPER. */
+static void send_umode_out_device(struct Client *device, struct Client *primary,
+                                  struct Flags *old, int prop)
+{
+  struct Client *toward = cli_from(primary);
+  struct Client *acptr;
+  int i;
+
+  send_umode(NULL, primary, old, prop ? SEND_UMODES : SEND_UMODES_BUT_OPER);
+
+  for (i = HighestFd; i >= 0; i--)
+  {
+    if (!(acptr = LocalClientArray[i]) || !IsServer(acptr) || !*umodeBuf)
+      continue;
+    sendcmdto_one(acptr == toward ? device : primary, CMD_MODE, acptr,
+                  "%s %s", cli_name(primary), umodeBuf);
+  }
+  send_umode(device, primary, old, ALL_UMODES);
+}
+
+
 /** Call \a fmt for each Client named in \a names.
  * @param[in] sptr Client requesting information.
  * @param[in] names Space-delimited list of nicknames.
@@ -3780,7 +3821,11 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
 
     assert(UserStats.opers <= UserStats.clients + UserStats.unknowns);
     assert(UserStats.inv_clients <= UserStats.clients + UserStats.unknowns);
-    send_umode_out(cptr, acptr, &setflags, prop);
+    if (MyUser(sptr) && IsBouncerAlias(sptr) && sptr != acptr
+        && !MyConnect(acptr) && IsIRCv3Aware(cli_from(acptr)))
+      send_umode_out_device(sptr, acptr, &setflags, prop);
+    else
+      send_umode_out(cptr, acptr, &setflags, prop);
 
     if (force) /* Let the user know */
       send_umode_out(acptr, acptr, &setflags, 1);
