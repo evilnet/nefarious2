@@ -3141,7 +3141,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
    * another server, which sends it here under the device's numeric
    * (send_umode_out_device()); ms_mode() applies it as the link's mode
    * change with ALLOWMODES_ALIAS_SYNC, so the device itself is not
-   * sptr here. */
+   * sptr here.  Such a change only changes the mode here: that server
+   * ends a session (BS E) and writes the account's rows. */
   int remote_device = 0;
   /* This command logged a registered user in (+r): the account's modes
    * follow, after the write (metadata_mode_sync_restore). */
@@ -3512,8 +3513,11 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
            * function, after the mode line and the session sync (joining
            * mid-loop would send this command's mode line from an alias).
            * A refusal sets nothing: no +b, no preference, nothing on the
-           * wire (U2); an earlier -b in this command then stands. */
-          if (MyUser(acptr)) {
+           * wire (U2); an earlier -b in this command then stands.
+           * Not for a +b a device of ours on another server typed: that
+           * device is in the session already, and its server decided the
+           * mode (remote_device: the mode only changes here). */
+          if (MyUser(acptr) && !remote_device) {
             plan = bounce_hold_on_plan_for(acptr);
             if (bounce_hold_on_refused(plan)) {
               /* Whoever asked: a user of ours (an oper's SVSMODE too), else
@@ -3546,7 +3550,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
            * route for the end; the mode line only changes the mode).
            * Toward a holder without the carry the device's server ends
            * its own copy and tells the preference by METADATA; this
-           * server's session stays. */
+           * server's session stays.  No row is written here either
+           * (umode_md_write() below). */
           if ((MyUser(acptr) && !remote_device) || asker_device)
             session = bounce_get_session(acptr);
           ClearBncHoldPref(acptr);
@@ -3559,9 +3564,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
            * another server, which writes it (to every server) when it
            * accepts the end.  Written after the mode loop (a +b later in
            * this command cancels it), before the mode line goes out. */
-          hold_off = !remote_device
-                     && (!session
-                         || bounce_end_asker_applies(bounce_member_end_route(session)));
+          hold_off = !session
+                     || bounce_end_asker_applies(bounce_member_end_route(session));
           /* A primary on another server never sees this mode change (its
            * server drops the M line, sourced from its own client, as a
            * fake direction): the server of the device that asked writes
@@ -3969,7 +3973,13 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     umode_md_note(umd, &umd_n, acptr, "draft/persistence/hold", "0",
                   METADATA_VIS_PRIVATE);
   umode_md_finalize(umd, &umd_n, acptr, &setflags);
-  umode_md_write(umd, umd_n, cptr, acptr, asker_device);
+  /* One writer for a device's mode change (owner, 2026-11-25): the server
+   * of the device that typed it writes the account's rows (asker_device);
+   * the primary's server, which takes the change under the device's
+   * numeric, changes the mode and writes none (it wrote them too, so each
+   * row went out twice, the second back toward the device's server). */
+  if (!remote_device)
+    umode_md_write(umd, umd_n, cptr, acptr, asker_device);
   /* Channel messages skip a deaf member, so +d/-d on a local user may
    * change whether this server receives its channels (receive windows,
    * W5 Task 9).  Before the hold tail below, which may exit acptr. */
