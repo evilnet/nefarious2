@@ -614,6 +614,12 @@ extern void metadata_free_entry(struct MetadataEntry *entry);
  * @param[in] cptr Client being freed.
  */
 extern void metadata_free_client(struct Client *cptr);
+/** Drop @a cptr's in-memory metadata list only: no store row, no
+ * subscription, no notice.  For a session device whose account is
+ * cleared (bounce_apply_alias_field): it held the account's keys, which
+ * the account's deauth removes (metadata_clear_client() on the primary).
+ */
+extern void metadata_clear_client_memory(struct Client *cptr);
 
 /** Free all metadata for a channel (called on channel destruction).
  * @param[in] chptr Channel being freed.

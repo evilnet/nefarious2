@@ -3206,6 +3206,15 @@ void metadata_burst_self_to_client(struct Client *to, int path)
   send_batch_end(to);
 }
 
+/** See include/metadata.h. */
+void metadata_clear_client_memory(struct Client *cptr)
+{
+  if (!cptr)
+    return;
+  free_entry_list(cli_metadata(cptr));
+  cli_metadata(cptr) = NULL;
+}
+
 /** Clear all metadata for a client.
  * @param[in] cptr Client to clear.
  */
@@ -3220,8 +3229,7 @@ void metadata_clear_client(struct Client *cptr)
   if (cli_user(cptr) && cli_user(cptr)->account[0])
     account = cli_user(cptr)->account;
 
-  free_entry_list(cli_metadata(cptr));
-  cli_metadata(cptr) = NULL;
+  metadata_clear_client_memory(cptr);
 
   /* Clear from LMDB for logged-in users */
   if (account && metadata_lmdb_is_available()) {

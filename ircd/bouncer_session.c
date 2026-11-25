@@ -12499,6 +12499,16 @@ void bounce_apply_alias_field(struct Client *alias, enum BounceAliasField id,
       ClearAccount(alias);
       cli_user(alias)->acc_create = 0;
       cli_user(alias)->kc_id[0] = '\0';
+      /* The device held the account's metadata (every client of an
+       * account does, private keys included) and the account is gone:
+       * drop this copy's list, here and on every server this runs on.
+       * The deauth clears the primary's list and the stored rows
+       * (metadata_clear_client); without this the device kept them,
+       * shown on its own LIST and, the public ones, to a channel joiner
+       * under the primary's nick (owner, 2026-11-25).  Memory only:
+       * a store row is the account's, and its subscriptions are the
+       * connection's. */
+      metadata_clear_client_memory(alias);
     }
     break;
   }
