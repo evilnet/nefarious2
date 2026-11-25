@@ -3137,6 +3137,12 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
   struct umode_md umd[UMODE_MD_MAX];
   int umd_n = 0;
   int asker_device = 0;
+  /* remote_device: the command was typed by a device of our user on
+   * another server, which sends it here under the device's numeric
+   * (send_umode_out_device()); ms_mode() applies it as the link's mode
+   * change with ALLOWMODES_ALIAS_SYNC, so the device itself is not
+   * sptr here. */
+  int remote_device = 0;
   /* This command logged a registered user in (+r): the account's modes
    * follow, after the write (metadata_mode_sync_restore). */
   int account_login = 0;
@@ -3222,6 +3228,8 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
     snoc = sptr;
   asker_device = MyConnect(sptr) && IsBouncerAlias(sptr)
                  && cli_alias_primary(sptr) == acptr;
+  remote_device = MyUser(acptr) && IsServer(sptr)
+                  && (allow_modes & ALLOWMODES_ALIAS_SYNC);
 
   if (parc < 3)
   {
@@ -3531,8 +3539,15 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
           struct BouncerSession *session = NULL;
 
           /* The session to end: ours, or the one a device of ours of a
-           * primary on another server is in. */
-          if (MyUser(acptr) || asker_device)
+           * primary on another server is in.  Not when a device of ours
+           * on another server typed it: its server sends the end itself
+           * (BS E, bounce_end_carry()), and the holder ends the session
+           * and writes the preference from that (owner, 2026-11-25: one
+           * route for the end; the mode line only changes the mode).
+           * Toward a holder without the carry the device's server ends
+           * its own copy and tells the preference by METADATA; this
+           * server's session stays. */
+          if ((MyUser(acptr) && !remote_device) || asker_device)
             session = bounce_get_session(acptr);
           ClearBncHoldPref(acptr);
           /* A +b earlier in this command does not stand: its join or
@@ -3544,8 +3559,9 @@ int set_user_mode(struct Client *cptr, struct Client *sptr, int parc,
            * another server, which writes it (to every server) when it
            * accepts the end.  Written after the mode loop (a +b later in
            * this command cancels it), before the mode line goes out. */
-          hold_off = !session
-                     || bounce_end_asker_applies(bounce_member_end_route(session));
+          hold_off = !remote_device
+                     && (!session
+                         || bounce_end_asker_applies(bounce_member_end_route(session)));
           /* A primary on another server never sees this mode change (its
            * server drops the M line, sourced from its own client, as a
            * fake direction): the server of the device that asked writes
