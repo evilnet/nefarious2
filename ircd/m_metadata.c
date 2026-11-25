@@ -1778,10 +1778,12 @@ static int ms_metadata_session(struct Client *cptr, struct Client *sptr,
    * inspected -- already >= 2 matches, so this can never be "exactly
    * one" no matter how the unscanned remainder would have filtered. */
   if (total > (size_t)MD_SESSION_SCAN_MAX || qualified != 1) {
-    log_write(LS_SYSTEM, L_DEBUG, 0,
-              "ms_metadata: session target !%s/%s from %C matched %zu "
-              "client(s), %zu unauthenticated - dropped, not relayed",
-              sessid, key, sptr, total, qualified);
+    /* Nobody here: most often an id this server never learned (a server
+     * with P10_MESSAGE_TAGS FALSE between the client and here, or the
+     * setting changed without a relink -- every fork server must run the
+     * same value: doc/readme.features).  Several: clients sharing one id
+     * with no account.  Logged; opers told once per link per 600 s. */
+    mdsync_session_miss_notice(cptr, sptr, target, key, total, qualified);
     return 0;
   }
 

@@ -2287,7 +2287,17 @@ sent, so a fork peer with this FALSE still receives tags; a legacy peer
 (a stock ircu server, X3) never gets them.  While this is TRUE the
 SERVER line also announces flag H (the bouncer hold marks); H is sent
 only in the SERVER line, so after changing this at runtime, SQUIT and
-relink.
+relink (the server logs a warning and tells opers on the network
+snomask when it changes with links up).
+
+Run the same value on every fork server.  Each server learns a client's
+session id from the region on the client's N line; behind a server with
+this FALSE, or for a client introduced before a runtime change, a
+server makes up its own id.  Metadata of a client with no account is
+addressed by its session id ("MD !<id>"), so such a server drops it
+(logged at L_WARNING; opers told once per link per 600 s).  The
+bouncer relies on the same ids and on flag H, so a mixed setting
+breaks it as well.
 
 Upgrade note: before this default changed, a server with no
 P10_MESSAGE_TAGS line sent no tags and announced no H.  It now does

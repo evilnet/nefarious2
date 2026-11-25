@@ -544,6 +544,30 @@ feature_notify_compress_level(void)
 }
 #endif /* USE_ZSTD */
 
+/** P10_MESSAGE_TAGS changed (SET, RESET, REHASH).  What a server sends
+ * only at link time does not follow the change on links already up: the
+ * SERVER line's flag H, and the session id each client's N carried (a
+ * client introduced while this was FALSE has a different id on every
+ * peer, so a "!sessid" METADATA row for it is dropped there).  Tell the
+ * operator to relink.  Silent before the server is set up (the conf's
+ * first parse) and with no server link. */
+static void
+feature_notify_p10_message_tags(void)
+{
+  if (!cli_serv(&me) || !cli_serv(&me)->down)
+    return;
+  log_write(LS_SYSTEM, L_WARNING, 0,
+            "P10_MESSAGE_TAGS changed to %s with server links up: SQUIT "
+            "and relink them (link-time flag H and session ids do not "
+            "follow the change)",
+            feature_bool(FEAT_P10_MESSAGE_TAGS) ? "TRUE" : "FALSE");
+  sendto_opmask_butone(0, SNO_NETWORK,
+                       "P10_MESSAGE_TAGS changed to %s with server links up; "
+                       "SQUIT and relink them (flag H and session ids are "
+                       "only exchanged at link time)",
+                       feature_bool(FEAT_P10_MESSAGE_TAGS) ? "TRUE" : "FALSE");
+}
+
 /* Forward declarations for mutual dependency */
 static void feature_notify_chathistory_caps(void);
 static void feature_notify_multiline(void);
@@ -1520,7 +1544,7 @@ static struct FeatureDesc {
   F_S(WEBSOCKET_ORIGIN, 0, "", 0),
   F_I(WEBSOCKET_PING_INTERVAL, 0, 30, 0),
   F_B(MSGID, 0, 1, 0),
-  F_B(P10_MESSAGE_TAGS, 0, 1, 0),
+  F_B(P10_MESSAGE_TAGS, 0, 1, feature_notify_p10_message_tags),
   F_S(AWAY_STAR_MSG, FEAT_NULL, "Away", 0),
   F_I(HLC_MAX_FORWARD_MS, 0, 60000, 0),
   F_I(AWAY_THROTTLE, 0, 0, 0),

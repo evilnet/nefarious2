@@ -406,8 +406,42 @@ int metadata_client_write(struct Client *src, struct Client *target,
 
 /** Minimum gap between SNO_NETWORK notices for the same link's
  * over-limit MD writes (W4 plan 1.8: "at most once per link per
- * 600 s"). */
+ * 600 s"), and likewise for its unresolved "!sessid" rows. */
 #define MDSYNC_LIMIT_NOTICE_INTERVAL_S 600
+
+void mdsync_session_miss_notice(struct Client *link, struct Client *sptr,
+                                const char *target, const char *key,
+                                size_t total, size_t qualified)
+{
+  struct MdSyncLink *st;
+
+  if (!link || !sptr || !target || !key)
+    return;
+
+  log_write(LS_SYSTEM, L_WARNING, 0,
+            "ms_metadata: session target %s/%s from %C (via %C) matched "
+            "%zu client(s), %zu with no account - dropped, not relayed",
+            target, key, sptr, link, total, qualified);
+
+  st = mdsync_link_state(link);
+  if (!st)
+    return;
+  if ((CurrentTime - st->sessid_notice_last) < MDSYNC_LIMIT_NOTICE_INTERVAL_S)
+    return;
+  st->sessid_notice_last = CurrentTime;
+
+  if (total == 0)
+    sendto_opmask_butone(0, SNO_NETWORK,
+                         "METADATA from %C names a session id unknown here "
+                         "(%s); every fork server must run the same "
+                         "P10_MESSAGE_TAGS, and a change needs a relink",
+                         link, target);
+  else
+    sendto_opmask_butone(0, SNO_NETWORK,
+                         "METADATA from %C names a session id held here by "
+                         "%zu client(s), %zu with no account (%s); dropped",
+                         link, total, qualified, target);
+}
 
 void mdsync_limit_notice(struct Client *link, const char *target,
                          const char *key, const char *why)

@@ -50,6 +50,10 @@ struct MdSyncLink {
   time_t limit_notice_last;  /**< CurrentTime of the last SNO_NETWORK
                                *   over-limit notice sent for this link
                                *   (0 = none yet); Task 5, W4 plan 1.8. */
+  time_t sessid_notice_last; /**< CurrentTime of the last SNO_NETWORK
+                               *   notice for a "!sessid" row from this
+                               *   link that named no one client here
+                               *   (mdsync_session_miss_notice()). */
 
   /** Task 10: this link's end-of-burst re-pull queue.  Built once by
    * mdsync_link_eob() (every attached account on the whole network,
@@ -220,6 +224,18 @@ extern void mdsync_answer_pull(struct Client *link, unsigned long seq,
  *            METADATA_MAX_KEYS %d", the latter two already formatted
  *            with the live limit by the caller.
  */
+/** Log a "!sessid" row from @a link that this server could not apply:
+ * the id names @a qualified clients with no account here (out of @a
+ * total with that id), where exactly one is needed.  The usual cause is
+ * a session id this server never learned -- P10_MESSAGE_TAGS FALSE on a
+ * server between the client and here, or changed at runtime without a
+ * relink -- so opers on SNO_NETWORK are told too, at most once per link
+ * per 600 s.  The ircd log gets every hit.
+ */
+extern void mdsync_session_miss_notice(struct Client *link,
+                                       struct Client *sptr,
+                                       const char *target, const char *key,
+                                       size_t total, size_t qualified);
 extern void mdsync_limit_notice(struct Client *link, const char *target,
                                 const char *key, const char *why);
 
